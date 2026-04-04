@@ -1,0 +1,16 @@
+# Core dependencies
+torch>=1.12
+transformers>=4.35
+Pillow
+tqdm
+
+# YOLO
+ultralytics
+
+# OpenCLIP (extra-content-aware ViT-H support)
+open_clip_torch
+
+# Optional:
+# For image loading in OpenCLIP transforms (uses torchvision under the hood)
+torchvision
+pywinstyles

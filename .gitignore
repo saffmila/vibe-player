@@ -1,0 +1,88 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments (never commit)
+venv/
+.venv/
+env/
+
+# --- Lokální stav / data (JSON) ---
+*.json
+
+# --- SQLite a podobné DB soubory ---
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# --- Náhledy / cache aplikace ---
+thumbnail_cache/
+bookmarks/
+
+# Tag engine cache (velké binárky, generuje se lokálně)
+app/tag_engine/cache_*.pkl
+
+# --- FFmpeg / externí binárky (každý si doplní sám do tools/) ---
+tools/
+
+# --- AI váhy (YOLO, ONNX, … — uživatel si stáhne / vloží do app/models/) ---
+app/models/**/*.pt
+app/models/**/*.pth
+app/models/**/*.onnx
+app/models/**/*.engine
+app/models/**/*.safetensors
+app/models/**/*.ckpt
+
+# --- Logy a debug výstupy ---
+*.log
+*.log.*
+vlc-log.txt
+install_log.txt
+startup_errors.txt
+trace start.txt
+update.txt
+
+# Lokální debug spouštěč (volitelné — nechávej mimo git, pokud je jen u tebe)
+run_debug.bat
+
+# Výstupy cProfile zůstávají mimo repozitář (profilovací .bat ukládají do profiling/)
+# — už pokrývá globální *.prof níže
+
+# --- Testy / nástroje ---
+.pytest_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+coverage.xml
+*.prof
+profiling/*_tottime.txt
+profiling/*_cumtime.txt
+
+# --- Lokální systémové / asociace (Windows) ---
+*.reg
+
+# --- IDE / OS ---
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# --- Volitelné lokální poznámky ---
+update.txt
+backup.py
+
+# --- Tajemství (doporučeno) ---
+.env
+.env.*

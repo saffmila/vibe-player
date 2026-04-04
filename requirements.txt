@@ -1,0 +1,35 @@
+
+# core dependencies
+Pillow==10.4.0
+opencv-python==4.8.1.78
+numpy==1.26.4
+customtkinter==5.2.0
+imageio==2.33.1
+sounddevice==0.4.6
+python-vlc==3.0.18122
+screeninfo==0.8.1
+pynput==1.7.6
+CTkListbox==0.3
+pymediainfo==6.1.0
+watchdog==3.0.0
+psutil==5.9.8
+chardet==5.2.0
+pywin32>=307
+pyglet==2.0.10
+tkinterdnd2-universal==1.7.3
+alembic==1.13.1
+dataset
+
+# Plugin dependencies
+tqdm==4.66.2
+transformers>=4.35
+torch>=1.12
+open_clip_torch
+dill>=0.4.1
+
+# Optional: YOLOv8 support
+ultralytics
+scipy
+pycocotools
+
+

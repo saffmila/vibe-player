@@ -1,0 +1,237 @@
+#   Female
+long hair
+makeup
+skirt
+leggings
+earrings
+yoga pants
+short pants
+hot pants
+workout shorts
+red lips
+pink lips
+eye lashes
+mini skirt
+tank top
+tanned skin
+breasts
+large breasts
+high heels
+nail polish
+blouse
+dress
+handbag
+jewelry
+necklace
+bracelet
+ring
+high waist
+pencil skirt
+ballet flats
+sandals
+pumps
+thin straps
+cleavage
+mascara
+eye shadow
+lipstick
+blush
+groomed brows
+shoulder bag
+clutch bag
+scarf
+tights
+stockings
+hair clips
+hair ties
+feminine
+fitted
+waist
+delicate
+manicured nails
+off shoulder
+wrap dress
+floral
+lace
+ruffles
+statement jewelry
+delicate jewelry
+pointed toe
+rounded toe
+wedge heels
+platform shoes
+sun dress
+maxi dress
+cocktail dress
+evening gown
+jumpsuit
+cardigan
+light jacket
+shawl
+ear cuffs
+choker
+layered
+stackable
+bangles
+cat eye
+oversized
+small frame
+feminine watch
+delicate strap
+smartwatch
+small dog
+feminine pose
+smiling
+soft expression
+flowers
+wine glass
+pastel
+bright colors
+flowing dress
+sheer fabric
+corset
+bodysuit
+lingerie
+robe
+stilettos
+ankle boots
+knee boots
+thigh boots
+espadrilles
+halter top
+tube top
+sleeveless top
+sleeveless dress
+crop top
+bralette
+contouring
+highlight
+smoky eye
+winged liner
+false lashes
+lip gloss
+lip liner
+hair extensions
+wavy hair
+curly hair
+updo
+high ponytail
+braids
+hair bun
+slim figure
+hourglass
+defined waist
+long legs
+hands hips
+over shoulder
+soft gaze
+sultry look
+small purse
+wide hat
+designer bag
+silk scarf
+sequins
+beads
+embroidery
+strapless dress
+one shoulder
+asymmetrical
+statement belt
+chain belt
+delicate sandals
+embellished heels
+hair jewelry
+headband
+painted nails
+gel nails
+elegant posture
+graceful
+sports bra
+bra
+
+#   Male
+short hair
+beard
+mustache
+tie
+unshaved face
+facial hair
+jacket
+sports watch
+big muscle
+biceps
+beard shadow
+muscular arms
+hairy arms
+broad shoulders
+bald head
+suit
+cargo pants
+short beard
+long beard
+stubble
+unshaven
+goatee
+bow tie
+leather jacket
+denim jacket
+dress shirt
+oxford shirt
+casual watch
+wrist watch
+strong jawline
+shaved head
+bald head
+crew cut
+slicked back hair
+undercut
+blazer
+vest
+trousers
+khakis
+sneakers
+loafers
+fedora
+backpack
+briefcase
+masculine
+strong build
+tall
+buzz cut
+sideburns
+pocket square
+cufflinks
+tie clip
+masculine watch
+rugged watch
+strong hands
+serious expression
+carrying a tool
+drinking beer
+dark colors
+earth tones
+striped shirt
+plaid shirt
+leather shoes
+work boots
+beanie
+flat cap
+duffel bag
+messenger bag
+strong shoulders
+well-groomed beard
+trimmed mustache
+masculine jewelry
+sturdy belt
+large hands
+calloused hands
+wearing flannel shirt
+wearing work shirt
+wearing military jacket
+wearing hoodie
+wearing sweater
+wearing parka
+wearing trench coat
+carrying toolbox
+carrying fishing rod
+carrying rifle
