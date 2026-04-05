@@ -14,27 +14,27 @@ venv/
 .venv/
 env/
 
-# --- Lokální stav / data (JSON) ---
+# --- Local state / data (JSON) ---
 *.json
 
-# --- SQLite a podobné DB soubory ---
+# --- SQLite and similar DB files ---
 *.db
 *.db-wal
 *.db-shm
 *.sqlite
 *.sqlite3
 
-# --- Náhledy / cache aplikace ---
+# --- App thumbnails / cache ---
 thumbnail_cache/
 bookmarks/
 
-# Tag engine cache (velké binárky, generuje se lokálně)
+# Tag engine cache (large binaries, generated locally)
 app/tag_engine/cache_*.pkl
 
-# --- FFmpeg / externí binárky (každý si doplní sám do tools/) ---
+# --- FFmpeg / external binaries (user-provided in tools/) ---
 tools/
 
-# --- AI váhy (YOLO, ONNX, … — uživatel si stáhne / vloží do app/models/) ---
+# --- AI Weights (YOLO, ONNX, etc. — user must download to app/models/) ---
 app/models/**/*.pt
 app/models/**/*.pth
 app/models/**/*.onnx
@@ -42,7 +42,7 @@ app/models/**/*.engine
 app/models/**/*.safetensors
 app/models/**/*.ckpt
 
-# --- Logy a debug výstupy ---
+# --- Logs and debug outputs ---
 *.log
 *.log.*
 vlc-log.txt
@@ -51,13 +51,13 @@ startup_errors.txt
 trace start.txt
 update.txt
 
-# Lokální debug spouštěč (volitelné — nechávej mimo git, pokud je jen u tebe)
+# Local debug launcher (optional — keep out of git)
 run_debug.bat
 
-# Výstupy cProfile zůstávají mimo repozitář (profilovací .bat ukládají do profiling/)
-# — už pokrývá globální *.prof níže
+# cProfile outputs stay out of repository (profiling .bat files save to profiling/)
+# — already covered by global *.prof below
 
-# --- Testy / nástroje ---
+# --- Tests / Tools ---
 .pytest_cache/
 .mypy_cache/
 htmlcov/
@@ -67,7 +67,7 @@ coverage.xml
 profiling/*_tottime.txt
 profiling/*_cumtime.txt
 
-# --- Lokální systémové / asociace (Windows) ---
+# --- Local system / associations (Windows) ---
 *.reg
 
 # --- IDE / OS ---
@@ -79,10 +79,22 @@ profiling/*_cumtime.txt
 Thumbs.db
 Desktop.ini
 
-# --- Volitelné lokální poznámky ---
+# --- Optional local notes ---
 update.txt
 backup.py
 
-# --- Tajemství (doporučeno) ---
+# --- Secrets (recommended) ---
 .env
 .env.*
+
+# --- Vibe Player Specific Files (Cleanup) ---
+# Profiling outputs and debug logs
+app/*_cprofile.txt
+app/profile_paths_*.txt
+app/run_profiling.py
+
+# Redundant requirements (main file is in root)
+app/requirements.txt
+
+# The accidental 'git' file in root
+/git
