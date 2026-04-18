@@ -2574,6 +2574,15 @@ class VtpGridMixin:
             logging.info(f"[Single-Play] Playing single file: {target_path}")
             self.open_video_player(target_path, os.path.basename(target_path))
 
+    @staticmethod
+    def _parse_keyword_list_from_db(raw):
+        """Split stored keywords the same way as save/update paths (comma-separated, strip)."""
+        if raw is None:
+            return []
+        s = str(raw).strip()
+        if not s or s == "No keywords":
+            return []
+        return [k.strip() for k in s.split(",") if k.strip()]
 
     def open_remove_keyword_window(self, file_path):
         if not self.selected_thumbnails:
@@ -2582,19 +2591,20 @@ class VtpGridMixin:
 
         # gather unique keywords across all selected thumbnails
         all_keywords = set()
-        for file_path, _, _ in self.selected_thumbnails:
-            # handle NoneType gracefully
-            keywords = self.database.get_keywords(file_path) or ''  # default to empty string
-            all_keywords.update(keywords.split(', ') if keywords else [])
+        for thumb_path, _, _ in self.selected_thumbnails:
+            all_keywords.update(self._parse_keyword_list_from_db(self.database.get_keywords(thumb_path)))
 
         if not all_keywords:
             logging.info("No keywords found in the selected thumbnails")
             return
 
+        sorted_kw = sorted(all_keywords)
+
         # initialize keyword removal window
         self.remove_keyword_window = ctk.CTkToplevel(self)
         self.remove_keyword_window.title("Remove Keywords")
-        self._center_toplevel_window(self.remove_keyword_window, 400, 200)
+        self.remove_keyword_window.minsize(480, 200)
+        self._center_toplevel_window(self.remove_keyword_window, 520, 240)
         self.remove_keyword_window.transient(self)
 
         # create a CTkFrame for consistent layout
@@ -2606,37 +2616,28 @@ class VtpGridMixin:
 
         # initialize keyword selection variable and optionmenu
         self.keyword_var = ctk.StringVar(self.remove_keyword_window)
-        self.keyword_var.set(list(all_keywords)[0])  # default to the first keyword
+        self.keyword_var.set(sorted_kw[0])
 
         # optionmenu
         self.option_menu = ctk.CTkOptionMenu(
             frame,
             variable=self.keyword_var,
-            values=list(all_keywords)
+            values=sorted_kw,
         )
-        self.option_menu.configure(width=200)
         self.option_menu.pack(pady=5, fill="x")
 
-        # bind keyword removal
+        btn_row = ctk.CTkFrame(frame, fg_color="transparent")
+        btn_row.pack(fill="x", pady=(10, 0))
         ctk.CTkButton(
-            frame,
+            btn_row,
             text="Remove Selected Keyword",
-            command=self.remove_keyword_from_selection
-        ).pack(side="left", expand=True, padx=5, pady=5)
-
-        # remove all button
+            command=self.remove_keyword_from_selection,
+        ).pack(side="left", expand=True, fill="x", padx=(0, 5))
         ctk.CTkButton(
-            frame,
+            btn_row,
             text="Remove All",
-            command=self.remove_all_keywords_from_selection
-        ).pack(side="right", expand=True, padx=5, pady=5)
-
-        # close button
-        ctk.CTkButton(
-            frame,
-            text="Close",
-            command=self._close_remove_keyword_window
-        ).pack(side="bottom", pady=5)
+            command=self.remove_all_keywords_from_selection,
+        ).pack(side="left", expand=True, fill="x", padx=(5, 0))
 
 
 
@@ -2651,10 +2652,7 @@ class VtpGridMixin:
 
         for file_path, _, _ in self.selected_thumbnails:
             raw_kw = self.database.get_keywords(file_path)
-            if not raw_kw or raw_kw == "No keywords":
-                keywords = []
-            else:
-                keywords = [k.strip() for k in raw_kw.split(",") if k.strip()]
+            keywords = self._parse_keyword_list_from_db(raw_kw)
             if selected_keyword in keywords:
                 # remove the keyword and update the database
                 keywords.remove(selected_keyword)
@@ -2696,9 +2694,10 @@ class VtpGridMixin:
           
         # gather all remaining keywords across selected thumbnails
         remaining_keywords = set()
-        for file_path, _, _ in self.selected_thumbnails:
-            keywords = self.database.get_keywords(file_path).split(', ')
-            remaining_keywords.update(keywords)
+        for thumb_path, _, _ in self.selected_thumbnails:
+            remaining_keywords.update(
+                self._parse_keyword_list_from_db(self.database.get_keywords(thumb_path))
+            )
 
         # refresh the CTkOptionMenu with updated keywords
         if remaining_keywords:
