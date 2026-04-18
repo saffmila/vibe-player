@@ -1172,7 +1172,7 @@ def create_preferences_window(app):
     ctk.CTkLabel(
         adv_body,
         text=(
-            "Internal (thumbnails / folder tree): no modifier = Move, Shift = Copy.\n"
+            "Internal (thumbnails / folder tree): no modifier = Move, Ctrl = Copy.\n"
             "From Windows Explorer: no modifier = Copy, Shift = Move."
         ),
         font=("Helvetica", 12),

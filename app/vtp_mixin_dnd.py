@@ -19,6 +19,54 @@ class VtpDndMixin:
     # DRAG & DROP  (tkinterdnd2)
     # ═══════════════════════════════════════════════════════════════════════
 
+    def _dnd_is_internal_drag_active(self) -> bool:
+        """Return True for active internal drags (including short DragEnd->Drop race window)."""
+        if bool(getattr(self, "_dnd_internal_drag", False)):
+            return True
+        try:
+            end_ts = float(getattr(self, "_dnd_internal_drag_end_ts", 0.0) or 0.0)
+        except Exception:
+            end_ts = 0.0
+        if end_ts <= 0.0:
+            return False
+        return (time.monotonic() - end_ts) <= 0.8
+
+    def _dnd_mark_internal_drag_payload(self, paths: list[str]):
+        """Store normalized internal drag payload for robust Drop-side detection."""
+        try:
+            normalized = [
+                os.path.normcase(os.path.normpath(p))
+                for p in paths
+                if isinstance(p, str) and p
+            ]
+        except Exception:
+            normalized = []
+        self._dnd_last_internal_drag_paths = tuple(sorted(set(normalized)))
+        self._dnd_last_internal_drag_ts = time.monotonic()
+
+    def _dnd_payload_matches_internal(self, paths: list[str]) -> bool:
+        """Check whether dropped paths match the most recent internal drag payload."""
+        saved = getattr(self, "_dnd_last_internal_drag_paths", ())
+        if not saved:
+            return False
+        try:
+            saved_ts = float(getattr(self, "_dnd_last_internal_drag_ts", 0.0) or 0.0)
+        except Exception:
+            saved_ts = 0.0
+        if saved_ts <= 0.0 or (time.monotonic() - saved_ts) > 12.0:
+            return False
+        try:
+            dropped = sorted(
+                {
+                    os.path.normcase(os.path.normpath(p))
+                    for p in paths
+                    if isinstance(p, str) and p
+                }
+            )
+        except Exception:
+            return False
+        return bool(dropped) and tuple(dropped) == tuple(saved)
+
     def _setup_dnd(self):
         """
         Register drop targets for canvas (thumbnail grid) and tree.
@@ -71,14 +119,16 @@ class VtpDndMixin:
             logging.warning("[DnD] DROP canvas: no valid paths: %s", paths)
             return
 
-        # Internal drag: no Shift = move, Shift = copy. Explorer: opposite.
-        internal = getattr(self, "_dnd_internal_drag", False)
+        # Internal drag: default move, Ctrl = copy. Explorer keeps Windows semantics.
+        internal = self._dnd_is_internal_drag_active() or self._dnd_payload_matches_internal(paths)
         try:
+            ctrl_down = bool(ctypes.windll.user32.GetKeyState(0x11) & 0x8000)
             shift_down = bool(ctypes.windll.user32.GetKeyState(0x10) & 0x8000)
         except Exception:
+            ctrl_down = False
             shift_down = False
         if internal:
-            is_move = not shift_down
+            is_move = not ctrl_down
         else:
             is_move = shift_down
         logging.info(
@@ -103,12 +153,14 @@ class VtpDndMixin:
 
     def _dnd_on_position_canvas(self, event):
         """Tell tkdnd / OLE which effect applies (move vs copy) so the system drag cursor can differ."""
-        internal = getattr(self, "_dnd_internal_drag", False)
+        internal = self._dnd_is_internal_drag_active()
         try:
+            ctrl_down = bool(ctypes.windll.user32.GetKeyState(0x11) & 0x8000)
             shift_down = bool(ctypes.windll.user32.GetKeyState(0x10) & 0x8000)
         except Exception:
+            ctrl_down = False
             shift_down = False
-        is_move = (not shift_down) if internal else shift_down
+        is_move = (not ctrl_down) if internal else shift_down
         return dnd.MOVE if is_move else dnd.COPY
 
     def _dnd_on_leave_canvas(self, event):
@@ -123,7 +175,7 @@ class VtpDndMixin:
     def _dnd_on_drop_tree(self, event):
         """
         Tree drop:
-          A) Files/folders → copy/move to folder under cursor (internal vs Explorer shift rules).
+          A) Files/folders → copy/move to folder under cursor (internal Ctrl-copy vs Explorer Shift-move).
           B) Explorer folder with no hover → navigate (fallback).
         """
         hover = self._dnd_tree_hover_item
@@ -136,22 +188,24 @@ class VtpDndMixin:
 
         self._dnd_reset_tree_highlight()
 
-        try:
-            shift_down = bool(ctypes.windll.user32.GetKeyState(0x10) & 0x8000)
-        except Exception:
-            shift_down = False
-        internal = getattr(self, "_dnd_internal_drag", False)
-        is_move = (not shift_down) if internal else shift_down
-
-        logging.info(
-            f"[DnD] DROP tree: internal={internal} is_move={is_move} hover={hover} data={event.data!r}"
-        )
-
         paths = self._dnd_parse_paths(event.data)
         logging.info(f"[DnD] DROP tree: parsed={paths}")
         if not paths:
             logging.warning("[DnD] DROP tree: no paths after parse")
             return
+
+        try:
+            ctrl_down = bool(ctypes.windll.user32.GetKeyState(0x11) & 0x8000)
+            shift_down = bool(ctypes.windll.user32.GetKeyState(0x10) & 0x8000)
+        except Exception:
+            ctrl_down = False
+            shift_down = False
+        internal = self._dnd_is_internal_drag_active() or self._dnd_payload_matches_internal(paths)
+        is_move = (not ctrl_down) if internal else shift_down
+
+        logging.info(
+            f"[DnD] DROP tree: internal={internal} is_move={is_move} hover={hover} data={event.data!r}"
+        )
 
         files  = [p for p in paths if os.path.isfile(p)]
         dirs   = [p for p in paths if os.path.isdir(p)]
@@ -562,15 +616,17 @@ class VtpDndMixin:
 
     def _dnd_on_position_tree(self, event):
         """
-        Tree drag position: move/copy preview (internal vs Explorer), Shift via GetKeyState, edge autoscroll.
+        Tree drag position: move/copy preview (internal vs Explorer), modifier via GetKeyState, edge autoscroll.
         """
         try:
+            ctrl_down = bool(ctypes.windll.user32.GetKeyState(0x11) & 0x8000)
             shift_down = bool(ctypes.windll.user32.GetKeyState(0x10) & 0x8000)
         except Exception:
+            ctrl_down = bool(event.state & 0x0004) if hasattr(event, 'state') else False
             shift_down = bool(event.state & 0x0001) if hasattr(event, 'state') else False
 
-        internal = getattr(self, "_dnd_internal_drag", False)
-        is_move_preview = (not shift_down) if internal else shift_down
+        internal = self._dnd_is_internal_drag_active()
+        is_move_preview = (not ctrl_down) if internal else shift_down
         preview_changed = is_move_preview != self._dnd_last_move_preview
         self._dnd_last_move_preview = is_move_preview
 
@@ -737,10 +793,38 @@ class VtpDndMixin:
         elapsed_ms = (time.monotonic() - self._dnd_press_ts) * 1000.0
         hold_ms = self._dnd_hold_ms if min_hold_ms is None else float(min_hold_ms)
         if elapsed_ms < hold_ms:
-            return False
+            # tkdnd may call DragInit very early (single shot). If LMB is still down,
+            # wait the remaining hold time so intentional long-press drag can start.
+            remain_ms = hold_ms - elapsed_ms
+            if remain_ms > 0 and self._dnd_is_left_button_down():
+                deadline = time.monotonic() + (remain_ms / 1000.0)
+                while time.monotonic() < deadline:
+                    if not self._dnd_is_left_button_down():
+                        return False
+                    time.sleep(0.005)
+                elapsed_ms = (time.monotonic() - self._dnd_press_ts) * 1000.0
+            if elapsed_ms < hold_ms:
+                return False
         if expected_path and self._dnd_press_path and os.path.normcase(os.path.normpath(expected_path)) != os.path.normcase(os.path.normpath(self._dnd_press_path)):
             return False
         return True
+
+    def _dnd_is_left_button_down(self) -> bool:
+        """Best-effort check whether left mouse button is currently held."""
+        try:
+            return bool(ctypes.windll.user32.GetKeyState(0x01) & 0x8000)  # VK_LBUTTON
+        except Exception:
+            return False
+
+    def _dnd_modifiers_down(self) -> bool:
+        """Return True when Shift/Ctrl is currently pressed."""
+        try:
+            user32 = ctypes.windll.user32
+            shift = bool(user32.GetKeyState(0x10) & 0x8000)  # VK_SHIFT
+            ctrl = bool(user32.GetKeyState(0x11) & 0x8000)   # VK_CONTROL
+            return shift or ctrl
+        except Exception:
+            return False
 
     def _dnd_thumb_drag_init(self, event, clicked_path: str = None):
         """
@@ -760,11 +844,29 @@ class VtpDndMixin:
         norm_selected = {
             os.path.normcase(os.path.normpath(p)): p for p in selected_paths
         }
+
+        # DragInit may be raised from a different child than the canvas that received
+        # ButtonPress-1 (focus / layout / modifier timing). The press path is the
+        # authoritative start of the gesture — align so one-shot DragInit is not
+        # rejected before the user can press Ctrl/Shift for copy vs move.
+        if self._dnd_press_kind == "thumb" and self._dnd_press_path:
+            npp = os.path.normcase(os.path.normpath(self._dnd_press_path))
+            if npp != norm_canvas:
+                if len(selected_paths) > 1:
+                    if npp in norm_selected:
+                        canvas_path = self._dnd_press_path
+                        norm_canvas = npp
+                else:
+                    canvas_path = self._dnd_press_path
+                    norm_canvas = npp
+
         is_multi_drag = norm_canvas in norm_selected and len(selected_paths) > 1
 
         # Multi-drag: shorter hold; path match is relaxed (press widget may differ from DragInit source)
         required_hold_ms = self._dnd_hold_ms_multi if is_multi_drag else self._dnd_hold_ms
-        guard_expected_path = None if is_multi_drag else canvas_path
+        # If user presses Shift/Ctrl during the drag gesture, Tk can re-route DragInit
+        # from a sibling selected widget; relax path guard so drag still starts.
+        guard_expected_path = None if (is_multi_drag or self._dnd_modifiers_down()) else canvas_path
         if not self._dnd_hold_elapsed_ok("thumb", guard_expected_path, min_hold_ms=required_hold_ms):
             elapsed_ms = (time.monotonic() - self._dnd_press_ts) * 1000.0
             logging.info(
@@ -797,6 +899,8 @@ class VtpDndMixin:
         data = self._dnd_format_paths(paths)
         logging.info("[DnD] DRAG OUT thumbnail: %d file(s), first=%s", len(paths), paths[0])
         self._dnd_internal_drag = True
+        self._dnd_mark_internal_drag_payload(paths)
+        self._dnd_internal_drag_end_ts = 0.0
         self._dnd_drag_happened = True
         return ((dnd.MOVE, dnd.COPY), dnd.DND_FILES, data)
 
@@ -864,11 +968,26 @@ class VtpDndMixin:
         path_fwd = "{" + path.replace("\\", "/") + "}"
         logging.info(f"[DnD] DRAG OUT tree: {path}")
         self._dnd_internal_drag = True
+        self._dnd_mark_internal_drag_payload([path])
+        self._dnd_internal_drag_end_ts = 0.0
         return ((dnd.MOVE, dnd.COPY), dnd.DND_FILES, path_fwd)
 
     def _dnd_drag_end(self, event):
         self._cancel_tree_dnd_autoscroll()
-        self._dnd_internal_drag = False
+        end_ts = time.monotonic()
+        self._dnd_internal_drag_end_ts = end_ts
+
+        # On Windows, DragEnd may fire just before Drop handlers; keep internal marker
+        # briefly so Drop can still resolve correct move/copy semantics.
+        def _clear_internal_drag():
+            try:
+                if float(getattr(self, "_dnd_internal_drag_end_ts", 0.0) or 0.0) != end_ts:
+                    return
+            except Exception:
+                return
+            self._dnd_internal_drag = False
+
+        self.after(900, _clear_internal_drag)
         logging.info(f"[DnD] Drag ended.")
 
     @staticmethod
