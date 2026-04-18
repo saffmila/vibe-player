@@ -1118,32 +1118,46 @@ def create_preferences_window(app):
     thumb_slider.configure(command=lambda val: app.set_thumb_font_size(int(float(val))))
     thumb_slider.pack(fill="x", padx=10)
 
-    # === ADVANCED (collapsible) ===
+    # === FILE OPERATIONS (collapsible) ===
     advanced_outer = ctk.CTkFrame(content_frame)
     advanced_outer.pack(fill="x", padx=10, pady=(5, 5))
     adv_open = {"v": False}
     adv_body = ctk.CTkFrame(advanced_outer)
 
     dnd_confirm_var = ctk.BooleanVar(value=getattr(app, "dnd_confirm_dialogs", False))
+    delete_to_trash_var = ctk.BooleanVar(
+        value=bool(getattr(app, "delete_to_trash", True))
+    )
 
     def _toggle_advanced():
         adv_open["v"] = not adv_open["v"]
         if adv_open["v"]:
             adv_body.pack(fill="x", padx=0, pady=(4, 0))
-            adv_toggle_btn.configure(text="Advanced  ▼")
+            adv_toggle_btn.configure(text="File operations  ▼")
         else:
             adv_body.pack_forget()
-            adv_toggle_btn.configure(text="Advanced  ▶")
+            adv_toggle_btn.configure(text="File operations  ▶")
 
     adv_toggle_btn = ctk.CTkButton(
         advanced_outer,
-        text="Advanced  ▶",
+        text="File operations  ▶",
         command=_toggle_advanced,
         fg_color=("gray75", "gray25"),
         anchor="w",
         height=32,
     )
     adv_toggle_btn.pack(fill="x")
+
+    ctk.CTkLabel(
+        adv_body,
+        text="Delete behavior",
+        font=("Helvetica", 14),
+    ).pack(anchor="w", padx=8, pady=(4, 2))
+    ctk.CTkCheckBox(
+        adv_body,
+        text="Move deleted items to Recycle Bin (recommended)",
+        variable=delete_to_trash_var,
+    ).pack(anchor="w", padx=12, pady=4)
 
     ctk.CTkLabel(
         adv_body,
@@ -1169,6 +1183,7 @@ def create_preferences_window(app):
 
     def save_and_close_action():
         app.dnd_confirm_dialogs = dnd_confirm_var.get()
+        app.delete_to_trash = bool(delete_to_trash_var.get())
         app.image_viewer_use_pyglet = image_viewer_pyglet_var.get()
         app.video_show_hud = hud_enabled_var.get()
         app.gpu_upscale = gpu_upscale_var.get()
@@ -1266,6 +1281,7 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
             else True
         ),
         "dnd_confirm_dialogs": getattr(app, "dnd_confirm_dialogs", False),
+        "delete_to_trash": bool(getattr(app, "delete_to_trash", True)),
         "image_viewer_use_pyglet": bool(getattr(app, "image_viewer_use_pyglet", False)),
     }
     # Save splitter positions (fractions 0-1) when panes are visible
@@ -1335,6 +1351,7 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
     app.thumbnail_time = preferences["thumbnail_time"]
 
     app.dnd_confirm_dialogs = bool(preferences.get("dnd_confirm_dialogs", False))
+    app.delete_to_trash = bool(preferences.get("delete_to_trash", True))
     app.image_viewer_use_pyglet = bool(
         preferences.get("image_viewer_use_pyglet", False)
     )

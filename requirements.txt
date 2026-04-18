@@ -19,6 +19,7 @@ pyglet==2.0.10
 tkinterdnd2-universal==1.7.3
 alembic==1.13.1
 dataset
+send2trash
 
 # Plugin dependencies
 tqdm==4.66.2

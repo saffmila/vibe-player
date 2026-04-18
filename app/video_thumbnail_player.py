@@ -85,6 +85,10 @@ import json
 import sqlite3
 import shutil
 import customtkinter as ctk
+try:
+    from send2trash import send2trash
+except Exception:  # pragma: no cover - optional dependency fallback
+    send2trash = None
 from gui_elements import setup_menu
 from gui_elements import save_preferences
 from tkinter import Menu
@@ -503,6 +507,8 @@ class VideoThumbnailPlayer(
         self._ignore_pointer_navigation_until = 0.0
         # While syncing tree selection to current_directory, ignore folder loads from <<TreeviewSelect>>.
         self._suppress_tree_select_navigation = False
+        # True: delete to Recycle Bin; False: permanent delete.
+        self.delete_to_trash = True
 
        
         # Variable to hold the state of the checkbox (True/False)
@@ -1460,6 +1466,40 @@ class VideoThumbnailPlayer(
                 raise last_err
             return None
 
+        def _delete_via_recycle_bin(path: str):
+            """Send path to OS recycle bin/trash."""
+            if send2trash is None:
+                raise RuntimeError("send2trash is not installed")
+            send2trash(path)
+
+        def _delete_path(path: str):
+            """
+            Delete a path using app preference:
+            - delete_to_trash=True: send to Recycle Bin
+            - delete_to_trash=False: permanent delete (current behavior)
+            """
+            use_trash = bool(getattr(self, "delete_to_trash", True))
+            if use_trash:
+                try:
+                    _delete_via_recycle_bin(path)
+                    return None
+                except Exception as e:
+                    logging.warning(
+                        "[Delete] Recycle Bin unavailable, falling back to permanent delete for %s: %s",
+                        path,
+                        e,
+                    )
+
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+                return None
+
+            self.prepare_file_deletion_release_handles(path)
+            gc.collect()
+            return _unlink_file_with_retry(
+                path, is_video=path.lower().endswith(VIDEO_FORMATS)
+            )
+
         def perform_deletion():
             errors = []
             reboot_queued = []
@@ -1485,21 +1525,14 @@ class VideoThumbnailPlayer(
                             current_dir_deleted = True
                             parent_of_deleted = str(Path(path).parent.resolve())
 
-                        if os.path.isdir(path):
-                            shutil.rmtree(path)
-                            logging.info("[Delete] Deleted: %s", path)
-                            _prune_selection_after_dir_removed(path)
+                        how = _delete_path(path)
+                        if how == "reboot":
+                            reboot_queued.append(path)
+                            logging.info("[Delete] Removal deferred until restart: %s", path)
                         else:
-                            self.prepare_file_deletion_release_handles(path)
-                            gc.collect()
-                            how = _unlink_file_with_retry(
-                                path, is_video=path.lower().endswith(VIDEO_FORMATS)
-                            )
-                            if how == "reboot":
-                                reboot_queued.append(path)
-                                logging.info("[Delete] Removal deferred until restart: %s", path)
-                            else:
-                                logging.info("[Delete] Deleted: %s", path)
+                            logging.info("[Delete] Deleted: %s", path)
+                        if os.path.isdir(path):
+                            _prune_selection_after_dir_removed(path)
 
                         purge_cache_for_deleted_path(path)
 
