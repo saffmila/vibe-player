@@ -1467,12 +1467,13 @@ class VtpVirtualGridMixin:
                 return
             thumb = None
             if file_name.lower().endswith(VIDEO_FORMATS):
-                actual_time = None
-                if thumbnail_time is not None:
-                    if not force_refresh and self.database.get_cache_status(file_path):
-                        actual_time = 0
-                    else:
-                        actual_time = self.calculate_thumbnail_time(file_path)
+                # Always resolve capture time like normal loads. If thumbnail_time is None (most
+                # display_thumbnails calls), leaving actual_time unset made create_video_thumbnail
+                # default to 0.1 *seconds* instead of slider % / DB timestamp — wrong frame after refresh.
+                if not force_refresh and self.database.get_cache_status(file_path):
+                    actual_time = 0
+                else:
+                    actual_time = self.calculate_thumbnail_time(file_path)
                 thumb = create_video_thumbnail(
                     file_path, self.thumbnail_size, self.thumbnail_format,
                     self.capture_method_var.get(), thumbnail_time=actual_time,
@@ -1669,8 +1670,20 @@ class VtpVirtualGridMixin:
         self._vg_recalc()
         self._vg_wire_scrollbar()
 
-        self.canvas.yview_moveto(0)
-        self._vg_layout_slots(0)
+        frac = getattr(self, "_thumb_reload_preserve_yview", None)
+        if frac is not None:
+            try:
+                frac = max(0.0, min(1.0, float(frac)))
+            except (TypeError, ValueError):
+                frac = None
+        if frac is not None:
+            self._thumb_reload_preserve_yview = None
+            self.canvas.yview_moveto(frac)
+            scroll_px = frac * float(self._vg_scrollregion_h or 1)
+        else:
+            self.canvas.yview_moveto(0)
+            scroll_px = 0.0
+        self._vg_layout_slots(scroll_px)
 
         logging.info("[VGrid] Activated: %d items (wide=%s, folders=%d), pool std=%d wide=%d",
                      len(video_files), self._vg_is_wide, self._vg_folder_count,

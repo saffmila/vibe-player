@@ -8,7 +8,10 @@ import shutil
 import threading
 import time
 
+import tkinter as tk
+
 import tkinterdnd2 as dnd
+from gui_elements import open_conflict_dialog
 
 
 class VtpDndMixin:
@@ -87,7 +90,9 @@ class VtpDndMixin:
             sources=sources,
             dest=dest,
             is_move=is_move,
-            on_success=lambda: self.display_thumbnails(dest, force_refresh=True)
+            on_success=lambda: self.display_thumbnails(
+                dest, force_refresh=True, preserve_scroll=True
+            )
         )
 
     def _dnd_on_enter_canvas(self, event):
@@ -97,7 +102,14 @@ class VtpDndMixin:
             pass
 
     def _dnd_on_position_canvas(self, event):
-        pass
+        """Tell tkdnd / OLE which effect applies (move vs copy) so the system drag cursor can differ."""
+        internal = getattr(self, "_dnd_internal_drag", False)
+        try:
+            shift_down = bool(ctypes.windll.user32.GetKeyState(0x10) & 0x8000)
+        except Exception:
+            shift_down = False
+        is_move = (not shift_down) if internal else shift_down
+        return dnd.MOVE if is_move else dnd.COPY
 
     def _dnd_on_leave_canvas(self, event):
         self._dnd_reset_canvas_highlight()
@@ -170,10 +182,28 @@ class VtpDndMixin:
                     if not parent or not os.path.isdir(parent):
                         parent = dest_folder
                     self.refresh_folder_icons_subtree(dest_folder)
-                    self.display_thumbnails(parent, force_refresh=True)
+                    self.display_thumbnails(
+                        parent, force_refresh=True, preserve_scroll=True
+                    )
                 else:
                     self.refresh_folder_icons_subtree(dest_folder)
-                    self.refresh_tree_view(dest_folder)
+                    # refresh_tree_view selects dest_folder in the tree; if the tree has focus,
+                    # <<TreeviewSelect>> would load that folder — stay on current_directory instead.
+                    self._suppress_tree_select_navigation = True
+                    try:
+                        self.refresh_tree_view(dest_folder)
+                        self.select_current_folder_in_tree()
+                        self.display_thumbnails(
+                            self.current_directory,
+                            force_refresh=True,
+                            preserve_scroll=True,
+                        )
+                    finally:
+                        self.after_idle(
+                            lambda: setattr(
+                                self, "_suppress_tree_select_navigation", False
+                            )
+                        )
 
             self._dnd_confirm_and_execute(
                 sources=sources,
@@ -376,17 +406,8 @@ class VtpDndMixin:
         action_past = "moved" if is_move else "copied"
         dest_name = os.path.basename(dest) or dest
         ok, fail = [], []
-
-        def _unique_dst(dst_path: str) -> str:
-            if not os.path.exists(dst_path):
-                return dst_path
-            base, ext = os.path.splitext(dst_path)
-            counter = 1
-            candidate = f"{base}_copy{ext}"
-            while os.path.exists(candidate):
-                counter += 1
-                candidate = f"{base}_copy{counter}{ext}"
-            return candidate
+        replace_all = False
+        skip_all = False
 
         for src in sources:
             dst = os.path.join(dest, os.path.basename(src))
@@ -409,7 +430,30 @@ class VtpDndMixin:
                     continue
 
             try:
-                dst = _unique_dst(dst)
+                if os.path.exists(dst):
+                    if skip_all:
+                        logging.info("[DnD] conflict skip-all: %s", dst)
+                        continue
+
+                    should_replace = replace_all
+                    if not should_replace:
+                        choice, apply_all = self._dnd_prompt_conflict_choice(dst)
+                        if choice == "cancel":
+                            logging.info("[DnD] conflict canceled by user: %s", dst)
+                            break
+                        if choice == "skip":
+                            if apply_all:
+                                skip_all = True
+                            continue
+                        should_replace = choice == "replace"
+                        if apply_all and should_replace:
+                            replace_all = True
+
+                    if should_replace and not self._dnd_delete_existing_target(dst):
+                        fail.append(src)
+                        logging.error("[DnD] replace failed (cannot remove target): %s", dst)
+                        continue
+
                 is_dir = os.path.isdir(src)
                 if is_dir:
                     shutil.move(src, dst) if is_move else shutil.copytree(src, dst)
@@ -440,6 +484,37 @@ class VtpDndMixin:
                 )
 
         self.after(0, _finish)
+
+    # Ask main UI thread for conflict action from worker threads.
+    def _dnd_prompt_conflict_choice(self, dst_path: str) -> tuple[str, bool]:
+        done = threading.Event()
+        result: dict[str, tuple[str, bool]] = {"value": ("cancel", False)}
+
+        def _ask():
+            try:
+                result["value"] = open_conflict_dialog(
+                    self, os.path.basename(dst_path) or dst_path
+                )
+            except Exception:
+                result["value"] = ("cancel", False)
+            finally:
+                done.set()
+
+        self.after(0, _ask)
+        done.wait()
+        return result["value"]
+
+    # Remove destination item before overwrite.
+    def _dnd_delete_existing_target(self, dst_path: str) -> bool:
+        try:
+            if os.path.isdir(dst_path):
+                shutil.rmtree(dst_path)
+            else:
+                os.remove(dst_path)
+            return True
+        except Exception as e:
+            logging.error("[DnD] failed to remove existing target %s: %s", dst_path, e)
+            return False
 
     def _dnd_show_dialog_and_run(
         self,
@@ -543,10 +618,15 @@ class VtpDndMixin:
 
         if preview_changed or item_changed:
             try:
-                cursor = "fleur" if is_move_preview else "plus"
-                self.tree.configure(cursor=cursor)
+                # Tree cursor: "+" only for copy; empty on move so the OLE drag cursor from
+                # <<DropPosition>> (MOVE vs COPY) is visible. (Tk has no standard "minus" cursor.)
+                self.tree.configure(
+                    cursor="plus" if not is_move_preview else ""
+                )
             except Exception:
                 pass
+
+        return dnd.MOVE if is_move_preview else dnd.COPY
 
     def _dnd_on_enter_tree(self, event):
         self._dnd_last_move_preview = None
@@ -718,7 +798,7 @@ class VtpDndMixin:
         logging.info("[DnD] DRAG OUT thumbnail: %d file(s), first=%s", len(paths), paths[0])
         self._dnd_internal_drag = True
         self._dnd_drag_happened = True
-        return (dnd.COPY, dnd.DND_FILES, data)
+        return ((dnd.MOVE, dnd.COPY), dnd.DND_FILES, data)
 
     def _dnd_select_file_after_load(self, file_path: str):
         """
@@ -784,7 +864,7 @@ class VtpDndMixin:
         path_fwd = "{" + path.replace("\\", "/") + "}"
         logging.info(f"[DnD] DRAG OUT tree: {path}")
         self._dnd_internal_drag = True
-        return (dnd.COPY, dnd.DND_FILES, path_fwd)
+        return ((dnd.MOVE, dnd.COPY), dnd.DND_FILES, path_fwd)
 
     def _dnd_drag_end(self, event):
         self._cancel_tree_dnd_autoscroll()

@@ -13,9 +13,41 @@ from clipboard_file_list import (
     get_clipboard_file_paths,
     set_clipboard_file_paths,
 )
+from gui_elements import open_conflict_dialog
 
 
 class VtpLegacyDragMixin:
+    # Ask main UI thread for conflict action from worker threads.
+    def _legacy_prompt_conflict_choice(self, dst_path: str) -> tuple[str, bool]:
+        done = threading.Event()
+        result: dict[str, tuple[str, bool]] = {"value": ("cancel", False)}
+
+        def _ask():
+            try:
+                result["value"] = open_conflict_dialog(
+                    self, os.path.basename(dst_path) or dst_path
+                )
+            except Exception:
+                result["value"] = ("cancel", False)
+            finally:
+                done.set()
+
+        self.after(0, _ask)
+        done.wait()
+        return result["value"]
+
+    # Remove destination item before overwrite.
+    def _legacy_delete_existing_target(self, dst_path: str) -> bool:
+        try:
+            if os.path.isdir(dst_path):
+                shutil.rmtree(dst_path)
+            else:
+                os.remove(dst_path)
+            return True
+        except Exception as e:
+            logging.info("Conflict replace failed for %s: %s", dst_path, e)
+            return False
+
     def drag_motion_tree(self, event):
         """Handle dragging motion with improved target detection for tree and thumbnail frames."""
         # Update drag icon position
@@ -338,27 +370,23 @@ class VtpLegacyDragMixin:
         try:
             # Construct the new path
             new_path = os.path.join(target_path, os.path.basename(source_path))
-            if not os.path.exists(new_path):
-                # Perform the move or copy
-                self.perform_move_or_copy(source_path, new_path, copy_mode, moved_items)
-                 # Add a small delay to handle potential timing issues
-                # time.sleep(0.2)  # 200ms delay to stabilize system operations
-                self.move_cache(source_path, new_path)
+            if os.path.exists(new_path):
+                action, _apply_all = self._legacy_prompt_conflict_choice(new_path)
+                if action == "cancel" or action == "skip":
+                    return
+                if action == "replace" and not self._legacy_delete_existing_target(new_path):
+                    return
 
-                # Update the database with the new path
-                self.database.update_folder_path(source_path, new_path)
+            # Perform the move or copy
+            self.perform_move_or_copy(source_path, new_path, copy_mode, moved_items)
+            self.move_cache(source_path, new_path)
 
-                # Refresh folder icons
-                self.refresh_folder_icons_subtree(source_path)
-                self.refresh_folder_icons_subtree(new_path)
-            else:
-                  # Show overwrite confirmation
-                message = f"The file '{os.path.basename(new_path)}' already exists in the destination.\nDo you want to overwrite it?"
-                self.universal_dialog(
-                    title="Overwrite Confirmation",
-                    message=message,
-                    confirm_callback= self.perform_move_or_copy(source_path, new_path, copy_mode, moved_items)
-                )
+            # Update the database with the new path
+            self.database.update_folder_path(source_path, new_path)
+
+            # Refresh folder icons
+            self.refresh_folder_icons_subtree(source_path)
+            self.refresh_folder_icons_subtree(new_path)
         except Exception as e:
             logging.info(f"Error during move/copy: {e}")
 
@@ -366,6 +394,8 @@ class VtpLegacyDragMixin:
     def handle_multiple_drag(self, target_path, copy_mode, moved_items):
         """Handle dragging multiple items from the thumbnail view."""
         logging.info("**************HANDLE MULTIPLE DRAG!!!")
+        replace_all = False
+        skip_all = False
 
         for file_path, _, _ in self.selected_thumbnails:
             if target_path == file_path:
@@ -376,31 +406,31 @@ class VtpLegacyDragMixin:
                 new_path = os.path.join(target_path, os.path.basename(file_path))
 
                 if os.path.exists(new_path):
-                    def replace_callback():
-                        self.perform_move_or_copy(file_path, new_path, copy_mode, moved_items)
-                        # time.sleep(0.2)  # 200ms delay to stabilize system operations
+                    if skip_all:
+                        continue
+                    should_replace = replace_all
+                    if not should_replace:
+                        action, apply_all = self._legacy_prompt_conflict_choice(new_path)
+                        if action == "cancel":
+                            break
+                        if action == "skip":
+                            if apply_all:
+                                skip_all = True
+                            continue
+                        should_replace = action == "replace"
+                        if should_replace and apply_all:
+                            replace_all = True
+                    if should_replace and not self._legacy_delete_existing_target(new_path):
+                        continue
 
-                    def skip_callback():
-                        logging.info(f"Skipping file: {file_path}")
+                # No conflict; perform the move/copy
+                self.database.update_folder_path(file_path, new_path)
+                self.perform_move_or_copy(file_path, new_path, copy_mode, moved_items)
 
-                    self.universal_dialog(
-                            title="File Exists",
-                            message=f"The file '{os.path.basename(new_path)}' already exists.\nDo you want to replace it?",
-                            confirm_callback=replace_callback,
-                            cancel_callback=lambda: logging.info("Operation canceled."),
-                            third_button="Skip",
-                            third_callback=skip_callback
-                     )
-                else:
-                    # No conflict; perform the move/copy
-                    self.database.update_folder_path(file_path, new_path)
-                    self.perform_move_or_copy(file_path, new_path, copy_mode, moved_items)
-                    # time.sleep(0.2)  # 200ms delay to stabilize system operations
-
-                    if os.path.isdir(file_path):
-                        self.move_cache(file_path, new_path)
-                        self.refresh_folder_icons_subtree(file_path)
-                        self.refresh_folder_icons_subtree(new_path)
+                if os.path.isdir(file_path):
+                    self.move_cache(file_path, new_path)
+                    self.refresh_folder_icons_subtree(file_path)
+                    self.refresh_folder_icons_subtree(new_path)
 
             except Exception as e:
                 logging.info(f"Error during move/copy of {file_path}: {e}")
@@ -482,7 +512,7 @@ class VtpLegacyDragMixin:
 
         # Refresh views
         if self.current_directory:
-            self.display_thumbnails(self.current_directory)
+            self.display_thumbnails(self.current_directory, preserve_scroll=True)
             logging.info(f"Thumbnails refreshed for current directory: {self.current_directory}")
 
         # Restart the directory watcher for the current directory only if it exists
@@ -594,7 +624,7 @@ class VtpLegacyDragMixin:
                 if os.path.exists(thumb_path)
             ]
         if self.current_directory:
-            self.display_thumbnails(self.current_directory)
+            self.display_thumbnails(self.current_directory, preserve_scroll=True)
         if self.current_directory and os.path.exists(self.current_directory):
             try:
                 self.start_directory_watcher(self.current_directory)
@@ -626,6 +656,8 @@ class VtpLegacyDragMixin:
 
         def process_paste():
             moved_sources = []
+            replace_all = False
+            skip_all = False
 
             for file_path in sources:
                 if not os.path.exists(file_path):
@@ -640,46 +672,30 @@ class VtpLegacyDragMixin:
 
                 try:
                     if os.path.exists(new_path):
+                        if skip_all:
+                            continue
+                        should_replace = replace_all
+                        if not should_replace:
+                            action, apply_all = self._legacy_prompt_conflict_choice(new_path)
+                            if action == "cancel":
+                                break
+                            if action == "skip":
+                                if apply_all:
+                                    skip_all = True
+                                continue
+                            should_replace = action == "replace"
+                            if should_replace and apply_all:
+                                replace_all = True
+                        if should_replace and not self._legacy_delete_existing_target(new_path):
+                            continue
 
-                        def replace_callback():
-                            try:
-                                if os.path.isdir(new_path):
-                                    shutil.rmtree(new_path)
-                                else:
-                                    os.remove(new_path)
-                            except OSError as e:
-                                logging.info("Paste replace: could not remove %s: %s", new_path, e)
-                                return
-                            if not copy_mode:
-                                self.database.update_folder_path(file_path, new_path)
-                            self.perform_move_or_copy(file_path, new_path, copy_mode, moved_sources)
-                            if os.path.isdir(file_path):
-                                self.move_cache(file_path, new_path)
-                                self.refresh_folder_icons_subtree(file_path)
-                                self.refresh_folder_icons_subtree(new_path)
-
-                        def skip_callback():
-                            logging.info(f"[clipboard] Skipped: {file_path}")
-
-                        self.universal_dialog(
-                            title="File Exists",
-                            message=(
-                                f"The item '{os.path.basename(new_path)}' already exists.\n"
-                                "Replace it?"
-                            ),
-                            confirm_callback=replace_callback,
-                            cancel_callback=lambda: logging.info("Paste canceled."),
-                            third_button="Skip",
-                            third_callback=skip_callback,
-                        )
-                    else:
-                        if not copy_mode:
-                            self.database.update_folder_path(file_path, new_path)
-                        self.perform_move_or_copy(file_path, new_path, copy_mode, moved_sources)
-                        if os.path.isdir(file_path):
-                            self.move_cache(file_path, new_path)
-                            self.refresh_folder_icons_subtree(file_path)
-                            self.refresh_folder_icons_subtree(new_path)
+                    if not copy_mode:
+                        self.database.update_folder_path(file_path, new_path)
+                    self.perform_move_or_copy(file_path, new_path, copy_mode, moved_sources)
+                    if os.path.isdir(file_path):
+                        self.move_cache(file_path, new_path)
+                        self.refresh_folder_icons_subtree(file_path)
+                        self.refresh_folder_icons_subtree(new_path)
                 except Exception as e:
                     logging.info("Paste error for %s: %s", file_path, e)
 

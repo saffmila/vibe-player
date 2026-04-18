@@ -466,23 +466,40 @@ class VtpGridMixin:
 
 
 
-    def display_thumbnails(self, dir_path, force_refresh=False, thumbnail_time=None):
+    def display_thumbnails(
+        self, dir_path, force_refresh=False, thumbnail_time=None, preserve_scroll=False
+    ):
         """
         Async flow:
         1. Clear the grid immediately (user sees feedback).
         2. Worker loads and sorts the file list.
         3. Main thread renders the GUI.
+
+        preserve_scroll: if True, restore vertical canvas scroll fraction after reload (virtual grid only). Used e.g. after in-place DnD refresh of the same folder.
         """
+        # Capture before any clear — clear_thumbnails resets yview.
+        if preserve_scroll:
+            try:
+                if getattr(self, "_vg_active", False):
+                    self._thumb_reload_preserve_yview = max(
+                        0.0, min(1.0, float(self.canvas.yview()[0]))
+                    )
+                else:
+                    self._thumb_reload_preserve_yview = None
+            except Exception:
+                self._thumb_reload_preserve_yview = None
+        else:
+            self._thumb_reload_preserve_yview = None
+
         # Force the UI to calculate its actual dimensions before we start
         # self.update_idletasks()
-        
-        # 1. Init, cancel stale load, capture render_id
+
+        # 1. Init, cancel stale load, capture render_id (includes clear_thumbnails)
         self._initialize_thumbnail_display(dir_path)
         my_render_id = self._render_id  # Snapshot — older async phases will abort when they see this changed
 
-        # 2. Clear grid immediately
+        # 2. DB cache only — grid already cleared inside _initialize_thumbnail_display
         self.database.clear_entry_cache()
-        self.clear_thumbnails()
 
         # On directory change hide multi-timeline strips and switch to Video mode
         if getattr(self, "multi_viewer", None) and self.multi_viewer and \
@@ -527,7 +544,12 @@ class VtpGridMixin:
 
             if sorted_file_list is None:
                 self._is_loading = False
-                self.after(0, lambda: self.adjust_scroll_region_and_filler())
+
+                def _adjust_no_data():
+                    self._thumb_reload_preserve_yview = None
+                    self.adjust_scroll_region_and_filler()
+
+                self.after(0, _adjust_no_data)
                 return
 
             # Build path→index map once here in background so UI chunks don't repeat this
@@ -541,6 +563,7 @@ class VtpGridMixin:
 
                 if not self.video_files:
                     self._is_loading = False
+                    self._thumb_reload_preserve_yview = None
                     self.clear_thumbnails()
                     self.adjust_scroll_region_and_filler()
                     return
@@ -557,6 +580,7 @@ class VtpGridMixin:
                     )
                 except Exception as e:
                     logging.error("Virtual grid finalize failed: %s", e, exc_info=True)
+                    self._thumb_reload_preserve_yview = None
                     self.clear_thumbnails()
                     self.adjust_scroll_region_and_filler()
 
@@ -1089,7 +1113,7 @@ class VtpGridMixin:
     def set_wide_folder_columns(self, num_columns):
         """Set the number of columns for wide folders and refresh display."""
         self.numwidefolders_in_col = num_columns
-        self.display_thumbnails(self.current_directory)  # Refresh the display
+        self.display_thumbnails(self.current_directory, preserve_scroll=True)  # Refresh the display
     
     def update_load_time(self, cache_hits, cache_misses, from_cache):
         """Display and update load timing information."""
@@ -1202,7 +1226,7 @@ class VtpGridMixin:
         if hasattr(self, 'wide_folders_check_var'):
             self.wide_folders_check_var.set(new_mode == "Wide")
 
-        self.display_thumbnails(self.current_directory)
+        self.display_thumbnails(self.current_directory, preserve_scroll=True)
 
 
     def _on_check_var_changed(self, *args):

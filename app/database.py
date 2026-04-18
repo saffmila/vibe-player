@@ -19,7 +19,12 @@ class Database:
             base_dir = os.path.dirname(os.path.abspath(__file__))
             full_path = os.path.join(base_dir, db_name)
 
-            self.db = dataset.connect(f"sqlite:///{full_path}")
+            # ThreadPoolExecutor for thumbnails can exceed SQLAlchemy's default QueuePool
+            # (5 + 10); starved threads block up to pool_timeout (~30s). Size for ~32 workers.
+            self.db = dataset.connect(
+                f"sqlite:///{full_path}",
+                engine_kwargs={"pool_size": 20, "max_overflow": 40},
+            )
             self.table = self.db['files']
 
             # In-memory row cache: normalized_path → row dict (or None if not in DB).

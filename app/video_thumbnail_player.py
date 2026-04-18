@@ -1005,7 +1005,7 @@ class VideoThumbnailPlayer(
                 os.mkdir(new_folder_path)
                 logging.info(f"Created new folder: {new_folder_path}")
                 self.update_tree_view(new_folder_path, parent_path)
-                self.display_thumbnails(self.current_directory)
+                self.display_thumbnails(self.current_directory, preserve_scroll=True)
             except Exception as e:
                 self.show_error_message(title="Error", message=f"Could not create folder: {e}")
 
@@ -1058,7 +1058,9 @@ class VideoThumbnailPlayer(
                 if os.path.normcase(self.current_directory) == os.path.normcase(old_path):
                     self.current_directory = new_path
 
-                self.display_thumbnails(self.current_directory, force_refresh=True)
+                self.display_thumbnails(
+                    self.current_directory, force_refresh=True, preserve_scroll=True
+                )
 
             except Exception as e:
                 logging.error("Rename failed: %s -> %s: %s", old_path, new_path, e)
@@ -1529,7 +1531,11 @@ class VideoThumbnailPlayer(
                     self.process_directory(parent_node, dest)
             else:
                 if self.current_directory and os.path.isdir(self.current_directory):
-                    self.display_thumbnails(self.current_directory, force_refresh=False)
+                    self.display_thumbnails(
+                        self.current_directory,
+                        force_refresh=False,
+                        preserve_scroll=True,
+                    )
                     self.refresh_folder_icons_subtree(self.current_directory)
                     self.after_idle(self.select_current_folder_in_tree)
 
@@ -1943,11 +1949,19 @@ class VideoThumbnailPlayer(
                         logging.error(f"[Refresh] Failed to delete cache {fn}: {e}")
 
         parent_dir = os.path.dirname(folder_path)
+        cd = getattr(self, "current_directory", None)
+        preserve = bool(
+            cd
+            and os.path.isdir(str(cd))
+            and os.path.isdir(parent_dir)
+            and os.path.normcase(os.path.normpath(cd))
+            == os.path.normcase(os.path.normpath(parent_dir))
+        )
         if os.path.isdir(parent_dir):
             logging.info(f"[Refresh] Reloading parent directory: {parent_dir}")
-            self.display_thumbnails(parent_dir)
+            self.display_thumbnails(parent_dir, preserve_scroll=preserve)
         else:
-            self.display_thumbnails(self.current_directory)
+            self.display_thumbnails(self.current_directory, preserve_scroll=True)
 
 
     def refresh_thumbnails_in_subtree(self, folder_path):
@@ -1978,7 +1992,12 @@ class VideoThumbnailPlayer(
             )
 
         self.scan_subtree(folder_path, force_refresh=True)
-        self.display_thumbnails(self.current_directory, force_refresh=True, thumbnail_time=self.thumbnail_time)
+        self.display_thumbnails(
+            self.current_directory,
+            force_refresh=True,
+            thumbnail_time=self.thumbnail_time,
+            preserve_scroll=True,
+        )
 
     # Extract the set_rating function outside of edit_rating
     def set_rating(self, rating):
@@ -2125,7 +2144,7 @@ class VideoThumbnailPlayer(
         self.load_virtual_libraries()  
 
     def update_thumbnail_info(self):
-        self.display_thumbnails(self.current_directory)
+        self.display_thumbnails(self.current_directory, preserve_scroll=True)
 
     def scan_subtree(self, folder_path, force_refresh=False, thumbnail_time=None):
             """
@@ -2657,7 +2676,7 @@ class VideoThumbnailPlayer(
             self.thumbnail_size = (width, height)
             logging.debug("Thumbnail size -> %s", self.thumbnail_size)
             
-            self.display_thumbnails(self.current_directory)
+            self.display_thumbnails(self.current_directory, preserve_scroll=True)
             
     def change_wide_folder_size(self,size_option):
        
@@ -2666,7 +2685,7 @@ class VideoThumbnailPlayer(
         self.widefolder_size = (width, height)
         logging.debug("Wide folder size -> %s", self.widefolder_size)
         
-        self.display_thumbnails(self.current_directory)       
+        self.display_thumbnails(self.current_directory, preserve_scroll=True)
         
 
     def _guard_against_dropdown_clickthrough(self, ms: float = 650.0):
@@ -2715,7 +2734,7 @@ class VideoThumbnailPlayer(
 
             # Refresh the display only if at least one size was actually changed
             if size_changed:
-                self.display_thumbnails(self.current_directory)
+                self.display_thumbnails(self.current_directory, preserve_scroll=True)
             else:
                 logging.info(f"Toolbar ComboBox: Both sizes are already {new_size_tuple}. No refresh needed.")
 

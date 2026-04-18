@@ -97,6 +97,71 @@ class TogglePanelFrame(ctk.CTkFrame):
         self.toggle_button.configure(text="▼" if self.expanded else "▲")
 
 
+class ConflictDialog(ctk.CTkToplevel):
+    """Modal copy/move conflict dialog with optional 'apply to all'."""
+
+    def __init__(self, parent, file_name: str):
+        super().__init__(parent)
+        self.title("File already exists")
+        self.geometry("420x200")
+        self.resizable(False, False)
+        self.attributes("-topmost", True)
+        self.result: tuple[str, bool] = ("cancel", False)
+
+        self.apply_all_var = ctk.BooleanVar(value=False)
+
+        ctk.CTkLabel(
+            self,
+            text="An item with the same name already exists:",
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=(14, 6))
+        ctk.CTkLabel(
+            self,
+            text=file_name,
+            anchor="w",
+            font=ctk.CTkFont(weight="bold"),
+        ).pack(fill="x", padx=14, pady=(0, 8))
+        ctk.CTkCheckBox(
+            self,
+            text="Apply to all files",
+            variable=self.apply_all_var,
+        ).pack(anchor="w", padx=14, pady=(0, 10))
+
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(fill="x", padx=14, pady=(0, 12))
+        ctk.CTkButton(btn_row, text="Replace", command=self._on_replace).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btn_row, text="Skip", command=self._on_skip).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btn_row, text="Cancel", command=self._on_cancel).pack(side="right")
+
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+    def _close_with(self, action: str):
+        self.result = (action, bool(self.apply_all_var.get()))
+        self.destroy()
+
+    def _on_replace(self):
+        self._close_with("replace")
+
+    def _on_skip(self):
+        self._close_with("skip")
+
+    def _on_cancel(self):
+        self._close_with("cancel")
+
+    def show_modal(self) -> tuple[str, bool]:
+        """Show conflict dialog and block until user picks an action."""
+        self.grab_set()
+        self.focus_force()
+        self.wait_window()
+        return self.result
+
+
+def open_conflict_dialog(parent, file_name: str) -> tuple[str, bool]:
+    """Show conflict dialog and return (action, apply_to_all)."""
+    dialog = ConflictDialog(parent, file_name)
+    return dialog.show_modal()
+
+
 
 
 def add_hover_effect(widget):
@@ -600,7 +665,7 @@ def setup_gui(app):
         values=["Filename", "Size", "Date", "Dimensions", "File Type"],
         command=lambda choice: (
             app._toolbar_combo_begin(),
-            app.display_thumbnails(app.current_directory),
+            app.display_thumbnails(app.current_directory, preserve_scroll=True),
         ),
         width=110,
         dropdown_font=DROPDOWN_FONT,
@@ -639,7 +704,7 @@ def setup_gui(app):
         values=["Images", "Videos", "Both"],
         command=lambda choice: (
             app._toolbar_combo_begin(),
-            app.display_thumbnails(app.current_directory),
+            app.display_thumbnails(app.current_directory, preserve_scroll=True),
         ),
         width=90,
         dropdown_font=DROPDOWN_FONT,

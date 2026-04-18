@@ -391,7 +391,9 @@ class VtpWindowLayoutMixin:
 
         if os.path.commonpath([path, self.current_directory]) == self.current_directory:
             logging.info(f"Directory change detected for: {path}  current dir: {self.current_directory}")
-            self.display_thumbnails(self.current_directory)  # Refresh thumbnails for the current directory
+            self.display_thumbnails(
+                self.current_directory, preserve_scroll=True
+            )  # Refresh thumbnails for the current directory
         else:
             logging.info(f"Change detected outside current directory: {path}  current dir: {self.current_directory} (No action taken)")
 
