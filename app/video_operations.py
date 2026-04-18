@@ -148,14 +148,11 @@ class VideoPlayer:
         self._video_stack = ctk.CTkFrame(self.video_area, fg_color="black")
         self._video_stack.pack(fill=ctk.BOTH, expand=True)
 
+        # VLC is created lazily on first play (see _ensure_vlc_player). Do not call
+        # create_vlc_instance() here — it blocks the Tk thread and the old code
+        # wrongly logged "Failed to create VLC instance" whenever self.instance was still None.
         self.instance = None
         self.player = None
-        
-        if self.instance:
-            self.player = self.instance.media_player_new()
-            logging.info("VLC instance and media player created.")  # Debug
-        else:
-            logging.info("Failed to create VLC instance.")
 
         self.global_listener = mouse.Listener(on_click=self._on_global_click)
         self.global_listener.start()
@@ -968,10 +965,18 @@ class VideoPlayer:
                     logging.error(f"[VLC] Fallback instance also failed: {e2}")
             return None
 
-
-
-    
-
+    def _ensure_vlc_player(self) -> bool:
+        """Lazily create VLC Instance and MediaPlayer (must run on the Tk main thread)."""
+        if self.instance and self.player:
+            return True
+        if not self.instance:
+            self.instance = self.create_vlc_instance()
+            if not self.instance:
+                logging.error("[VLC] Failed to create VLC instance.")
+                return False
+        if not self.player:
+            self.player = self.instance.media_player_new()
+        return True
 
     def apply_preferences(self):
         self.load_vlc_preferences()
@@ -1376,8 +1381,10 @@ class VideoPlayer:
         # self.update_volume(self.volume_slider.get())
 
     def display_first_frame(self):
-        if not self.video_path or not self.player :
-            logging.info("[VideoPlayer] display_first_frame: video_path není zadán, přeskočeno.")
+        if not self.video_path:
+            logging.info("[VideoPlayer] display_first_frame: no video_path, skipped.")
+            return
+        if not self._ensure_vlc_player():
             return
 
         media = self.instance.media_new(self.video_path)
@@ -2394,13 +2401,9 @@ class VideoPlayer:
         if not self.video_path:
             return
 
-        # 1. Líná inicializace - vytvoří se jen jednou POUZE s předanými parametry
-        if not self.instance:
-            self.instance = self.create_vlc_instance()
-            if not self.instance:
-                logging.info("[ERROR] Failed to create VLC instance.")
-                return
-            self.player = self.instance.media_player_new()
+        # 1. Lazy VLC init (same path as display_first_frame).
+        if not self._ensure_vlc_player():
+            return
 
         norm = self._normalized_media_path(self.video_path)
 

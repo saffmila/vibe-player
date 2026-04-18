@@ -11,7 +11,17 @@ import unicodedata
 import logging
 from collections import Counter
 
+from sqlalchemy.pool import NullPool
+
 _ENTRY_CACHE_MAXSIZE = 8_000
+
+# SQLite + dataset: each OS thread caches one SQLAlchemy Connection (see dataset.Database.executable).
+# A bounded QueuePool caused checkout timeouts under ~32 thumbnail workers + DnD + preview threads.
+# NullPool creates a fresh DBAPI connection per checkout (no pool starvation); WAL remains on via dataset.
+_SQLITE_ENGINE_KWARGS = {
+    "poolclass": NullPool,
+    "connect_args": {"timeout": 60},
+}
 
 
 class Database:
@@ -19,11 +29,9 @@ class Database:
             base_dir = os.path.dirname(os.path.abspath(__file__))
             full_path = os.path.join(base_dir, db_name)
 
-            # ThreadPoolExecutor for thumbnails can exceed SQLAlchemy's default QueuePool
-            # (5 + 10); starved threads block up to pool_timeout (~30s). Size for ~32 workers.
             self.db = dataset.connect(
                 f"sqlite:///{full_path}",
-                engine_kwargs={"pool_size": 20, "max_overflow": 40},
+                engine_kwargs=_SQLITE_ENGINE_KWARGS,
             )
             self.table = self.db['files']
 
@@ -261,7 +269,7 @@ class Database:
             return os.path.normpath(path).lower()
 
         # Connect to the database
-        db = dataset.connect(f"sqlite:///{db_path}")
+        db = dataset.connect(f"sqlite:///{db_path}", engine_kwargs=_SQLITE_ENGINE_KWARGS)
         table = db["files"]
 
         try:
