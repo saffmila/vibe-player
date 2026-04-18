@@ -705,7 +705,7 @@ class VideoThumbnailPlayer(
         self.tree.column("path", width=0, stretch=ctk.NO)
 
         self.tree.bind('<<TreeviewOpen>>', self.open_node)
-        self.tree.bind('<ButtonPress-1>', self.select_item)
+        self.tree.bind('<ButtonPress-1>', self._on_tree_left_click)
         self.tree.bind('<ButtonPress-1>', self._dnd_mark_tree_press, add="+")
 
         self.tree.bind("<ButtonRelease-3>", lambda e: self.show_tree_context_menu(e, self.tree.identify_row(e.y)))
@@ -3918,6 +3918,34 @@ class VideoThumbnailPlayer(
         threading.Thread(target=worker, daemon=True).start()
             
     
+    def _on_tree_left_click(self, event):
+        """
+        Keep indicator-click behavior separate from folder navigation.
+        Click on arrow: expand/collapse only, keep current directory unchanged.
+        Click on row text/icon: existing select/navigation flow.
+        """
+        try:
+            item_id = self.tree.identify_row(event.y)
+            element = self.tree.identify("element", event.x, event.y)
+        except Exception:
+            item_id = ""
+            element = ""
+
+        if item_id and element and "indicator" in str(element):
+            try:
+                is_open = bool(self.tree.item(item_id, "open"))
+                self.tree.item(item_id, open=not is_open)
+                if not is_open:
+                    path = self.get_full_path(item_id)
+                    if path and os.path.isdir(path):
+                        self.process_directory(item_id, path)
+                        self._heal_open_tree_dummy_rows()
+            except Exception:
+                pass
+            return "break"
+
+        return self.select_item(event)
+
     def select_item(self, event):
         """
         Handle selection of a tree item.
