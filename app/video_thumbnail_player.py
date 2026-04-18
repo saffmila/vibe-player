@@ -377,6 +377,7 @@ class VideoThumbnailPlayer(
         self._wide_folder_stats_cache = {}  # normalize_path(folder) -> aggregate stats dict
         self._wide_folder_left_gutter_px = None  # one left-column width per wide-folder batch
         self._folder_media_presence_cache = {}  # normalize_path(folder) -> bool
+        self._video_health_cache = {}  # normalize_path(file) -> {"k": (size, mtime_ns), "health": str}
         self.wide_folder_stats_font = ctk.CTkFont(size=10)
         self._tree_sync_after_id = None
         self.option_menu = None  # Initialize option_menu here
@@ -394,6 +395,9 @@ class VideoThumbnailPlayer(
         
         self.wide_folders_check_var = tk.BooleanVar()
         self.wide_folders_check_var.trace_add("write", self._on_check_var_changed)
+        # Compatibility-first default: keep trying suspect files unless user disables it.
+        self.play_broken_videos_var = tk.BooleanVar(value=True)
+        self.play_broken_videos = True
         # Wide folder styling variables
         self.wide_folder_cornerRadius = 12     # corner radius for wide-folder cards
         self.wide_folder_gap = 25              # spacing between previews in wide strip (was 10)
@@ -3369,6 +3373,18 @@ class VideoThumbnailPlayer(
                 is_image = file_path.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.gif'))
 
                 if is_video:
+                    can_preview, preview_reason = self._can_attempt_video_playback(
+                        file_path, for_preview=True
+                    )
+                    if not can_preview:
+                        if hasattr(self, "status_bar") and self.status_bar:
+                            self.status_bar.set_action_message(
+                                preview_reason or "Video preview blocked.",
+                                color="#ff6b6b",
+                            )
+                            self.after(4500, self.status_bar.clear_action_message)
+                        return
+
                     logging.info(f"[DEBUG] Checking timeline conditions: ShowTWidget={self.ShowTWidget}, Has timeline_widget={hasattr(self, 'timeline_widget')}")
 
                     # B) Timeline widget first — no MediaInfo/VLC wait

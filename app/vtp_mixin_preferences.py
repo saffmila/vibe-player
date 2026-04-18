@@ -184,6 +184,11 @@ class VtpPreferencesMixin:
                 if loaded_path and loaded_path != "thumbnail_cache":
                     self.thumbnail_cache_path = loaded_path
                 self.auto_play = settings.get("auto_play", self.auto_play)
+                self.play_broken_videos = bool(
+                    settings.get("play_broken_videos", getattr(self, "play_broken_videos", True))
+                )
+                if hasattr(self, "play_broken_videos_var"):
+                    self.play_broken_videos_var.set(self.play_broken_videos)
                 if getattr(self, "info_panel", None) and hasattr(self.info_panel, "preview_auto_play_var"):
                     self.info_panel.preview_auto_play_var.set(
                         settings.get("preview_auto_play", True)
@@ -280,6 +285,9 @@ class VtpPreferencesMixin:
             self.thumbnail_format = "jpg"
             #self.thumbnail_cache_path =  "e:/python/vlc_player/thumbnail_cache"
             self.auto_play = True
+            self.play_broken_videos = True
+            if hasattr(self, "play_broken_videos_var"):
+                self.play_broken_videos_var.set(True)
             self.video_output_var.set('direct3d11')
             self.audio_output_var.set('wasapi')
             self.hardware_decoding_var.set('dxva2')

@@ -1095,6 +1095,14 @@ def create_preferences_window(app):
 
     auto_play_var = tk.BooleanVar(value=app.auto_play)
     ctk.CTkCheckBox(general_options_frame, text="Start Play Video Automatically", variable=auto_play_var).pack(anchor="w", padx=5, pady=5)
+    play_broken_videos_var = ctk.BooleanVar(
+        value=bool(getattr(app, "play_broken_videos", True))
+    )
+    ctk.CTkCheckBox(
+        general_options_frame,
+        text="Play broken videos (if possible)",
+        variable=play_broken_videos_var,
+    ).pack(anchor="w", padx=5, pady=5)
     
     
     # Player Interface Settings
@@ -1184,6 +1192,9 @@ def create_preferences_window(app):
     def save_and_close_action():
         app.dnd_confirm_dialogs = dnd_confirm_var.get()
         app.delete_to_trash = bool(delete_to_trash_var.get())
+        app.play_broken_videos = bool(play_broken_videos_var.get())
+        if hasattr(app, "play_broken_videos_var"):
+            app.play_broken_videos_var.set(app.play_broken_videos)
         app.image_viewer_use_pyglet = image_viewer_pyglet_var.get()
         app.video_show_hud = hud_enabled_var.get()
         app.gpu_upscale = gpu_upscale_var.get()
@@ -1274,6 +1285,7 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
             if getattr(app, "info_panel", None) and hasattr(app.info_panel, "preview_auto_play_var")
             else True
         ),
+        "play_broken_videos": bool(getattr(app, "play_broken_videos", True)),
         "timeline_strip_count": getattr(app, "timeline_strip_count", 20),
         "multiTimeline_limit": (
             app.info_panel.multiTimeline_limit_var.get()
@@ -1349,6 +1361,9 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
     app.wide_folders_check_var.set(preferences["wide_folders_check_var"])
     app.widefolder_size = app.parse_thumbnail_size(preferences["widefolder_size"])  # Parse new tuple
     app.thumbnail_time = preferences["thumbnail_time"]
+    app.play_broken_videos = bool(preferences.get("play_broken_videos", True))
+    if hasattr(app, "play_broken_videos_var"):
+        app.play_broken_videos_var.set(app.play_broken_videos)
 
     app.dnd_confirm_dialogs = bool(preferences.get("dnd_confirm_dialogs", False))
     app.delete_to_trash = bool(preferences.get("delete_to_trash", True))

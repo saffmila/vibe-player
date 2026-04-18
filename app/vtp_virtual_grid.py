@@ -1486,11 +1486,16 @@ class VtpVirtualGridMixin:
                     cache_dir=self.thumbnail_cache_path,
                 )
             if thumb is None:
-                try:
-                    img = Image.open("image_icon.png")
-                    thumb = ctk.CTkImage(light_image=img, dark_image=img)
-                except Exception:
-                    return
+                if file_name.lower().endswith(VIDEO_FORMATS):
+                    thumb = self._create_corrupted_thumbnail_image()
+                else:
+                    try:
+                        img = Image.open("image_icon.png")
+                        thumb = ctk.CTkImage(light_image=img, dark_image=img)
+                    except Exception:
+                        thumb = self._create_corrupted_thumbnail_image(
+                            "This file could not be read"
+                        )
             if self.memory_cache:
                 thumbnail_cache.set(file_path, thumb, memory_cache=self.memory_cache)
             self.after(0, lambda fp=file_path: self._vg_apply_generated_thumb(fp))

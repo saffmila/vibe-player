@@ -26,7 +26,14 @@ class StatusBar(ctk.CTkFrame):
 
         # Blue action label TEXTS INFO (for tasks like tagging)
         self.action_var = ctk.StringVar()
-        self.action_label = ctk.CTkLabel(self.main_frame, textvariable=self.action_var, anchor="w", text_color="skyblue")
+        self._action_info_color = "skyblue"
+        self._action_error_color = "#ff6b6b"
+        self.action_label = ctk.CTkLabel(
+            self.main_frame,
+            textvariable=self.action_var,
+            anchor="w",
+            text_color=self._action_info_color,
+        )
         self.action_label.pack(side=ctk.LEFT, padx=(10, 20))
 
         # Stop button: idle = neutral gray; active (long-running task) = blue
@@ -140,10 +147,12 @@ class StatusBar(ctk.CTkFrame):
     def set_progress(self, value: float):
         self.after(0, self.progress.set, value)
 
-    def set_action_message(self, text: str):
+    def set_action_message(self, text: str, color: str | None = None):
+        self.action_label.configure(text_color=(color or self._action_info_color))
         self.action_var.set(text)
 
     def clear_action_message(self):
+        self.action_label.configure(text_color=self._action_info_color)
         self.action_var.set("")
 
     def set_status(self, message):

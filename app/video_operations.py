@@ -144,6 +144,10 @@ class VideoPlayer:
         self.video_area = ctk.CTkFrame(self.video_window, fg_color="black")
         self.video_area.pack(side=ctk.TOP, fill=ctk.BOTH, expand=True)
 
+        # Single stack so VLC host + Tk overlay occupy the same pixel rect (pack would split 50/50).
+        self._video_stack = ctk.CTkFrame(self.video_area, fg_color="black")
+        self._video_stack.pack(fill=ctk.BOTH, expand=True)
+
         self.instance = None
         self.player = None
         
@@ -156,9 +160,16 @@ class VideoPlayer:
         self.global_listener = mouse.Listener(on_click=self._on_global_click)
         self.global_listener.start()
 
-        self.video_label = ctk.CTkLabel(self.video_area, text="")
-        self.video_label.pack(fill=ctk.BOTH, expand=True)
+        self.video_label = ctk.CTkLabel(self._video_stack, text="")
+        self.video_label.place(relx=0, rely=0, relwidth=1, relheight=1)
 
+        # Full-window fallback when VLC has no decoded video plane (corrupt / black output).
+        self._broken_playback_overlay = ctk.CTkLabel(self._video_stack, text="", fg_color="black")
+        self._broken_playback_overlay.place_forget()
+        self._broken_playback_overlay_img = None
+        self._broken_playback_overlay_active = False
+        self._broken_check_after_ids = []
+        self._broken_decode_check_gen = 0
 
         self.load_icons()
         
@@ -314,6 +325,135 @@ class VideoPlayer:
                 self.play_video()
             else:
                 self.display_first_frame()
+
+    def _cancel_broken_decode_checks(self) -> None:
+        for aid in getattr(self, "_broken_check_after_ids", []) or []:
+            try:
+                self.video_window.after_cancel(aid)
+            except Exception:
+                pass
+        self._broken_check_after_ids = []
+
+    def _hide_broken_playback_overlay(self) -> None:
+        ov = getattr(self, "_broken_playback_overlay", None)
+        if ov is None:
+            return
+        try:
+            ov.place_forget()
+        except Exception:
+            pass
+        self._broken_playback_overlay_active = False
+
+    def _playback_has_video_dimensions(self) -> bool:
+        if not self.player:
+            return False
+        vg = getattr(self.player, "video_get_size", None)
+        if not callable(vg):
+            return False
+        try:
+            for i in range(8):
+                try:
+                    wh = vg(i)
+                except Exception:
+                    continue
+                if wh and len(wh) >= 2 and int(wh[0]) > 0 and int(wh[1]) > 0:
+                    return True
+        except Exception:
+            return False
+        return False
+
+    def _show_broken_playback_overlay(self) -> None:
+        if getattr(self, "_broken_playback_overlay_active", False):
+            return
+        ctrl = getattr(self, "controller", None)
+        if ctrl is None or not hasattr(ctrl, "_broken_video_placeholder_pil"):
+            return
+        try:
+            self._video_stack.update_idletasks()
+            aw = max(int(self._video_stack.winfo_width()), 360)
+            ah = max(int(self._video_stack.winfo_height()), 240)
+            pil = ctrl._broken_video_placeholder_pil(size=(aw, ah))
+            self._broken_playback_overlay_img = ctk.CTkImage(
+                light_image=pil, dark_image=pil, size=(aw, ah)
+            )
+            self._broken_playback_overlay.configure(
+                image=self._broken_playback_overlay_img, text=""
+            )
+            try:
+                self._broken_playback_overlay.place_forget()
+            except Exception:
+                pass
+            self._broken_playback_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+            self._broken_playback_overlay.lift()
+            self._broken_playback_overlay.update_idletasks()
+            self._broken_playback_overlay_active = True
+            logging.info(
+                "[BrokenOverlay] shown aw=%s ah=%s (VLC video stays underneath Tk overlay)",
+                aw,
+                ah,
+            )
+        except Exception as e:
+            logging.info("[BrokenOverlay] failed: %s", e, exc_info=True)
+
+    def _schedule_decode_placeholder_checks(self) -> None:
+        """If VLC never exposes a video bitmap (common on badly damaged MP4), show the same red-on-black card as in the grid."""
+        self._cancel_broken_decode_checks()
+        self._hide_broken_playback_overlay()
+        self._broken_decode_check_gen = int(getattr(self, "_broken_decode_check_gen", 0)) + 1
+        gen = self._broken_decode_check_gen
+        a1 = self.video_window.after(750, lambda: self._decode_placeholder_probe(gen, strict=False))
+        a2 = self.video_window.after(1900, lambda: self._decode_placeholder_probe(gen, strict=True))
+        self._broken_check_after_ids = [a1, a2]
+        logging.info("[BrokenOverlay] scheduled probes gen=%s ids=%s", gen, self._broken_check_after_ids)
+
+    def _decode_placeholder_probe(self, generation: int, strict: bool = False) -> None:
+        if generation != getattr(self, "_broken_decode_check_gen", 0):
+            return
+        if getattr(self, "_broken_playback_overlay_active", False):
+            return
+        if not self.player:
+            return
+        try:
+            st = self.player.get_state()
+        except Exception:
+            st = None
+        try:
+            dur = int(self.player.get_length())
+        except Exception:
+            dur = -1
+        has_dims = self._playback_has_video_dimensions()
+        logging.info(
+            "[BrokenOverlay] probe gen=%s strict=%s state=%s dur_ms=%s has_dims=%s",
+            generation,
+            strict,
+            st,
+            dur,
+            has_dims,
+        )
+        if st == vlc.State.Error:
+            self._show_broken_playback_overlay()
+            return
+        if has_dims:
+            return
+        if not strict:
+            return
+
+        # Final pass: no decoded video plane. Duration 0 is typical for badly damaged MP4
+        # even while VLC state stays "Playing" with a black D3D surface.
+        if dur <= 0:
+            logging.info("[BrokenOverlay] strict: duration unknown/zero -> overlay")
+            self._show_broken_playback_overlay()
+            return
+
+        if st in (
+            vlc.State.Playing,
+            vlc.State.Buffering,
+            vlc.State.Paused,
+            vlc.State.Opening,
+            vlc.State.Ended,
+        ):
+            logging.info("[BrokenOverlay] strict: state=%s no dims -> overlay", st)
+            self._show_broken_playback_overlay()
     
     def show_hud(self):
         """
@@ -1249,6 +1389,7 @@ class VideoPlayer:
         # Keep this non-blocking to avoid UI stalls.
         self.player.play()
         self.video_window.after(120, lambda: self.player.pause() if self.player else None)
+        self._schedule_decode_placeholder_checks()
 
         logging.info("First frame displayed (paused).")  # Debug
 
@@ -1948,8 +2089,9 @@ class VideoPlayer:
             self.video_window.state("zoomed")
             self.video_window.attributes("-fullscreen", True)
             self.video_window.attributes('-topmost', False)
-            self.video_label.pack(fill=tk.BOTH, expand=True)
-
+            self.video_label.place(relx=0, rely=0, relwidth=1, relheight=1)
+            if getattr(self, "_broken_playback_overlay_active", False):
+                self._broken_playback_overlay.lift()
 
             # self.video_window.bind("<Escape>", self.exit_fullscreen)
             
@@ -2075,7 +2217,9 @@ class VideoPlayer:
         self.video_window.geometry(self.previous_geometry)
         # Show controls again
         self.show_controls_frame()
-        self.video_label.pack(expand=True)
+        self.video_label.place(relx=0, rely=0, relwidth=1, relheight=1)
+        if getattr(self, "_broken_playback_overlay_active", False):
+            self._broken_playback_overlay.lift()
         logging.info("Exited fullscreen mode.")
         
         # Reassign video output back to the original window
@@ -2272,6 +2416,7 @@ class VideoPlayer:
                 video_widget = getattr(self, "video_label", self.video_window)
                 if not video_widget.winfo_exists():
                     return
+                self._cancel_broken_decode_checks()
                 self._safe_set_hwnd(video_widget)
                 self.player.play()
                 self._duration_retry_count = 0
@@ -2290,6 +2435,8 @@ class VideoPlayer:
                 self.update_timer()
                 logging.info("[DEBUG] play_video: resumed from VLC paused state (no set_media).")
                 return
+
+        self._cancel_broken_decode_checks()
 
         # 2. Vytvoření média a zbytek logiky (zůstává stejné)
         media = self.instance.media_new(self.video_path)
@@ -2324,6 +2471,8 @@ class VideoPlayer:
             )
         self.update_time_slider()
         self.update_timer()
+
+        self._schedule_decode_placeholder_checks()
 
         if self.subtitles_enabled:
             threading.Thread(target=self._load_and_apply_subtitles, daemon=True).start()
@@ -2657,6 +2806,11 @@ class VideoPlayer:
         Tato metoda je navržena tak, aby byla odolná proti chybám.
         """
         logging.info("[Cleanup] Spouštím úklid pro video přehrávač...")
+        try:
+            self._cancel_broken_decode_checks()
+            self._hide_broken_playback_overlay()
+        except Exception:
+            pass
         self.playing = False  # Zastaví všechny smyčky `update_time_slider`
 
         if self.global_listener:

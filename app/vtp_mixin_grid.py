@@ -1364,6 +1364,10 @@ class VtpGridMixin:
                 return
             thumbnail = None
             try:
+                video_health = "ok"
+                if file_name.lower().endswith(VIDEO_FORMATS):
+                    video_health = self._get_video_health(file_path)
+
                 memory_cache = self.memory_cache
                 # Check cache
                 if not overwrite and memory_cache:
@@ -1374,13 +1378,19 @@ class VtpGridMixin:
                 # Slow path: generate on background thread
                 if thumbnail is None:
                     if file_name.lower().endswith(VIDEO_FORMATS):
-                        thumbnail = create_video_thumbnail(
-                            file_path, self.thumbnail_size, self.thumbnail_format, 
-                            self.capture_method_var.get(), thumbnail_time=thumbnail_time, 
-                            cache_enabled=self.cache_enabled, overwrite=overwrite, 
-                            cache_dir=self.thumbnail_cache_path,
-                            database=self.database
-                        )
+                        # Empty files are always unusable; in strict mode we also mark broken videos.
+                        if video_health == "empty" or (
+                            video_health == "broken" and not bool(getattr(self, "play_broken_videos", True))
+                        ):
+                            thumbnail = self._create_corrupted_thumbnail_image()
+                        else:
+                            thumbnail = create_video_thumbnail(
+                                file_path, self.thumbnail_size, self.thumbnail_format,
+                                self.capture_method_var.get(), thumbnail_time=thumbnail_time,
+                                cache_enabled=self.cache_enabled, overwrite=overwrite,
+                                cache_dir=self.thumbnail_cache_path,
+                                database=self.database
+                            )
                     else:
                         thumbnail = create_image_thumbnail(
                             file_path, self.thumbnail_size, database=self.database, 
@@ -1391,9 +1401,25 @@ class VtpGridMixin:
                         thumbnail_cache.set(file_path, thumbnail, memory_cache=memory_cache)
 
                 if thumbnail is None:
-                    default_image_path = "image_icon.png"
-                    default_image = Image.open(default_image_path)
-                    thumbnail = ctk.CTkImage(light_image=default_image, dark_image=default_image)
+                    if file_name.lower().endswith(VIDEO_FORMATS):
+                        # Metadata can look OK while every frame grab fails — show explicit placeholder.
+                        thumbnail = self._create_corrupted_thumbnail_image()
+                    else:
+                        try:
+                            default_image_path = "image_icon.png"
+                            default_image = Image.open(default_image_path)
+                            thumbnail = ctk.CTkImage(
+                                light_image=default_image, dark_image=default_image
+                            )
+                        except Exception as img_exc:
+                            logging.info(
+                                "image_icon.png fallback failed for %s: %s",
+                                file_path,
+                                img_exc,
+                            )
+                            thumbnail = self._create_corrupted_thumbnail_image(
+                                "This file could not be read"
+                            )
 
                 def update_gui():
                     if render_id is not None and render_id != self._render_id:
@@ -1415,6 +1441,192 @@ class VtpGridMixin:
                 logging.info(f"Error in background thumb generation for {file_path}: {e}")
 
         self.executor.submit(worker)
+
+    def _broken_placeholder_font(self, px: int):
+        """Scaled TrueType font for broken-video placeholder (Windows + Linux fallbacks)."""
+        from PIL import ImageFont
+
+        paths: list[str] = []
+        if os.name == "nt":
+            windir = os.environ.get("WINDIR", r"C:\Windows")
+            paths.extend(
+                [
+                    os.path.join(windir, "Fonts", "segoeui.ttf"),
+                    os.path.join(windir, "Fonts", "arial.ttf"),
+                    os.path.join(windir, "Fonts", "calibri.ttf"),
+                ]
+            )
+        else:
+            paths.extend(
+                [
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                ]
+            )
+        for p in paths:
+            if p and os.path.isfile(p):
+                try:
+                    return ImageFont.truetype(p, int(px))
+                except OSError:
+                    continue
+        try:
+            return ImageFont.load_default()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _wrap_placeholder_lines(draw, msg: str, max_w: int, font) -> list[str]:
+        """Word-wrap for PIL text with an optional TrueType font."""
+
+        def line_w(s: str) -> int:
+            bb = draw.textbbox((0, 0), s, font=font) if font else draw.textbbox((0, 0), s)
+            return bb[2] - bb[0]
+
+        if "\n" in msg:
+            return [ln.strip() for ln in msg.splitlines() if ln.strip()]
+        words = msg.split()
+        if not words:
+            return [msg]
+        lines_out: list[str] = []
+        cur: list[str] = []
+        for word in words:
+            trial = " ".join(cur + [word]) if cur else word
+            if line_w(trial) <= max_w:
+                cur.append(word)
+            else:
+                if cur:
+                    lines_out.append(" ".join(cur))
+                if line_w(word) > max_w:
+                    chunk = ""
+                    for ch in word:
+                        t2 = chunk + ch
+                        if line_w(t2) <= max_w:
+                            chunk = t2
+                        else:
+                            if chunk:
+                                lines_out.append(chunk)
+                            chunk = ch
+                    cur = [chunk] if chunk else []
+                else:
+                    cur = [word]
+        if cur:
+            lines_out.append(" ".join(cur))
+        return lines_out or [msg]
+
+    def _broken_video_placeholder_pil(self, text=None, size=None) -> Image.Image:
+        """
+        Shared black + red message bitmap for broken / unreadable videos.
+        Used by grid thumbnails and the main video player fallback overlay.
+        """
+        if text is None:
+            text = "This video seems to be broken"
+        w, h = size if size is not None else tuple(self.thumbnail_size)
+        w, h = max(32, int(w)), max(32, int(h))
+
+        img = Image.new("RGB", (w, h), (0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        pad_x = max(10, w // 35)
+        pad_y = max(10, h // 35)
+        max_w = max(40, w - 2 * pad_x)
+        max_h = max(40, h - 2 * pad_y)
+        red = (230, 70, 70)
+
+        def line_height(font) -> int:
+            bb = draw.textbbox((0, 0), "Ay", font=font) if font else draw.textbbox((0, 0), "Ay")
+            return max(14, bb[3] - bb[1] + 8)
+
+        chosen_font = None
+        chosen_lines: list[str] = []
+        chosen_lh = 14
+
+        start_px = min(54, max(22, min(w, h) // 4))
+        for px in range(start_px, 11, -2):
+            font = self._broken_placeholder_font(px)
+            if font is None:
+                continue
+            lines = self._wrap_placeholder_lines(draw, text, max_w, font)
+            lh = line_height(font)
+            if lh * len(lines) <= max_h:
+                chosen_font, chosen_lines, chosen_lh = font, lines, lh
+                break
+
+        if not chosen_lines:
+            font = self._broken_placeholder_font(16) or self._broken_placeholder_font(12)
+            chosen_font = font
+            chosen_lines = self._wrap_placeholder_lines(draw, text, max_w, font)
+            chosen_lh = line_height(font)
+
+        total_h = chosen_lh * len(chosen_lines)
+        y = max(pad_y, (h - total_h) // 2)
+        for line in chosen_lines:
+            bb = (
+                draw.textbbox((0, 0), line, font=chosen_font)
+                if chosen_font
+                else draw.textbbox((0, 0), line)
+            )
+            txt_w = bb[2] - bb[0]
+            x = max(pad_x, (w - txt_w) // 2)
+            draw.text((x, y), line, fill=red, font=chosen_font)
+            y += chosen_lh
+            if y + chosen_lh > h - pad_y:
+                break
+        return img
+
+    def _create_corrupted_thumbnail_image(self, text=None):
+        """CTkImage wrapper for grid cells (same pixels as player overlay)."""
+        pil = self._broken_video_placeholder_pil(text=text, size=tuple(self.thumbnail_size))
+        return ctk.CTkImage(light_image=pil, dark_image=pil)
+
+    def _get_video_health(self, video_path):
+        """
+        Classify video for playback policy:
+        - 'empty'  : 0-byte or inaccessible file (always blocked)
+        - 'broken' : metadata/duration check failed
+        - 'ok'     : seems playable
+        """
+        norm = os.path.normcase(os.path.normpath(video_path))
+        cache = getattr(self, "_video_health_cache", None)
+        if cache is None:
+            self._video_health_cache = {}
+            cache = self._video_health_cache
+
+        try:
+            st = os.stat(video_path)
+            size = int(st.st_size)
+            mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+        except OSError:
+            cache[norm] = {"k": None, "health": "empty"}
+            return "empty"
+
+        key = (size, mtime_ns)
+        cached = cache.get(norm)
+        if cached and cached.get("k") == key:
+            return cached.get("health", "ok")
+
+        if size <= 0:
+            health = "empty"
+        else:
+            try:
+                duration = float(get_video_duration_mediainfo(video_path))
+                health = "ok" if duration > 0 else "broken"
+            except Exception:
+                health = "broken"
+
+        cache[norm] = {"k": key, "health": health}
+        return health
+
+    def _can_attempt_video_playback(self, video_path, for_preview=False):
+        """Central playback policy used by preview and main player open."""
+        health = self._get_video_health(video_path)
+        if health == "empty":
+            return False, "Cannot play empty video file (0 B)."
+        if health == "broken" and not bool(getattr(self, "play_broken_videos", True)):
+            target = "preview" if for_preview else "playback"
+            return False, (
+                f"Blocked {target}: video appears corrupted. "
+                "Enable 'Play broken videos' in Preferences to override."
+            )
+        return True, ""
 
 
 
@@ -4029,6 +4241,17 @@ class VtpGridMixin:
                             file_path, self.thumbnail_size, database=self.database,
                             cache_dir=self.thumbnail_cache_path,
                         )
+                    if thumb is None:
+                        if file_name.lower().endswith(VIDEO_FORMATS):
+                            thumb = self._create_corrupted_thumbnail_image()
+                        else:
+                            try:
+                                img = Image.open("image_icon.png")
+                                thumb = ctk.CTkImage(light_image=img, dark_image=img)
+                            except Exception:
+                                thumb = self._create_corrupted_thumbnail_image(
+                                    "This file could not be read"
+                                )
                     if thumb is not None and self.memory_cache:
                         thumbnail_cache.set(file_path, thumb, memory_cache=self.memory_cache)
                 except Exception as e:
@@ -4664,6 +4887,13 @@ class VtpGridMixin:
 
 
     def open_video_player(self, video_path, video_name):
+        can_play, reason = self._can_attempt_video_playback(video_path, for_preview=False)
+        if not can_play:
+            logging.warning("[Playback Blocked] %s | path=%s", reason, video_path)
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.set_action_message(reason, color="#ff6b6b")
+                self.after(4500, self.status_bar.clear_action_message)
+            return
         
         if hasattr(self, "info_panel") and hasattr(self.info_panel, "preview_player"):
             try:
@@ -4764,9 +4994,25 @@ class VtpGridMixin:
                 wide_folder_index += 1
             else:  # Regular thumbnail logic
                 row, col = divmod(thumbnail_index, self.columns)
-                if thumbnail_time is not None:
-                    self.create_file_thumbnail(file['path'], file['name'], row, col, thumbnail_index, thumbnail_time=thumbnail_time, overwrite=True, target_frame=self.regular_thumbnails_frame)
-                    thumbnail_index += 1
+                fp_norm = os.path.normcase(os.path.normpath(file.get("path", "")))
+                target_norm = os.path.normcase(os.path.normpath(file_path))
+                if fp_norm == target_norm:
+                    tt = (
+                        thumbnail_time
+                        if thumbnail_time is not None
+                        else self.calculate_thumbnail_time(file["path"])
+                    )
+                    self.create_file_thumbnail(
+                        file["path"],
+                        file["name"],
+                        row,
+                        col,
+                        thumbnail_index,
+                        thumbnail_time=tt,
+                        overwrite=True,
+                        target_frame=self.regular_thumbnails_frame,
+                    )
+                thumbnail_index += 1
 
 
 
