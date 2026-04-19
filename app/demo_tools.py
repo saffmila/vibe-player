@@ -21,6 +21,7 @@ class DemoNotifier:
             Path(json_path) if json_path is not None else Path(__file__).resolve().parent / "demo_texts.json"
         )
         self.texts = self._load_texts()
+        self.enabled = bool(self.texts)
         self._shown: set[str] = set()
         self._toast_widget: ctk.CTkLabel | None = None
         self._toast_after_id: str | None = None
@@ -62,9 +63,13 @@ class DemoNotifier:
                 pass
 
     def show(self, text_key: str, duration: int = 5000, once: bool = True) -> None:
+        if not self.enabled:
+            return
         if once and text_key in self._shown:
             return
-        message = self.texts.get(text_key, text_key)
+        message = self.texts.get(text_key)
+        if not message:
+            return
         self._clear_toast()
         if once:
             self._shown.add(text_key)
@@ -74,10 +79,10 @@ class DemoNotifier:
             text=message,
             fg_color=("#3B8ED0", "#1f538d"),
             text_color="white",
-            corner_radius=15,
+            corner_radius=0,
             padx=25,
             pady=12,
-            font=ctk.CTkFont(family="Segoe UI", size=15, weight="bold"),
+            font=ctk.CTkFont(family="Segoe UI", size=30, weight="bold"),
         )
         notification.place(relx=0.5, rely=0.85, anchor="center")
         notification.lift()
