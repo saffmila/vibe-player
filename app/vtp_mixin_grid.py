@@ -3985,6 +3985,7 @@ class VtpGridMixin:
 
 
     def Open_playlist (self):
+        self._demo_toast("demo_organize")
         self.playlist_manager.show_playlist()
 
 
@@ -4943,6 +4944,7 @@ class VtpGridMixin:
             use_gpu_upscale=getattr(self, "gpu_upscale", False)
             # playlist_manager=self.playlist_manager
         )
+        self._demo_toast("demo_playback")
         # Start playback in next Tk tick so window paints first (reduces perceived freezes).
         self.after(1, lambda: self.current_video_window and self.current_video_window.show_and_play())
         
@@ -5061,6 +5063,7 @@ class VtpGridMixin:
             self.search_window.focus_force()
             return
 
+        self._demo_toast("demo_search")
         # Create and store the new window object
         self.search_window = create_search_window(self)    
             

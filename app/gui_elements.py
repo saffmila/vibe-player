@@ -338,12 +338,18 @@ def build_view_menu(app):
                               variable=app.wide_folders_check_var)
 
     app.show_infopanel_var = tk.BooleanVar(value=True)
-    view_menu.add_checkbutton(label="Show Info Panel", variable=app.show_infopanel_var,
-                              command=app.toggle_infopanel_menu)
+    view_menu.add_checkbutton(
+        label="Show Info Panel",
+        variable=app.show_infopanel_var,
+        command=lambda: app.toggle_infopanel_menu(from_view_menu=True),
+    )
 
     app.show_timeline_var = tk.BooleanVar(value=True)
-    view_menu.add_checkbutton(label="Show Timeline Widget", variable=app.show_timeline_var,
-                              command=app.toggle_timeline_menu)
+    view_menu.add_checkbutton(
+        label="Show Timeline Widget",
+        variable=app.show_timeline_var,
+        command=lambda: app.toggle_timeline_menu(from_view_menu=True),
+    )
 
     thumbnail_size_menu = create_menu(app, view_menu)
     for size in ["160x120", "240x180", "320x240", "400x300", "480x360"]:

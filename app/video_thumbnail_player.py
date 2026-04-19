@@ -89,6 +89,10 @@ try:
     from send2trash import send2trash
 except Exception:  # pragma: no cover - optional dependency fallback
     send2trash = None
+try:
+    from demo_tools import DemoNotifier
+except ImportError:
+    DemoNotifier = None  # type: ignore[misc, assignment]
 from gui_elements import setup_menu
 from gui_elements import save_preferences
 from tkinter import Menu
@@ -815,6 +819,10 @@ class VideoThumbnailPlayer(
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         self.playlist_manager = PlaylistManager(self, self)
+        self.demo_notifier = (
+            DemoNotifier(self, _APP_DIR / "demo_texts.json") if DemoNotifier else None
+        )
+        self.after(2000, lambda: self._demo_toast("demo_ui"))
         self.bind_global_keys()
         t3 = time.time()
         self.load_virtual_libraries()
@@ -844,6 +852,9 @@ class VideoThumbnailPlayer(
 
         self._setup_dnd()
 
+    def _demo_toast(self, text_key: str) -> None:
+        if getattr(self, "demo_notifier", None):
+            self.demo_notifier.show(text_key)
 
     def auto_tag_selected_items(self, clicked_path=None, *args, **kwargs):
         """
@@ -2720,16 +2731,18 @@ class VideoThumbnailPlayer(
             logging.info(f"[TOGGLE][Timeline] ShowTWidget set to {expanded}")
 
 
-    def toggle_infopanel_menu(self, save_prefs=True):
+    def toggle_infopanel_menu(self, save_prefs=True, *, from_view_menu=False):
         # No-op if panel container is missing
         if hasattr(self, "info_panel_container") and self.info_panel_container:
             self.info_panel_container.toggle_panel()
             self.show_infopanel_var.set(self.info_panel_container.expanded)
             if save_prefs:
                 self.save_preferences()
+            if from_view_menu:
+                self._demo_toast("demo_infopanel")
 
 
-    def toggle_timeline_menu(self, save_prefs=True):
+    def toggle_timeline_menu(self, save_prefs=True, *, from_view_menu=False):
         """
         Toggles the timeline panel and updates the menu variable.
         Saves preferences only if 'save_prefs' is True.
@@ -2740,7 +2753,9 @@ class VideoThumbnailPlayer(
             
             # Only save if explicitly told to (default is True)
             if save_prefs:
-                self.save_preferences()  # unified save    
+                self.save_preferences()  # unified save
+            if from_view_menu:
+                self._demo_toast("demo_timeline")
         
 
 

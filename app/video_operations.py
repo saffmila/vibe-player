@@ -853,7 +853,8 @@ class VideoPlayer:
         Toggles the internal loop state and seeks to the start if activated.
         Also ensures the loop bar display is updated.
         """
-        self.loop_active = not getattr(self, "loop_active", False)
+        _prev_loop = getattr(self, "loop_active", False)
+        self.loop_active = not _prev_loop
         logging.info(f"[VideoPlayer] Loop is now: {'ACTIVE' if self.loop_active else 'INACTIVE'}")
 
         # If loop was just activated, seek to the start.
@@ -1226,6 +1227,8 @@ class VideoPlayer:
             self.controller.refresh_single_thumbnail(
                 current_video, overwrite=True, at_time=float(thumbnail_time)
             )
+            if hasattr(self.controller, "_demo_toast"):
+                self.controller._demo_toast("demo_thumbs")
             return
 
         thumbnail = create_video_thumbnail(
@@ -1261,6 +1264,8 @@ class VideoPlayer:
                 overwrite=True,
                 target_frame=self.controller.regular_thumbnails_frame,
             )
+            if hasattr(self.controller, "_demo_toast"):
+                self.controller._demo_toast("demo_thumbs")
         else:
             logging.info(f"Failed to generate thumbnail for {self.video_name}. Format: {thumbnail_format}")
 
