@@ -567,6 +567,19 @@ def build_edit_menuOld(app):
 
 # RATING MENU
 
+def show_rating_panel_from_menu(app):
+    """Same compact window as thumbnail context menu → Edit Rating."""
+    thumbs = getattr(app, "selected_thumbnails", None) or []
+    if not thumbs:
+        messagebox.showinfo(
+            "Rating",
+            "Select one or more thumbnails first, then open Show rating panel again.",
+            parent=app,
+        )
+        return
+    app.edit_rating("")
+
+
 def build_rating_menu(app):
     rating_menu = create_menu(app, app)
 
@@ -580,6 +593,12 @@ def build_rating_menu(app):
     for i in range(1, 6):
         edit_rating_menu.add_command(label=f"Set Rating {i}", command=lambda i=i: app.set_rating(i))
     rating_menu.add_cascade(label="Edit Rating", menu=edit_rating_menu)
+
+    rating_menu.add_separator()
+    rating_menu.add_command(
+        label="Show rating panel…",
+        command=lambda: show_rating_panel_from_menu(app),
+    )
 
     return rating_menu
 

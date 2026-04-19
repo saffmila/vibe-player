@@ -365,19 +365,35 @@ class VtpWindowLayoutMixin:
         btn_ok = ctk.CTkButton(error_window, text="OK", command=error_window.destroy)
         btn_ok.pack(pady=10)
 
-    def _center_toplevel_window(self, window, width: int | None = None, height: int | None = None):
+    def _center_toplevel_window(
+        self,
+        window,
+        width: int | None = None,
+        height: int | None = None,
+        *,
+        center_on_parent: bool = False,
+    ):
         """
-        Center a toplevel window on the current screen.
-        If width/height are provided, enforce exact size before centering.
+        Center a toplevel on the primary screen (default) or on the main app window (center_on_parent=True).
+        The latter tracks the monitor where the app lives and avoids tiny geometry on mixed-DPI setups.
         """
         try:
             window.update_idletasks()
             w = width if width is not None else max(window.winfo_width(), window.winfo_reqwidth())
             h = height if height is not None else max(window.winfo_height(), window.winfo_reqheight())
-            sw = window.winfo_screenwidth()
-            sh = window.winfo_screenheight()
-            x = max(0, (sw - w) // 2)
-            y = max(0, (sh - h) // 2)
+            if center_on_parent:
+                self.update_idletasks()
+                rx = self.winfo_rootx()
+                ry = self.winfo_rooty()
+                rw = self.winfo_width()
+                rh = self.winfo_height()
+                x = rx + max(0, (rw - w) // 2)
+                y = ry + max(0, (rh - h) // 2)
+            else:
+                sw = window.winfo_screenwidth()
+                sh = window.winfo_screenheight()
+                x = max(0, (sw - w) // 2)
+                y = max(0, (sh - h) // 2)
             window.geometry(f"{w}x{h}+{x}+{y}")
         except Exception:
             pass

@@ -2053,32 +2053,70 @@ class VideoThumbnailPlayer(
 
         rating_window = ctk.CTkToplevel(self)
         rating_window.title("Edit Rating")
-        self._center_toplevel_window(rating_window, 600, 100)
+        try:
+            rating_window.transient(self)
+        except Exception:
+            pass
 
         button_frame = ctk.CTkFrame(rating_window)
-        button_frame.pack(pady=20)
-        
+        button_frame.pack(pady=12, padx=14)
+
         col = ["lightblue", "lightgreen", "yellow", "purple", "red"]
-        
+        _btn_font = ctk.CTkFont(size=12, weight="bold")
+
         for i in range(1, 6):
-            rating_button = ctk.CTkButton(button_frame, width=32, height=32, corner_radius=2, fg_color=col[i-1], text=str(i), command=lambda i=i: self.set_rating( i))
-            rating_button.pack(side=ctk.LEFT, padx=10)
+            rating_button = ctk.CTkButton(
+                button_frame,
+                width=24,
+                height=24,
+                corner_radius=2,
+                fg_color=col[i - 1],
+                text=str(i),
+                font=_btn_font,
+                command=lambda i=i: self.set_rating(i),
+            )
+            rating_button.pack(side=ctk.LEFT, padx=7)
+
+        # Same action as toolbar trash: clear rating (0) for current selection.
+        remove_rating_button = ctk.CTkButton(
+            button_frame,
+            text="🗑️",
+            width=28,
+            height=24,
+            corner_radius=4,
+            fg_color="transparent",
+            border_width=0,
+            hover_color="#404040",
+            text_color="#8A8A8A",
+            font=ctk.CTkFont(size=11),
+            command=lambda: self.set_rating(0),
+        )
+        remove_rating_button.pack(side=ctk.LEFT, padx=(12, 6))
+
+        rating_window.update_idletasks()
+        rw = max(rating_window.winfo_reqwidth() + 22, 400)
+        rh = max(rating_window.winfo_reqheight() + 22, 108)
+        rating_window.minsize(rw, rh)
+        rating_window.resizable(False, False)
+        self._center_toplevel_window(rating_window, rw, rh, center_on_parent=True)
 
     def save_rating(self, file_path, rating):
         try:
             self.database.update_rating(file_path, rating)
             self._wide_folder_stats_cache.clear()
 
-            # Refresh the rating bar after saving the rating
+            # Match thumbnail_labels keys by normalized path (selection vs grid keys can differ in case).
+            norm = self.database.normalize_path(file_path)
             for stored_file_path, info in self.thumbnail_labels.items():
-                if stored_file_path == file_path:
-                    canvas = info["canvas"]
-                    thumbnail_frame = canvas.master
-                    canvas_width = self.thumbnail_size[0] + 14 * 2  # Adjust width based on existing logic
+                if self.database.normalize_path(stored_file_path) != norm:
+                    continue
+                canvas = info["canvas"]
+                thumbnail_frame = canvas.master
+                canvas_width = self.thumbnail_size[0] + 14 * 2  # Adjust width based on existing logic
 
-                    # Update rating display
-                    self.add_rating_circle(file_path, thumbnail_frame, rating, canvas_width)
-                    break
+                # Use grid key so add_rating_circle / thumbnail_rating_widgets stay consistent.
+                self.add_rating_circle(stored_file_path, thumbnail_frame, rating, canvas_width)
+                break
         except Exception as e:
             logging.info(f"Failed to save rating for {file_path}: {e}")
 

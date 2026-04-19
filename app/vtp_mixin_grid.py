@@ -2986,12 +2986,24 @@ class VtpGridMixin:
         if rating is None:
             rating = 0
 
-        if file_path in self.thumbnail_rating_widgets:
-            old_widget = self.thumbnail_rating_widgets[file_path]
+        # Remove any existing circle for this file (widget dict key must match grid path; also
+        # clear stale keys that only differ by normalization/casing from earlier builds).
+        try:
+            norm_fp = self.database.normalize_path(file_path)
+        except Exception:
+            norm_fp = file_path
+        for key in list(self.thumbnail_rating_widgets.keys()):
+            try:
+                if self.database.normalize_path(key) != norm_fp:
+                    continue
+            except Exception:
+                if key != file_path:
+                    continue
+            old_widget = self.thumbnail_rating_widgets[key]
             if old_widget.winfo_exists():
                 old_widget.destroy()
-            del self.thumbnail_rating_widgets[file_path]
-        
+            del self.thumbnail_rating_widgets[key]
+
         if rating == 0:
             return
 
