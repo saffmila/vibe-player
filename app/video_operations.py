@@ -31,7 +31,23 @@ import ctypes
 from utils import create_menu
 import logging
 
+import tkinterdnd2 as dnd
+from vtp_constants import VIDEO_FORMATS
+from vtp_mixin_dnd import VtpDndMixin
+
 _audio_devices_cache = None
+
+
+def _dnd_tk_surface(widget):
+    """Plain Tk widget for tkinterdnd2 (CustomTkinter hosts use ``_canvas``)."""
+    if widget is None:
+        return None
+    if hasattr(widget, "drop_target_register"):
+        return widget
+    inner = getattr(widget, "_canvas", None)
+    if inner is not None and hasattr(inner, "drop_target_register"):
+        return inner
+    return None
 
 
 def get_gpu_vendor() -> str:
@@ -180,9 +196,10 @@ class VideoPlayer:
         self._broken_decode_check_gen = 0
 
         self.load_icons()
-        
 
-       
+        self._setup_video_playback_dnd()
+
+
 
 
 
@@ -333,6 +350,77 @@ class VideoPlayer:
                 self.play_video()
             else:
                 self.display_first_frame()
+
+    def _setup_video_playback_dnd(self):
+        """Drop video files onto the playback area (Explorer or in-app); always COPY semantics."""
+        targets = []
+        for w in (self.video_label, self._video_stack, self.video_area, self.video_window):
+            surf = _dnd_tk_surface(w)
+            if surf is not None and surf not in targets:
+                targets.append(surf)
+        if not targets:
+            return
+        for surf in targets:
+            try:
+                surf.drop_target_register(dnd.DND_FILES)
+                surf.dnd_bind("<<Drop>>", self._dnd_on_video_playback_drop)
+                surf.dnd_bind("<<DropPosition>>", self._dnd_on_video_playback_drop_position)
+            except Exception as e:
+                logging.warning("[DnD] video playback drop target failed: %s", e)
+
+    def _dnd_on_video_playback_drop_position(self, event):
+        # COPY only: never treat as file-manager MOVE (would delete source on internal drags).
+        return dnd.COPY
+
+    def _dnd_on_video_playback_drop(self, event):
+        paths = VtpDndMixin._dnd_parse_paths(event.data)
+        videos = [
+            p
+            for p in paths
+            if isinstance(p, str) and os.path.isfile(p) and p.lower().endswith(VIDEO_FORMATS)
+        ]
+        if not videos:
+            return
+        if len(videos) > 1:
+            pm = getattr(self.controller, "playlist_manager", None)
+            if pm is not None:
+                added = pm.add_to_playlist(videos[1:])
+                if added > 0:
+                    ctrl = self.controller
+                    sb = getattr(ctrl, "status_bar", None)
+                    if sb is not None:
+                        msg = (
+                            "Added 1 video to playlist."
+                            if added == 1
+                            else f"Added {added} videos to playlist."
+                        )
+                        sb.set_action_message(msg)
+                        try:
+                            ctrl.after(4500, sb.clear_action_message)
+                        except Exception:
+                            pass
+        self._load_dropped_video_path(videos[0])
+
+    def _load_dropped_video_path(self, path: str):
+        if not path or not os.path.isfile(path):
+            return
+        name = os.path.basename(path)
+        if self.player and self.instance:
+            self.safe_switch_video(path, name)
+            return
+        self.video_path = path
+        self.video_name = name
+        self.bookmark_file = f"bookmarks/{os.path.basename(path)}.json"
+        try:
+            self.load_bookmarks()
+        except Exception:
+            self.bookmarks = []
+        try:
+            if not self.embed:
+                self.video_window.title((name or "").lower())
+        except Exception:
+            pass
+        self.play_video()
 
     def _cancel_broken_decode_checks(self) -> None:
         for aid in getattr(self, "_broken_check_after_ids", []) or []:

@@ -15,6 +15,10 @@ import logging
 # Import the create_menu utility
 from utils import create_menu
 
+import tkinterdnd2 as dnd
+from vtp_constants import VIDEO_FORMATS
+from vtp_mixin_dnd import VtpDndMixin
+
 class PlaylistManager:
     def __init__(self, parent, controller):
         """
@@ -60,8 +64,9 @@ class PlaylistManager:
         logging.info("New playlist window created with '-topmost' set to True.")
 
         # --- Main Frame for Layout ---
-        main_frame = ctk.CTkFrame(self.playlist_window, fg_color="transparent")
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        self.playlist_main_frame = ctk.CTkFrame(self.playlist_window, fg_color="transparent")
+        self.playlist_main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame = self.playlist_main_frame
         logging.info("Main frame created.")
 
         # --- Listbox for playlist items ---
@@ -82,6 +87,38 @@ class PlaylistManager:
         self.populate_playlist_box()
         self.update_playlist_selection()
         logging.info("Playlist populated and selection updated.")
+
+        self._setup_playlist_drop_target()
+
+    def _setup_playlist_drop_target(self):
+        """Append dropped video files (internal or Explorer); COPY only — no file move."""
+        targets = []
+        for w in (self.playlist_box, self.playlist_main_frame, self.playlist_window):
+            if w is None:
+                continue
+            surf = w if hasattr(w, "drop_target_register") else getattr(w, "_canvas", None)
+            if surf is not None and hasattr(surf, "drop_target_register") and surf not in targets:
+                targets.append(surf)
+        for surf in targets:
+            try:
+                surf.drop_target_register(dnd.DND_FILES)
+                surf.dnd_bind("<<Drop>>", self._on_playlist_files_drop)
+                surf.dnd_bind("<<DropPosition>>", self._on_playlist_drop_position)
+            except Exception as e:
+                logging.warning("[DnD] playlist drop target failed: %s", e)
+
+    def _on_playlist_drop_position(self, event):
+        return dnd.COPY
+
+    def _on_playlist_files_drop(self, event):
+        paths = VtpDndMixin._dnd_parse_paths(event.data)
+        videos = [
+            p
+            for p in paths
+            if isinstance(p, str) and os.path.isfile(p) and p.lower().endswith(VIDEO_FORMATS)
+        ]
+        if videos:
+            self.add_to_playlist(videos)
 
     def update_ui_selection(self, index):
         """
@@ -193,6 +230,8 @@ class PlaylistManager:
     def add_to_playlist(self, file_paths):
         """
         Adds a list of file paths to the playlist.
+
+        Returns the number of paths actually appended (skips duplicates already in the list).
         """
         added_count = 0
         for path in file_paths:
@@ -202,6 +241,7 @@ class PlaylistManager:
         if added_count > 0:
             self.populate_playlist_box()
         logging.info(f"Added {added_count} items to the playlist.")
+        return added_count
 
     def remove_selected(self, event=None):
         """
