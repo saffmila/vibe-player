@@ -3015,10 +3015,30 @@ class VideoThumbnailPlayer(
             return
 
         try:
+            valid_subdirs = set()
+            for p in entries:
+                full_path = os.path.normcase(os.path.normpath(os.path.join(path, p)))
+                if os.path.isdir(full_path):
+                    valid_subdirs.add(full_path)
+
             # Remove stale dummy placeholder rows under the currently opened parent.
             for child in self.tree.get_children(parent):
                 vals = self.tree.item(child, 'values')
                 if vals and vals[0] == 'dummy':
+                    self.tree.delete(child)
+
+            # Drop tree nodes for subfolders removed/renamed outside the app (still O(children)).
+            for child in list(self.tree.get_children(parent)):
+                vals = self.tree.item(child, 'values')
+                if not vals or not vals[0]:
+                    continue
+                child_path = vals[0]
+                if child_path == 'dummy':
+                    continue
+                if str(child_path).startswith('virtual_library://'):
+                    continue
+                normalized_child = os.path.normcase(os.path.normpath(child_path))
+                if normalized_child not in valid_subdirs:
                     self.tree.delete(child)
 
             existing_paths = {
@@ -3984,11 +4004,12 @@ class VideoThumbnailPlayer(
             try:
                 is_open = bool(self.tree.item(item_id, "open"))
                 self.tree.item(item_id, open=not is_open)
-                if not is_open:
-                    path = self.get_full_path(item_id)
-                    if path and os.path.isdir(path):
-                        self.process_directory(item_id, path)
-                        self._heal_open_tree_dummy_rows()
+                path = self.get_full_path(item_id)
+                if path and os.path.isdir(path) and not str(path).startswith("virtual_library://"):
+                    # Refresh on expand and collapse so folders deleted outside the app disappear
+                    # (one os.listdir per click — same as expand-only before).
+                    self.process_directory(item_id, path)
+                self._heal_open_tree_dummy_rows()
             except Exception:
                 pass
             return "break"
