@@ -7,6 +7,7 @@ supports embedded preview mode for the info panel.
 
 from __future__ import annotations
 
+import queue
 import threading
 import tkinter as tk
 from tkinter import PhotoImage, ttk
@@ -154,8 +155,18 @@ class VideoPlayer:
         self.instance = None
         self.player = None
 
+        # pynput runs on a worker thread — never touch Tk from that thread (not even .after()).
+        # Bridge mouse events through a queue; _pynput_queue_pump runs only on the Tk main thread.
+        self._pynput_bridge_dead = False
+        self._pynput_queue: queue.Queue[tuple[str, int, int]] = queue.Queue(maxsize=256)
+        self._pynput_pump_job = None
+
         self.global_listener = mouse.Listener(on_click=self._on_global_click)
         self.global_listener.start()
+        try:
+            self._pynput_pump_job = self.video_window.after(25, self._pynput_queue_pump)
+        except Exception:
+            self._pynput_pump_job = None
 
         self.video_label = ctk.CTkLabel(self._video_stack, text="")
         self.video_label.place(relx=0, rely=0, relwidth=1, relheight=1)
@@ -2168,17 +2179,58 @@ class VideoPlayer:
 
 
 
+    def _global_click_toggle_if_over_video(self, x: int, y: int) -> None:
+        """Hit-test + play toggle; must run on the Tk main thread only."""
+        try:
+            if not self.video_window.winfo_exists():
+                return
+        except Exception:
+            return
+        if self.is_cursor_over_video(x, y) and not self.is_cursor_over_toolbar(x, y):
+            logging.info(f"[DEBUG] Global mouse click on video at ({x},{y})")
+            self.toggle_play()
+
+    def _pynput_queue_pump(self) -> None:
+        """Drain pynput → main thread queue (Tk thread only)."""
+        self._pynput_pump_job = None
+        if getattr(self, "_pynput_bridge_dead", True):
+            return
+        try:
+            if not self.video_window.winfo_exists():
+                return
+        except Exception:
+            return
+        try:
+            for _ in range(48):
+                try:
+                    kind, x, y = self._pynput_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if kind == "click":
+                    self._global_click_toggle_if_over_video(x, y)
+                elif kind == "move":
+                    self._check_mouse_position_main(x, y)
+        except Exception as e:
+            logging.debug("[pynput bridge] drain: %s", e)
+        if getattr(self, "_pynput_bridge_dead", True):
+            return
+        try:
+            if self.video_window.winfo_exists():
+                self._pynput_pump_job = self.video_window.after(20, self._pynput_queue_pump)
+        except Exception:
+            self._pynput_pump_job = None
+
     def _on_global_click(self, x, y, button, pressed):
         from pynput.mouse import Button
-        if pressed and button == Button.left:
-            if self.is_cursor_over_video(x, y) and not self.is_cursor_over_toolbar(x, y):
-                logging.info(f"[DEBUG] Global mouse click on video at ({x},{y})")
-                # TADY POSÍLEJ GUI AKCI DO HLAVNÍHO THREADU
-                try:
-                    # pass
-                   self.video_window.after(0, self.toggle_play)
-                except Exception as e:
-                    logging.info("[DEBUG] Failed to schedule toggle_play: %s", e)
+        # Worker thread: queue only — no Tk / no .after().
+        if not (pressed and button == Button.left):
+            return
+        if getattr(self, "_pynput_bridge_dead", True):
+            return
+        try:
+            self._pynput_queue.put_nowait(("click", int(x), int(y)))
+        except queue.Full:
+            pass
 
 
 
@@ -2267,15 +2319,29 @@ class VideoPlayer:
             # self.listener.stop()
             # self.listener = None
 
-    def check_mouse_position(self, x, y):
-        screen_height = self.video_window.winfo_screenheight()
-
-        # logging.info(f"Mouse absolute position: x={x}, y={y}, screen_height={screen_height}")  # Debug
-
-        if y >= screen_height - 50:  # Adjust the threshold as needed
+    def _check_mouse_position_main(self, x: int, y: int) -> None:
+        """Fullscreen autohide toolbar; Tk-only — must run on main thread."""
+        try:
+            screen_height = self.video_window.winfo_screenheight()
+        except Exception:
+            return
+        if y >= screen_height - 50:
             self.show_controls_frame()
         else:
             self.hide_controls_frame()
+
+    def check_mouse_position(self, x, y):
+        # Worker thread: throttle + queue only — no Tk.
+        if getattr(self, "_pynput_bridge_dead", True):
+            return
+        t = time.monotonic()
+        if t - getattr(self, "_fullscreen_mousemove_throttle_ts", 0.0) < 0.04:
+            return
+        self._fullscreen_mousemove_throttle_ts = t
+        try:
+            self._pynput_queue.put_nowait(("move", int(x), int(y)))
+        except queue.Full:
+            pass
 
     # def check_mouse_position(self, event):
         # screen_width, screen_height = pyautogui.size()  # Get the screen size
@@ -2809,6 +2875,15 @@ class VideoPlayer:
         Tato metoda je navržena tak, aby byla odolná proti chybám.
         """
         logging.info("[Cleanup] Spouštím úklid pro video přehrávač...")
+        self._pynput_bridge_dead = True
+        pj = getattr(self, "_pynput_pump_job", None)
+        if pj is not None:
+            try:
+                if hasattr(self, "video_window") and self.video_window.winfo_exists():
+                    self.video_window.after_cancel(pj)
+            except Exception:
+                pass
+            self._pynput_pump_job = None
         try:
             self._cancel_broken_decode_checks()
             self._hide_broken_playback_overlay()

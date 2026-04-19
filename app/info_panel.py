@@ -10,16 +10,20 @@ from database import Database
 from video_operations import VideoPlayer
 from PIL import Image, ImageTk
 import os
+import queue
+import threading
+
 db = Database()
 import logging
-
-import threading
 
 
 class InfoPanelFrame(ctk.CTkFrame):
     def __init__(self, parent):
         super().__init__(parent, height=150)
         logging.debug("InfoPanel initializing")
+        # Preview: worker may only push file-check results; VLC + Tk stay on the main thread.
+        self._preview_ticket = 0
+        self._preview_ready_queue = queue.Queue(maxsize=64)
         
         self.pack_propagate(False)
         self.collapsed = False
@@ -195,94 +199,124 @@ class InfoPanelFrame(ctk.CTkFrame):
                     
                     
 
-    def start_video_preview(self, video_path):
-        """
-        Starts video preview in the info panel. 
-        Checks the auto-play variable: if disabled, pauses the video right after loading the first frame
-        using a delayed force pause to avoid VLC engine race conditions.
-        """
-        self._pending_preview_path = video_path
+    def _preview_process_ready_queue(self, retries: int = 0) -> None:
+        """Tk main thread: consume file-check result from worker, then run VLC."""
+        want_t = self._preview_ticket
+        want_p = getattr(self, "_pending_preview_path", None)
+        buf = []
+        try:
+            while True:
+                buf.append(self._preview_ready_queue.get_nowait())
+        except queue.Empty:
+            pass
+        match = None
+        for item in buf:
+            ticket, vp, ok = item
+            if ticket == want_t and vp == want_p:
+                match = (vp, ok)
+        if match is None:
+            if retries < 50:
+                self.after(25, lambda r=retries + 1: self._preview_process_ready_queue(r))
+            return
+        vp, ok = match
+        if not ok:
+            logging.warning("[Preview] Missing file, skip preview: %s", vp)
+            self.show_preview_placeholder("File not found.")
+            return
+        self._preview_load_media_and_embed(vp)
 
-        def load_media_and_prepare():
-            vp = video_path
-            if getattr(self, "_pending_preview_path", None) != vp:
-                return
+    def _preview_load_media_and_embed(self, vp: str) -> None:
+        """VLC media_new + embed + play — must run on Tk main thread only."""
+        if getattr(self, "_pending_preview_path", None) != vp:
+            return
+        media = None
+        try:
+            media = self.preview_player.instance.media_new(vp)
+        except Exception as e:
+            logging.info("[Preview] VLC media_new failed: %s", e)
             media = None
-            try:
-                media = self.preview_player.instance.media_new(vp)
-            except Exception as e:
-                logging.info("[THREAD] VLC media_new failed: %s", e)
-                media = None
 
+        if getattr(self, "_pending_preview_path", None) != vp:
+            if media is not None:
+                try:
+                    media.release()
+                except Exception:
+                    pass
+            logging.debug("[Preview] Cancelled before embed (path=%s).", vp)
+            return
+
+        def embed_and_play_in_gui():
             if getattr(self, "_pending_preview_path", None) != vp:
                 if media is not None:
                     try:
                         media.release()
                     except Exception:
                         pass
-                logging.debug("[THREAD] Preview cancelled before embed (path=%s).", vp)
+                logging.info("[GUI] Preview request obsolete (user clicked elsewhere).")
                 return
 
-            def embed_and_play_in_gui():
-                if getattr(self, "_pending_preview_path", None) != vp:
-                    if media is not None:
-                        try:
-                            media.release()
-                        except Exception:
-                            pass
-                    logging.info("[GUI] Preview request obsolete (user clicked elsewhere).")
-                    return
+            frame = self.preview_player.video_window
+            if not frame.winfo_exists():
+                logging.info("[GUI] Preview video_window does not exist.")
+                return
 
-                frame = self.preview_player.video_window
-                if not frame.winfo_exists():
-                    logging.info("[GUI] Preview video_window does not exist.")
-                    return
+            try:
+                if getattr(self, "preview_canvas", None) is not None:
+                    self.preview_canvas.destroy()
+                    self.preview_canvas = None
 
-                try:
-                    # Remove previous image preview if exists
-                    if getattr(self, "preview_canvas", None) is not None:
-                        self.preview_canvas.destroy()
-                        self.preview_canvas = None
+                if not frame.winfo_ismapped():
+                    frame.pack(expand=True, fill="both")
 
-                    # Show video window if hidden
-                    if not frame.winfo_ismapped():
-                        frame.pack(expand=True, fill="both")
+                if media is not None:
+                    self.preview_player.player.set_media(media)
+                    frame.update()
+                    self.preview_player.player.set_hwnd(frame.winfo_id())
+                    self.preview_player.player.audio_set_volume(0)
+                    self.preview_player.player.play()
+                    self.preview_player.playing = True
 
-                    if media is not None:
-                        self.preview_player.player.set_media(media)
-                        frame.update()
-                        self.preview_player.player.set_hwnd(frame.winfo_id())
-                        self.preview_player.player.audio_set_volume(0)
-                        
-                        # Start playback to load the first frame
-                        self.preview_player.player.play()
-                        self.preview_player.playing = True
+                    if hasattr(self, "preview_auto_play_var") and not self.preview_auto_play_var.get():
+                        def force_pause():
+                            if self.preview_player and self.preview_player.player:
+                                self.preview_player.player.pause()
+                                self.preview_player.playing = False
 
-                        # Pause after a short delay if Auto Play is disabled
-                        # The delay must be long enough for VLC to actually start decoding
-                        if hasattr(self, "preview_auto_play_var") and not self.preview_auto_play_var.get():
-                            def force_pause():
-                                if self.preview_player and self.preview_player.player:
-                                    self.preview_player.player.pause()
-                                    self.preview_player.playing = False
-                            
-                            # Increased timeout to 400ms to prevent race conditions with VLC engine
-                            self.preview_player.video_window.after(400, force_pause)
+                        self.preview_player.video_window.after(400, force_pause)
 
-                        # Bind play/pause toggle
-                        if hasattr(self.preview_player, "video_label"):
-                            self.preview_player.video_label.bind("<Button-1>", self.preview_player.toggle_play)
-                        self.preview_player.video_window.bind("<Button-1>", self.preview_player.toggle_play)
-                    else:
-                        self.show_preview_placeholder("Failed to load video.")
+                    if hasattr(self.preview_player, "video_label"):
+                        self.preview_player.video_label.bind("<Button-1>", self.preview_player.toggle_play)
+                    self.preview_player.video_window.bind("<Button-1>", self.preview_player.toggle_play)
+                else:
+                    self.show_preview_placeholder("Failed to load video.")
 
-                except Exception as e:
-                    logging.info("[GUI] set_hwnd/play failed:%s ", e)
-                    self.show_preview_placeholder("Error playing video.")
+            except Exception as e:
+                logging.info("[GUI] set_hwnd/play failed:%s ", e)
+                self.show_preview_placeholder("Error playing video.")
 
-            self.preview_player.video_window.after(0, embed_and_play_in_gui)
+        self.after(0, embed_and_play_in_gui)
 
-        threading.Thread(target=load_media_and_prepare, daemon=True).start()
+    def start_video_preview(self, video_path):
+        """
+        Starts video preview in the info panel.
+        A background thread only checks that the file exists (keeps UI responsive while browsing).
+        VLC (media_new, set_hwnd, play) and all Tk updates run on the main thread — never call
+        them from the worker (Windows freezes / crashes when Tk/VLC are touched off-thread).
+        """
+        self._pending_preview_path = video_path
+        self._preview_ticket += 1
+        ticket = self._preview_ticket
+        vp = video_path
+
+        def worker_file_check():
+            try:
+                ok = os.path.isfile(vp)
+                self._preview_ready_queue.put_nowait((ticket, vp, ok))
+            except queue.Full:
+                pass
+
+        threading.Thread(target=worker_file_check, daemon=True).start()
+        self.after(0, lambda: self._preview_process_ready_queue(0))
 
 
 
