@@ -84,6 +84,10 @@ DEFAULT_HOTKEYS = {
     'loop_start': '<Shift-S>',
     'loop_end': '<Shift-E>',
     'loop_toggle': '<Shift-L>',
+    'bookmark_next': '<Alt-Right>',
+    'bookmark_prev': '<Alt-Left>',
+    'long_seek_forward': '<Shift-Right>',
+    'long_seek_backward': '<Shift-Left>',
 
     # --- Speed (Video) ---
     'video_speed_up': '<greater>',

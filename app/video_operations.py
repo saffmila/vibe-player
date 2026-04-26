@@ -298,6 +298,10 @@ class VideoPlayer:
         self.video_window.bind("<Shift-S>", lambda e: self.controller.set_loop_start_shortcut())
         self.video_window.bind("<Shift-E>", lambda e: self.controller.set_loop_end_shortcut())
         self.video_window.bind("<Shift-L>", lambda e: self.controller.toggle_loop_shortcut())
+        self.video_window.bind("<Alt-Right>", lambda e: self.skip_to_next_bookmark())
+        self.video_window.bind("<Alt-Left>", lambda e: self.skip_to_previous_bookmark())
+        self.video_window.bind("<Shift-Right>", lambda e: self.long_seek(direction=1))
+        self.video_window.bind("<Shift-Left>", lambda e: self.long_seek(direction=-1))
 
         # Speed bindings when this window has focus
         self.video_window.bind("<greater>", lambda e: self.speed_step(+1))
@@ -1122,6 +1126,74 @@ class VideoPlayer:
             )
         else:
             logging.info("universal_dialog not available")
+
+    def skip_to_next_bookmark(self):
+        """Seek to the nearest bookmark after current playback time."""
+        if not self.player:
+            return
+        if not self.bookmarks:
+            logging.info("[Bookmark] No bookmarks available.")
+            return
+
+        current_time = max(0.0, self.player.get_time() / 1000.0)
+        sorted_times = sorted(
+            float(b.get("time", 0.0))
+            for b in self.bookmarks
+            if isinstance(b, dict) and b.get("time") is not None
+        )
+        next_time = next((t for t in sorted_times if t > current_time + 0.05), None)
+        if next_time is None:
+            logging.info("[Bookmark] Already at or beyond the last bookmark.")
+            return
+
+        self.player.set_time(int(next_time * 1000))
+        self.last_position = int(next_time * 1000)
+        logging.info("[Bookmark] Jumped to next bookmark: %.2fs", next_time)
+
+    def skip_to_previous_bookmark(self):
+        """Seek to the nearest bookmark before current playback time."""
+        if not self.player:
+            return
+        if not self.bookmarks:
+            logging.info("[Bookmark] No bookmarks available.")
+            return
+
+        current_time = max(0.0, self.player.get_time() / 1000.0)
+        sorted_times = sorted(
+            float(b.get("time", 0.0))
+            for b in self.bookmarks
+            if isinstance(b, dict) and b.get("time") is not None
+        )
+        prev_candidates = [t for t in sorted_times if t < current_time - 0.05]
+        prev_time = prev_candidates[-1] if prev_candidates else None
+        if prev_time is None:
+            logging.info("[Bookmark] Already at or before the first bookmark.")
+            return
+
+        self.player.set_time(int(prev_time * 1000))
+        self.last_position = int(prev_time * 1000)
+        logging.info("[Bookmark] Jumped to previous bookmark: %.2fs", prev_time)
+
+    def long_seek(self, direction: int, seconds: float = 10.0):
+        """Seek by a larger fixed delta. direction: +1 forward, -1 backward."""
+        if not self.player:
+            return
+        try:
+            current_ms = max(0, int(self.player.get_time()))
+            duration_ms = max(0, int(self.player.get_length() or 0))
+        except Exception:
+            return
+
+        delta_ms = int(max(0.1, float(seconds)) * 1000) * (1 if direction >= 0 else -1)
+        target_ms = current_ms + delta_ms
+        if duration_ms > 0:
+            target_ms = min(max(0, target_ms), duration_ms)
+        else:
+            target_ms = max(0, target_ms)
+
+        self.player.set_time(target_ms)
+        self.last_position = target_ms
+        logging.info("[Seek] Long seek %s by %.1fs to %.2fs", "forward" if direction >= 0 else "backward", seconds, target_ms / 1000.0)
 
 
 
@@ -2062,6 +2134,8 @@ class VideoPlayer:
         menu.add_command(label="Create Thumbnail", command=self.generate_thumbnail)
         
         menu.add_command(label="Add Bookmark", command=self.add_bookmark)
+        menu.add_command(label="Previous Bookmark", command=self.skip_to_previous_bookmark)
+        menu.add_command(label="Next Bookmark", command=self.skip_to_next_bookmark)
 
         if getattr(self, "use_gpu_upscale", False):
             menu.add_separator()

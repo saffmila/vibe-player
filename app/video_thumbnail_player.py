@@ -2563,9 +2563,13 @@ class VideoThumbnailPlayer(
             return handler
 
         # --- Playback and navigation ---
-        self.bind_all(self.hotkeys_map['play_pause'], g(lambda e: self.skip_global_next()))
+        self.bind_all(self.hotkeys_map['play_pause'], g(lambda e: self.global_play_pause()))
         self.bind_all(self.hotkeys_map['skip_next'], g(lambda e: self.skip_global_next()))
         self.bind_all(self.hotkeys_map['skip_back'], g(lambda e: self.skip_global_back()))
+        self.bind_all(self.hotkeys_map['bookmark_next'], g(lambda e: self.skip_to_next_bookmark_global()))
+        self.bind_all(self.hotkeys_map['bookmark_prev'], g(lambda e: self.skip_to_previous_bookmark_global()))
+        self.bind_all(self.hotkeys_map['long_seek_forward'], g(lambda e: self.long_seek_forward_global()))
+        self.bind_all(self.hotkeys_map['long_seek_backward'], g(lambda e: self.long_seek_backward_global()))
         self.bind(self.hotkeys_map['enter_action'], self.on_thumbnail_enter_key)
 
         # --- Playlists ---

@@ -3973,6 +3973,46 @@ class VtpGridMixin:
         else:
             logging.info("[DEBUG] No active viewer for skip_next")
 
+    def global_play_pause(self):
+        """Toggle play/pause on active video player (resume from pause when possible)."""
+        active_video = getattr(self, "current_video_window", None) or getattr(self, "active_player", None)
+        if active_video and hasattr(active_video, "toggle_play"):
+            active_video.toggle_play()
+        else:
+            logging.info("[DEBUG] No active video player for play/pause")
+
+    def skip_to_next_bookmark_global(self):
+        """Jump to the next bookmark on the active video player."""
+        active_video = getattr(self, "current_video_window", None) or getattr(self, "active_player", None)
+        if active_video and hasattr(active_video, "skip_to_next_bookmark"):
+            active_video.skip_to_next_bookmark()
+        else:
+            logging.info("[DEBUG] No active video player for next bookmark")
+
+    def skip_to_previous_bookmark_global(self):
+        """Jump to the previous bookmark on the active video player."""
+        active_video = getattr(self, "current_video_window", None) or getattr(self, "active_player", None)
+        if active_video and hasattr(active_video, "skip_to_previous_bookmark"):
+            active_video.skip_to_previous_bookmark()
+        else:
+            logging.info("[DEBUG] No active video player for previous bookmark")
+
+    def long_seek_forward_global(self):
+        """Long seek forward on the active video player."""
+        active_video = getattr(self, "current_video_window", None) or getattr(self, "active_player", None)
+        if active_video and hasattr(active_video, "long_seek"):
+            active_video.long_seek(direction=1)
+        else:
+            logging.info("[DEBUG] No active video player for long seek forward")
+
+    def long_seek_backward_global(self):
+        """Long seek backward on the active video player."""
+        active_video = getattr(self, "current_video_window", None) or getattr(self, "active_player", None)
+        if active_video and hasattr(active_video, "long_seek"):
+            active_video.long_seek(direction=-1)
+        else:
+            logging.info("[DEBUG] No active video player for long seek backward")
+
     def skip_global_back(self):
         if self.current_video_window:
             self.current_video_window.skip_back()

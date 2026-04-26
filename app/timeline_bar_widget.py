@@ -344,6 +344,21 @@ class TimelineBarWidget(ctk.CTkFrame):
         menu.add_separator()
 
         # --- BOOKMARKS ---
+        bookmark_player = getattr(self.controller, "current_video_window", None) or getattr(self.controller, "active_player", None)
+        can_skip_prev = bool(bookmark_player and hasattr(bookmark_player, "skip_to_previous_bookmark"))
+        can_skip_next = bool(bookmark_player and hasattr(bookmark_player, "skip_to_next_bookmark"))
+
+        menu.add_command(
+            label="Previous Bookmark (Alt+Left)",
+            command=(lambda p=bookmark_player: p.skip_to_previous_bookmark()) if can_skip_prev else (lambda: None),
+            state="normal" if can_skip_prev else "disabled",
+        )
+        menu.add_command(
+            label="Next Bookmark (Alt+Right)",
+            command=(lambda p=bookmark_player: p.skip_to_next_bookmark()) if can_skip_next else (lambda: None),
+            state="normal" if can_skip_next else "disabled",
+        )
+        menu.add_separator()
         menu.add_command(label="Add Bookmark", command=lambda: self.add_bookmark_at(clicked_time))
         
         closest_marker = self.get_closest_marker(clicked_time, threshold=2.0)
