@@ -141,6 +141,8 @@ class VideoPlayer:
         self.timeline_widget = None
         self._loaded_video_path = None
         self._duration_retry_count = 0
+        self.slider_hover_popup = None
+        self.slider_hover_label = None
         self._init_cinematic_theme()
 
         if embed:
@@ -258,6 +260,7 @@ class VideoPlayer:
             self.slider_canvas.bind("<Configure>", lambda e: self.render_slider(self._slider_percent))
             self.slider_canvas.bind("<Enter>", self.show_slider_thumb)
             self.slider_canvas.bind("<Leave>", self.hide_slider_thumb)
+            self.slider_canvas.bind("<Motion>", self.update_slider_hover_time_popup)
             self.slider_canvas.bind("<Button-1>", self._timeline_drag)
             self.slider_canvas.bind("<B1-Motion>", self._timeline_drag)
             self.slider_canvas.bind("<ButtonRelease-1>", self.slider_update)
@@ -276,6 +279,8 @@ class VideoPlayer:
             self.slider_canvas.bind("<Configure>", lambda e: self.draw_loop_bar(), add="+")
 
             for _w in (self.timeline_hit_host, self.loop_bar_canvas):
+                _w.bind("<Enter>", self.show_slider_thumb)
+                _w.bind("<Motion>", self.update_slider_hover_time_popup)
                 _w.bind("<Button-1>", self._timeline_drag)
                 _w.bind("<B1-Motion>", self._timeline_drag)
                 _w.bind("<ButtonRelease-1>", self.slider_update)
@@ -294,6 +299,7 @@ class VideoPlayer:
         self.video_window.bind("<Alt-KP_Enter>", self.toggle_fullscreen)
         self.video_window.bind("<Escape>", self._handle_escape_key)
         self.video_window.bind("<Double-Button-1>", self.toggle_fullscreen)
+        self.video_window.bind("<Motion>", self._handle_player_motion_for_slider_popup, add="+")
                 # Bring the video player to the top
         self.video_window.bind("<Shift-B>", lambda e: self.add_bookmark())                
         
@@ -3056,6 +3062,7 @@ class VideoPlayer:
         except Exception:
             pass
         self.playing = False  # Zastaví všechny smyčky `update_time_slider`
+        self.hide_slider_hover_time_popup()
 
         if self.global_listener:
             self.global_listener.stop()
@@ -3116,14 +3123,133 @@ class VideoPlayer:
         val = ((x - left_pad) / float(usable)) * 100.0
         self.seek_video(val)
         self.render_slider(val)
+        self.update_slider_hover_time_popup(event)
 
     def show_slider_thumb(self, event=None):
         self._slider_thumb_visible = True
         self.render_slider(getattr(self, "_slider_percent", 0.0))
+        self.update_slider_hover_time_popup(event)
 
     def hide_slider_thumb(self, event=None):
         self._slider_thumb_visible = False
         self.render_slider(getattr(self, "_slider_percent", 0.0))
+        if not self._pointer_inside_slider_zone():
+            self.hide_slider_hover_time_popup()
+
+    def _format_seconds_to_timestamp(self, total_seconds):
+        seconds = max(0, int(round(float(total_seconds))))
+        h, rem = divmod(seconds, 3600)
+        m, s = divmod(rem, 60)
+        if h > 0:
+            return f"{h:02}:{m:02}:{s:02}"
+        return f"{m:02}:{s:02}"
+
+    def _estimate_slider_hover_seconds(self, event):
+        canvas = getattr(self, "slider_canvas", None)
+        if canvas is None or not canvas.winfo_exists():
+            return None
+        try:
+            w = canvas.winfo_width()
+            h = canvas.winfo_height()
+            local_x = event.x if getattr(event, "widget", None) is canvas else (event.x_root - canvas.winfo_rootx())
+        except Exception:
+            return None
+        if w <= 1:
+            return None
+
+        thumb_r = max(3, (h - 6) // 2)
+        left_pad = thumb_r + 1
+        right_pad = max(left_pad + 1, w - thumb_r - 1)
+        x = max(left_pad, min(local_x, right_pad))
+        usable = max(1, right_pad - left_pad)
+        pct = ((x - left_pad) / float(usable)) * 100.0
+
+        duration_ms = 0
+        if getattr(self, "player", None):
+            try:
+                duration_ms = int(self.player.get_length() or 0)
+            except Exception:
+                duration_ms = 0
+        if duration_ms <= 0:
+            return None
+        return (pct / 100.0) * (duration_ms / 1000.0)
+
+    def update_slider_hover_time_popup(self, event=None):
+        if event is None:
+            return
+        seconds = self._estimate_slider_hover_seconds(event)
+        if seconds is None:
+            self.hide_slider_hover_time_popup()
+            return
+
+        text = self._format_seconds_to_timestamp(seconds)
+        if not self.slider_hover_popup or not self.slider_hover_popup.winfo_exists():
+            self.slider_hover_popup = tk.Toplevel(self.video_window)
+            self.slider_hover_popup.wm_overrideredirect(True)
+            try:
+                self.slider_hover_popup.attributes("-topmost", True)
+            except Exception:
+                pass
+            self.slider_hover_popup.configure(
+                bg="#2b2b2b",
+                highlightbackground="#777777",
+                highlightthickness=1,
+            )
+            self.slider_hover_label = tk.Label(
+                self.slider_hover_popup,
+                text=text,
+                justify=tk.LEFT,
+                anchor="w",
+                bg="#2b2b2b",
+                fg="#d0d0d0",
+                relief="solid",
+                borderwidth=1,
+                font=("Segoe UI", 9),
+                padx=10,
+                pady=6,
+            )
+            self.slider_hover_label.pack()
+        else:
+            if self.slider_hover_label and self.slider_hover_label.winfo_exists():
+                self.slider_hover_label.configure(text=text)
+
+        try:
+            popup_x = int(event.x_root + 10)
+            popup_y = int(event.y_root - 30)
+            self.slider_hover_popup.geometry(f"+{popup_x}+{popup_y}")
+            self.slider_hover_popup.lift()
+        except Exception:
+            pass
+
+    def _pointer_inside_slider_zone(self):
+        try:
+            px, py = self.video_window.winfo_pointerxy()
+            canvas = getattr(self, "slider_canvas", None)
+            if canvas is None or not canvas.winfo_exists():
+                return False
+            x0 = canvas.winfo_rootx()
+            y0 = canvas.winfo_rooty()
+            x1 = x0 + canvas.winfo_width()
+            y1 = y0 + canvas.winfo_height()
+        except Exception:
+            return False
+        return x0 <= px <= x1 and y0 <= py <= y1
+
+    def hide_slider_hover_time_popup(self):
+        popup = getattr(self, "slider_hover_popup", None)
+        if popup and popup.winfo_exists():
+            try:
+                popup.destroy()
+            except Exception:
+                pass
+        self.slider_hover_popup = None
+        self.slider_hover_label = None
+
+    def _handle_player_motion_for_slider_popup(self, event=None):
+        if not getattr(self, "slider_hover_popup", None):
+            return
+        if not self._pointer_inside_slider_zone():
+            self.hide_slider_hover_time_popup()
 
     def render_slider(self, percentage=0.0):
         """Render custom seek bar on canvas."""
