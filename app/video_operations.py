@@ -1452,7 +1452,7 @@ class VideoPlayer:
         Sets up visible volume icon + volume slider in controls row.
         """
         volume_frame = ctk.CTkFrame(self.controls_frame, fg_color="transparent")
-        volume_frame.pack(side=ctk.RIGHT, padx=(8, 8), pady=(0, 2))
+        volume_frame.pack(side=ctk.RIGHT, padx=(8, 8), pady=(0, 7))
 
         self.volume_label = ctk.CTkLabel(
             volume_frame,
@@ -1607,8 +1607,9 @@ class VideoPlayer:
                 self.repeat_icon, self.repeat_icon_hover = self._icon_hover_pair(
                     os.path.join(P, "repeat.png"), alpha_mult=0.8
                 )
+                right_icon_size = (17, 17)
                 self.settings_icon, self.settings_icon_hover = self._icon_hover_pair(
-                    os.path.join(P, "settings.png"), tint_color="#545959"
+                    os.path.join(P, "settings.png"), size=right_icon_size, tint_color="#545959"
                 )
                 self.loop_menu_icon = None
                 self.loop_menu_icon_hover = None
@@ -1616,13 +1617,13 @@ class VideoPlayer:
                     _lp = os.path.join(P, _loop_name)
                     if os.path.isfile(_lp):
                         self.loop_menu_icon, self.loop_menu_icon_hover = (
-                            self._icon_hover_pair(_lp, tint_color="#545959")
+                            self._icon_hover_pair(_lp, size=right_icon_size, tint_color="#545959")
                         )
                         break
                 self.playlist_icon = self._load_tinted_icon(os.path.join(P, "playlist_ico.png"))
                 self.subtitles_icon = self._load_tinted_icon(os.path.join(P, "subtitles.png"))
                 self.volume_icon, self.volume_icon_hover = self._icon_hover_pair(
-                    os.path.join(P, "volume.png")
+                    os.path.join(P, "volume.png"), size=right_icon_size
                 )
                 
                 logging.info("Player icons loaded successfully from /icons.")
@@ -1680,6 +1681,7 @@ class VideoPlayer:
         icon_hover = toolbar_bg
         button_text = self.on_surface
         btn_padx = 6
+        controls_pady = (0, 7)
         # Hover feedback = cyan icon only (see _wire_toolbar_icon_hovers).
         # Replace ttk.Button with CTkButton and remove text for buttons with icons
         self.play_button = ctk.CTkButton(self.controls_frame, width=buttonWidth, height=28, text="", image=self.play_button_icon, command=self.toggle_play, fg_color=buttonFG_color, hover_color=icon_hover, text_color=button_text, corner_radius=4)
@@ -1723,18 +1725,18 @@ class VideoPlayer:
         # self.subtitles_button = ctk.CTkButton(self.controls_frame,width= buttonWidth,fg_color=buttonFG_color, text="", image=self.subtitles_icon, command=self.toggle_subtitles)
 
         # Pack the buttons
-        self.play_button.pack(side=ctk.LEFT, padx=btn_padx, pady=(0, 2))
-        self.rewind_start_button.pack(side=ctk.LEFT, padx=btn_padx, pady=(0, 2))
-        self.rewind_end_button.pack(side=ctk.LEFT, padx=btn_padx, pady=(0, 2))
+        self.play_button.pack(side=ctk.LEFT, padx=btn_padx, pady=controls_pady)
+        self.rewind_start_button.pack(side=ctk.LEFT, padx=btn_padx, pady=controls_pady)
+        self.rewind_end_button.pack(side=ctk.LEFT, padx=btn_padx, pady=controls_pady)
         # self.close_button.pack(side=ctk.RIGHT, padx=5)
-        self.skip_back_button.pack(side=ctk.LEFT, padx=btn_padx, pady=(0, 2))
-        self.skip_next_button.pack(side=ctk.LEFT, padx=btn_padx, pady=(0, 2))
-        self.fullscreen_button.pack(side=ctk.LEFT, padx=btn_padx, pady=(0, 2))
-        self.repeat_button.pack(side=ctk.LEFT, padx=btn_padx, pady=(0, 2))
+        self.skip_back_button.pack(side=ctk.LEFT, padx=btn_padx, pady=controls_pady)
+        self.skip_next_button.pack(side=ctk.LEFT, padx=btn_padx, pady=controls_pady)
+        self.fullscreen_button.pack(side=ctk.LEFT, padx=btn_padx, pady=controls_pady)
+        self.repeat_button.pack(side=ctk.LEFT, padx=btn_padx, pady=controls_pady)
         # self.playlist_button.pack(side=ctk.LEFT, padx=5)
         # self.subtitles_button.pack(side=ctk.LEFT, padx=5)
-        self.video_menu_button.pack(side=ctk.RIGHT, padx=btn_padx, pady=(0, 2))
-        self.loop_menu_button.pack(side=ctk.RIGHT, padx=btn_padx, pady=(0, 2))
+        self.video_menu_button.pack(side=ctk.RIGHT, padx=btn_padx, pady=controls_pady)
+        self.loop_menu_button.pack(side=ctk.RIGHT, padx=btn_padx, pady=controls_pady)
         
 
         # Apply icon to play button if icon is available
