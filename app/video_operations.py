@@ -240,24 +240,27 @@ class VideoPlayer:
             self.timeline_hit_host.pack(side=ctk.LEFT, fill=ctk.X, expand=True, padx=(0, 8))
             self.timeline_hit_host.pack_propagate(False)
 
-            self.slider = ctk.CTkSlider(
+            self._slider_percent = 0.0
+            self._slider_thumb_visible = False
+            self.slider_track_color = self.outline_soft
+            self.slider_progress_color = self.primary
+            self.slider_thumb_color = self.primary
+            self.slider_canvas = tk.Canvas(
                 self.timeline_hit_host,
-                from_=0,
-                to=100,
-                orientation="horizontal",
-                command=self.slider_update,
-                fg_color=self.outline_soft,
-                progress_color=self.primary,
-                button_color=self.outline_soft,
-                button_hover_color=self.outline_soft,
-                button_corner_radius=0,
-                button_length=2,
-                corner_radius=0,
-                height=2,
+                height=28,
+                bg=self.surface_low,
+                bd=0,
+                highlightthickness=0,
+                relief="flat",
                 cursor="hand2",
             )
-            self.slider.set(0)
-            self.slider.pack(fill=ctk.X, expand=True, pady=(10, 10))
+            self.slider_canvas.pack(fill=ctk.X, expand=True, pady=(7, 7))
+            self.slider_canvas.bind("<Configure>", lambda e: self.render_slider(self._slider_percent))
+            self.slider_canvas.bind("<Enter>", self.show_slider_thumb)
+            self.slider_canvas.bind("<Leave>", self.hide_slider_thumb)
+            self.slider_canvas.bind("<Button-1>", self._timeline_drag)
+            self.slider_canvas.bind("<B1-Motion>", self._timeline_drag)
+            self.slider_canvas.bind("<ButtonRelease-1>", self.slider_update)
 
             self.loop_bar_canvas = tk.Canvas(
                 self.sub_frame,
@@ -268,14 +271,15 @@ class VideoPlayer:
                 cursor="hand2",
             )
 
-            self.loop_bar_canvas.place(in_=self.slider, relx=0, rely=1.1, relwidth=1.0)
+            self.loop_bar_canvas.place(in_=self.slider_canvas, relx=0, rely=1.05, relwidth=1.0)
             self.loop_bar_canvas.bind("<Configure>", lambda e: self.draw_loop_bar())
-            self.slider.bind("<Configure>", lambda e: self.draw_loop_bar())
+            self.slider_canvas.bind("<Configure>", lambda e: self.draw_loop_bar(), add="+")
 
-            for _w in (self.timeline_hit_host, self.slider, self.loop_bar_canvas):
+            for _w in (self.timeline_hit_host, self.loop_bar_canvas):
                 _w.bind("<Button-1>", self._timeline_drag)
                 _w.bind("<B1-Motion>", self._timeline_drag)
                 _w.bind("<ButtonRelease-1>", self.slider_update)
+            self.render_slider(0.0)
          
 
         
@@ -314,7 +318,6 @@ class VideoPlayer:
         
         if self.show_video_button_bar:
             self.setup_volume_slider()
-            self.volume_slider.set(self.current_volume)  # Update the slider to match the current volume
         
         # self.video_window.bind("<Shift-S>", self.set_loop_start)
         # self.video_window.bind("<Shift-E>", self.set_loop_end)
@@ -1446,16 +1449,11 @@ class VideoPlayer:
 
     def setup_volume_slider(self):
         """
-        Sets up the volume controls with a speaker icon and a shorter slider.
-        The speaker icon also acts as a mute button.
+        Sets up visible volume icon + volume slider in controls row.
         """
-        # Create a frame for the volume controls
         volume_frame = ctk.CTkFrame(self.controls_frame, fg_color="transparent")
-        # Right edge aligns with timeline's right edge:
-        # sub_frame has 8px outer padding + slider has 8px right padding => 16px.
-        volume_frame.pack(side=ctk.RIGHT, padx=(8, 16), pady=(0, 2))
+        volume_frame.pack(side=ctk.RIGHT, padx=(8, 8), pady=(0, 2))
 
-        # Create a clickable label with the speaker icon
         self.volume_label = ctk.CTkLabel(
             volume_frame,
             text="",
@@ -1472,33 +1470,30 @@ class VideoPlayer:
         )
         self.last_volume_before_mute = self.current_volume  # Store the initial volume
 
-        # Taller hit strip (~timeline thickness in the middle, generous vertical drag target).
-        self.volume_hit_host = ctk.CTkFrame(volume_frame, fg_color="transparent", width=80, height=20)
-        self.volume_hit_host.pack(side=ctk.LEFT, padx=(2, 0))
+        self._volume_thumb_visible = False
+        self._volume_percent = float(self.current_volume)
+
+        self.volume_hit_host = ctk.CTkFrame(volume_frame, fg_color="transparent", width=108, height=20)
+        self.volume_hit_host.pack(side=ctk.LEFT, padx=(0, 0))
         self.volume_hit_host.pack_propagate(False)
 
-        self.volume_slider = ctk.CTkSlider(
+        self.volume_canvas = tk.Canvas(
             self.volume_hit_host,
-            from_=0,
-            to=100,
-            orientation="horizontal",
-            width=80,
-            command=self.update_volume,
-            fg_color=self.outline_soft,
-            progress_color=self.volume_primary,
-            button_color=self.outline_soft,
-            button_hover_color=self.outline_soft,
-            button_corner_radius=0,
-            button_length=2,
-            corner_radius=0,
-            height=2,
+            width=108,
+            height=20,
+            bg=self.surface_low,
+            bd=0,
+            highlightthickness=0,
+            relief="flat",
+            cursor="hand2",
         )
-        self.volume_slider.set(self.current_volume)
-        self.volume_slider.place(relx=0.5, rely=0.5, anchor="center")
-
-        for _seq in ("<Button-1>", "<B1-Motion>"):
-            self.volume_hit_host.bind(_seq, self._volume_drag)
-            self.volume_slider.bind(_seq, self._volume_drag)
+        self.volume_canvas.place(relx=0.5, rely=0.5, anchor="center")
+        self.volume_canvas.bind("<Configure>", lambda e: self.render_volume_slider(self._volume_percent))
+        self.volume_canvas.bind("<Enter>", self.show_volume_thumb)
+        self.volume_canvas.bind("<Leave>", self.hide_volume_thumb)
+        self.volume_canvas.bind("<Button-1>", self._volume_drag)
+        self.volume_canvas.bind("<B1-Motion>", self._volume_drag)
+        self.render_volume_slider(self._volume_percent)
 
     def toggle_mute(self):
         """
@@ -1508,12 +1503,12 @@ class VideoPlayer:
             # If sound is on, mute it
             self.last_volume_before_mute = self.player.audio_get_volume()
             self.player.audio_set_volume(0)
-            self.volume_slider.set(0)
+            self.render_volume_slider(0)
             logging.info("Volume muted.")
         else:
             # If sound is muted, restore it to the last known volume
             self.player.audio_set_volume(self.last_volume_before_mute)
-            self.volume_slider.set(self.last_volume_before_mute)
+            self.render_volume_slider(self.last_volume_before_mute)
             logging.info(f"Volume unmuted to {self.last_volume_before_mute}%.")
         
 
@@ -2849,7 +2844,8 @@ class VideoPlayer:
 
             # 4. Resetujeme UI (časovač a slider)
             if not self.embed and self.show_video_button_bar:
-                self.slider.set(0)
+                self._slider_percent = 0.0
+                self.render_slider(0.0)
                 self.timer_label.configure(text="00:00 / 00:00".lower())
                 self.play_button.configure(
                     image=self.stop_button_icon if self.stop_button_icon else None,
@@ -2910,7 +2906,8 @@ class VideoPlayer:
 
         # 4. Resetujeme UI (časovač a slider)
         if not self.embed and self.show_video_button_bar:
-            self.slider.set(0)
+            self._slider_percent = 0.0
+            self.render_slider(0.0)
             self.timer_label.configure(text="00:00 / 00:00".lower())
             self.play_button.configure(
                 image=self.stop_button_icon if self.stop_button_icon else None,
@@ -3097,41 +3094,88 @@ class VideoPlayer:
 
 
     def _timeline_drag(self, event):
-        """Map pointer X to playhead using full hit-host width (not only the 2px track)."""
-        host = getattr(self, "timeline_hit_host", None)
-        if host is None:
+        """Map pointer X to playhead percentage using slider canvas width."""
+        canvas = getattr(self, "slider_canvas", None)
+        if canvas is None or not canvas.winfo_exists():
             return
         try:
-            w = host.winfo_width()
+            w = canvas.winfo_width()
         except tk.TclError:
             return
         if w <= 1:
             return
-        x = event.x_root - host.winfo_rootx()
-        x = max(0, min(x, w))
-        val = (x / float(w)) * 100.0
-        self.slider.set(val)
-        self.slider_update(event)
+        x = event.x if getattr(event, "widget", None) is canvas else (event.x_root - canvas.winfo_rootx())
+        h = canvas.winfo_height()
+        thumb_r = max(3, (h - 6) // 2)
+        left_pad = thumb_r + 1
+        right_pad = max(left_pad + 1, w - thumb_r - 1)
+        x = max(left_pad, min(x, right_pad))
+        usable = max(1, right_pad - left_pad)
+        val = ((x - left_pad) / float(usable)) * 100.0
+        self.seek_video(val)
+        self.render_slider(val)
 
-    def slider_update(self, event=None):
-        # Spočítej nový čas podle pozice slideru
-        slider_val = self.slider.get()
+    def show_slider_thumb(self, event=None):
+        self._slider_thumb_visible = True
+        self.render_slider(getattr(self, "_slider_percent", 0.0))
+
+    def hide_slider_thumb(self, event=None):
+        self._slider_thumb_visible = False
+        self.render_slider(getattr(self, "_slider_percent", 0.0))
+
+    def render_slider(self, percentage=0.0):
+        """Render custom seek bar on canvas."""
+        canvas = getattr(self, "slider_canvas", None)
+        if canvas is None or not canvas.winfo_exists():
+            return
+        w = canvas.winfo_width()
+        h = canvas.winfo_height()
+        if w <= 1 or h <= 1:
+            return
+        pct = max(0.0, min(float(percentage), 100.0))
+        self._slider_percent = pct
+        cy = h // 2
+        track_w = 4
+        thumb_r = max(3, (h - 6) // 2)
+        left_pad = thumb_r + 1
+        right_pad = max(left_pad + 1, w - thumb_r - 1)
+        usable = max(1, right_pad - left_pad)
+        cx = int(left_pad + (pct / 100.0) * usable)
+
+        canvas.delete("slider_bg")
+        canvas.delete("slider_progress")
+        canvas.delete("slider_thumb")
+
+        canvas.create_line(left_pad, cy, right_pad, cy, fill=self.slider_track_color, width=track_w, tags="slider_bg")
+        canvas.create_line(left_pad, cy, cx, cy, fill=self.slider_progress_color, width=track_w, tags="slider_progress")
+        canvas.create_oval(
+            cx - thumb_r,
+            cy - thumb_r,
+            cx + thumb_r,
+            cy + thumb_r,
+            fill=self.slider_thumb_color,
+            outline="",
+            tags="slider_thumb",
+        )
+        canvas.itemconfigure("slider_thumb", state="normal" if self._slider_thumb_visible else "hidden")
+        canvas.tag_raise("slider_thumb")
+
+    def seek_video(self, percentage):
+        """Seek player to percentage and sync internal state."""
+        if not self.player:
+            return
         duration = self.player.get_length()
         if duration <= 0:
-            # logging.info("[DEBUG] slider_update: Invalid duration.")
             return
-
-        new_time = (slider_val / 100.0) * (duration / 1000.0)  # v sekundách
-        # logging.info(f"[DEBUG] slider_update: Seeking video to {new_time:.2f}s")
-
-        if self.player:
-            self.player.set_time(int(new_time * 1000))
-            self.last_position = int(new_time * 1000)
-            # logging.info(f"[DEBUG] slider_update: Set player time to {int(new_time * 1000)} ms")
-
+        pct = max(0.0, min(float(percentage), 100.0))
+        new_time = (pct / 100.0) * (duration / 1000.0)
+        self.player.set_time(int(new_time * 1000))
+        self.last_position = int(new_time * 1000)
         if hasattr(self, "timeline_widget") and self.timeline_widget is not None:
-            # logging.info(f"[DEBUG] slider_update → timeline_widget.set_current_time({new_time:.2f})")
             self.timeline_widget.set_current_time(new_time)
+
+    def slider_update(self, event=None):
+        self.seek_video(getattr(self, "_slider_percent", 0.0))
 
     # def slider_update(self, event):
         # pos = self.slider.get()
@@ -3142,22 +3186,74 @@ class VideoPlayer:
         
         
     def _volume_drag(self, event):
-        """Map pointer X to volume using the full hit host width (easier than hitting the 2px bar)."""
-        host = self.volume_hit_host
+        """Map pointer X to volume using custom volume canvas."""
+        host = getattr(self, "volume_canvas", None)
+        if host is None or not host.winfo_exists():
+            return
         try:
             w = host.winfo_width()
         except tk.TclError:
             return
         if w <= 1:
             return
-        x = event.x_root - host.winfo_rootx()
-        x = max(0, min(x, w))
-        val = (x / float(w)) * 100.0
-        self.volume_slider.set(val)
+        h = host.winfo_height()
+        thumb_r = max(3, (h - 6) // 2)
+        left_pad = thumb_r + 1
+        right_pad = max(left_pad + 1, w - thumb_r - 1)
+        x = event.x if getattr(event, "widget", None) is host else (event.x_root - host.winfo_rootx())
+        x = max(left_pad, min(x, right_pad))
+        usable = max(1, right_pad - left_pad)
+        val = ((x - left_pad) / float(usable)) * 100.0
+        self.render_volume_slider(val)
         self.update_volume(val)
+
+    def show_volume_thumb(self, event=None):
+        self._volume_thumb_visible = True
+        self.render_volume_slider(getattr(self, "_volume_percent", float(self.current_volume)))
+
+    def hide_volume_thumb(self, event=None):
+        self._volume_thumb_visible = False
+        self.render_volume_slider(getattr(self, "_volume_percent", float(self.current_volume)))
+
+    def render_volume_slider(self, percentage=0.0):
+        canvas = getattr(self, "volume_canvas", None)
+        if canvas is None or not canvas.winfo_exists():
+            return
+        w = canvas.winfo_width()
+        h = canvas.winfo_height()
+        if w <= 1 or h <= 1:
+            return
+        pct = max(0.0, min(float(percentage), 100.0))
+        self._volume_percent = pct
+        cy = h // 2
+        track_w = 4
+        thumb_r = max(3, (h - 6) // 2)
+        left_pad = thumb_r + 1
+        right_pad = max(left_pad + 1, w - thumb_r - 1)
+        usable = max(1, right_pad - left_pad)
+        cx = int(left_pad + (pct / 100.0) * usable)
+
+        canvas.delete("volume_bg")
+        canvas.delete("volume_progress")
+        canvas.delete("volume_thumb")
+        progress_color = self.slider_progress_color if self._volume_thumb_visible else self.volume_primary
+        canvas.create_line(left_pad, cy, right_pad, cy, fill=self.slider_track_color, width=track_w, tags="volume_bg")
+        canvas.create_line(left_pad, cy, cx, cy, fill=progress_color, width=track_w, tags="volume_progress")
+        canvas.create_oval(
+            cx - thumb_r,
+            cy - thumb_r,
+            cx + thumb_r,
+            cy + thumb_r,
+            fill=self.slider_thumb_color,
+            outline="",
+            tags="volume_thumb",
+        )
+        canvas.itemconfigure("volume_thumb", state="normal" if self._volume_thumb_visible else "hidden")
+        canvas.tag_raise("volume_thumb")
 
     def update_volume(self, volume):
         self.current_volume = int(float(volume))
+        self.render_volume_slider(self.current_volume)
         if self.player:
             self.player.audio_set_volume(self.current_volume)
             logging.info(f"Volume set to: {self.current_volume}")  # Debug
@@ -3227,8 +3323,8 @@ class VideoPlayer:
             if duration > 0:
                 self._duration_retry_count = 0
                 pos = current_time / duration * 100  # percent
-                if hasattr(self, "slider") and self.slider and self.slider.winfo_exists():
-                    self.slider.set(pos)
+                if hasattr(self, "slider_canvas") and self.slider_canvas and self.slider_canvas.winfo_exists():
+                    self.render_slider(pos)
             else:
                 self._duration_retry_count = getattr(self, "_duration_retry_count", 0) + 1
                 if self._duration_retry_count <= 80:
