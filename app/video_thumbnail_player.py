@@ -2544,6 +2544,17 @@ class VideoThumbnailPlayer(
         # Only block when the focused field is in a window other than the main app
         return focused.winfo_toplevel() is not self
 
+    def _is_app_focused(self):
+        """Return True only when this Tk app currently owns keyboard focus."""
+        try:
+            focused = self.focus_get()
+            if focused is not None:
+                return True
+            # Fallback for focus living in another toplevel of the same app.
+            return self.focus_displayof() is not None
+        except Exception:
+            return False
+
     def bind_global_keys(self):
         """
         Binds all global hotkeys.
@@ -2557,6 +2568,8 @@ class VideoThumbnailPlayer(
         # Wrap callback: skip hotkey when a text field has focus
         def g(callback):
             def handler(event):
+                if not self._is_app_focused():
+                    return  # ignore hotkeys while user is in another application
                 if self._is_input_focused():
                     return  # let the event reach Entry/Text
                 return callback(event)
