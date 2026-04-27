@@ -2769,21 +2769,22 @@ class VtpGridMixin:
         # Check if the 'name' option is enabled in the menu.
         if self.file_info_vars.get("name").get():
             info_texts.append((file_name, "gray70")) # Display file name.
+        meta_color = "#8fa8bc"  # desaturated blue for non-keyword metadata
 
         # === THIS IS THE FIX ===
         # Check if the 'path' option is enabled in the menu.
         if self.file_info_vars.get("path").get():
             # If checked, add the full file path to the list.
-            info_texts.append((f"Path: {file_path}", "#9ec5e8"))
+            info_texts.append((file_path, meta_color))
 
         # Check if the 'file_size' option is enabled.
         if self.file_info_vars.get("file_size").get():
-            info_texts.append((f"Size: {os.path.getsize(file_path)} bytes", "#9ec5e8"))
+            info_texts.append((f"{os.path.getsize(file_path)} bytes", meta_color))
 
         # Check if the 'date_time' option is enabled.
         if self.file_info_vars.get("date_time").get():
             mod_time = time.localtime(os.path.getmtime(file_path))
-            info_texts.append((f"Modified: {time.strftime('%Y-%m-%d %H:%M:%S', mod_time)}", "#9ec5e8"))
+            info_texts.append((time.strftime('%Y-%m-%d %H:%M:%S', mod_time), meta_color))
 
         # Check if the 'dimensions' option is enabled.
         if self.file_info_vars.get("dimensions").get():
@@ -2792,7 +2793,7 @@ class VtpGridMixin:
                 width = db_entry.get('width')
                 height = db_entry.get('height')
             if width and height:
-                info_texts.append((f"Dimensions: {width}x{height}", "#9ec5e8"))
+                info_texts.append((f"{width}x{height}", meta_color))
 
         # Check if the 'keywords' option is enabled.
         if self.file_info_vars.get("keywords").get():
@@ -2800,7 +2801,7 @@ class VtpGridMixin:
             if keywords and keywords != "No keywords":
                 # Clean up the keywords string by removing leading commas and whitespace.
                 keywords = keywords.lstrip(",").strip()
-                info_texts.append((f"Keywords: {keywords}", "#8ecae6"))
+                info_texts.append((keywords, "#8ecae6"))
 
         return info_texts
     

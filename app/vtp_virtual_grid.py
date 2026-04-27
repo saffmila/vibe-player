@@ -16,6 +16,7 @@ import logging
 import math
 import os
 import tkinter as tk
+import tkinter.font as tkfont
 
 import customtkinter as ctk
 from PIL import Image, ImageOps, ImageTk
@@ -94,6 +95,8 @@ class VtpVirtualGridMixin:
         self.vg_std_label_row_pady = (9, 3)
         # Extra px added to measured caption block (font/wrap / Tk vs heuristic)
         self.vg_std_label_height_fudge = 14
+        # Extra per rendered text line to avoid platform-specific clipping.
+        self.vg_std_label_line_reserve_px = 1
         # Per stacked info label beyond the first (spacing Tk adds between widgets)
         self.vg_std_label_stack_margin = 6
         # Hard cap so one extreme title does not blow up row height
@@ -856,39 +859,141 @@ class VtpVirtualGridMixin:
     # 6b. Standard slot labels (multi-line colors + live keyword updates)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _vg_wrap_text_lines(text: str, font_obj: tkfont.Font, wrap_px: int) -> list[str]:
+        """Return wrapped lines using real font measurement."""
+        if font_obj is None:
+            return [text or ""]
+        max_w = max(8, int(wrap_px))
+        raw = (text or "").strip()
+        if not raw:
+            return [""]
+
+        lines_out: list[str] = []
+        for segment in raw.split("\n"):
+            seg = segment.strip()
+            if not seg:
+                lines_out.append("")
+                continue
+            words = seg.split()
+            if not words:
+                lines_out.append("")
+                continue
+
+            line = ""
+            for word in words:
+                trial = word if not line else f"{line} {word}"
+                if font_obj.measure(trial) <= max_w:
+                    line = trial
+                    continue
+                if line:
+                    lines_out.append(line)
+                    line = ""
+                if font_obj.measure(word) <= max_w:
+                    line = word
+                    continue
+                chunk = ""
+                for ch in word:
+                    trial_chunk = f"{chunk}{ch}"
+                    if chunk and font_obj.measure(trial_chunk) > max_w:
+                        lines_out.append(chunk)
+                        chunk = ch
+                    else:
+                        chunk = trial_chunk
+                line = chunk
+            lines_out.append(line if line else "")
+        return lines_out or [""]
+
+    @staticmethod
+    def _vg_clamp_wrapped_text(text: str, font_obj: tkfont.Font, wrap_px: int, max_lines: int) -> str:
+        """Wrap text and clamp to max lines with ellipsis."""
+        max_lines = max(1, int(max_lines))
+        lines = VtpVirtualGridMixin._vg_wrap_text_lines(text, font_obj, wrap_px)
+        if len(lines) <= max_lines:
+            return "\n".join(lines)
+        kept = lines[:max_lines]
+        last = kept[-1].rstrip()
+        ell = "..."
+        max_w = max(8, int(wrap_px))
+        if font_obj is None:
+            kept[-1] = (last + ell) if last else ell
+            return "\n".join(kept)
+        if not last:
+            kept[-1] = ell
+            return "\n".join(kept)
+        while last and font_obj.measure(last + ell) > max_w:
+            last = last[:-1].rstrip()
+        kept[-1] = (last + ell) if last else ell
+        return "\n".join(kept)
+
     def _vg_measure_item_label_height_px(self, fp: str, name: str, is_folder: bool, thumb_w: int) -> int:
-        """Estimate total height of stacked caption labels (must match _vg_fill_std_labels_frame)."""
+        """Estimate stacked caption height using actual Tk font metrics."""
         top, bot = getattr(self, "vg_std_label_row_pady", (9, 3))
         pad_block = top + bot
         fudge = int(getattr(self, "vg_std_label_height_fudge", 14))
+        line_reserve = int(getattr(self, "vg_std_label_line_reserve_px", 1))
         stack_margin = int(getattr(self, "vg_std_label_stack_margin", 6))
-        cap = int(getattr(self, "vg_std_label_max_px", 280))
         try:
             fs = int(self._get_effective_thumb_font_size())
         except Exception:
             fs = 11
-        line_h = max(17, int(round(fs * 1.68)))
-        avg_char_px = max(6, int(round(fs * 0.72)))
-        inner = max(8, thumb_w - 4)
-        chars_per_line = max(8, inner // avg_char_px)
-        max_characters = 30
+        wrap_w = max(8, int(thumb_w))
+        try:
+            lbl_font = tkfont.Font(font=("Helvetica", fs))
+        except Exception:
+            lbl_font = None
         try:
             parts = self.joininfotexts(fp, name)
         except Exception:
             parts = []
+        # Adaptive cap keeps last info rows visible when many metadata lines are enabled.
+        cap = self._vg_effective_label_cap_px(thumb_w, info_rows=max(1, len(parts)))
         if not parts:
-            display = name if len(name) <= max_characters else name[: max_characters - 3] + "..."
-            n_lines = max(1, math.ceil(len(display) / chars_per_line))
-            return min(cap, max(34, n_lines * line_h + pad_block + fudge))
+            display = self._vg_clamp_wrapped_text(name, lbl_font, wrap_w, max_lines=2)
+            line_h = max(1, int(lbl_font.metrics("linespace"))) if lbl_font else max(17, int(round(fs * 1.68)))
+            line_count = max(1, display.count("\n") + 1)
+            text_h = line_count * (line_h + line_reserve)
+            return min(cap, max(34, text_h + pad_block + fudge))
         total = 0
-        for text, _ in parts:
-            display = text if len(text) <= max_characters else text[: max_characters - 3] + "..."
-            n_lines = 0
-            for seg in display.split("\n"):
-                n_lines += max(1, math.ceil(len(seg) / chars_per_line))
-            total += n_lines * line_h + pad_block
+        line_h = max(1, int(lbl_font.metrics("linespace"))) if lbl_font else max(17, int(round(fs * 1.68)))
+        for idx, (text, _) in enumerate(parts):
+            max_lines = 2 if (idx == 0 and text == name) else 1
+            display = self._vg_clamp_wrapped_text(text, lbl_font, wrap_w, max_lines=max_lines)
+            line_count = max(1, display.count("\n") + 1)
+            text_h = line_count * (line_h + line_reserve)
+            total += text_h + pad_block
         stack_extra = max(0, len(parts) - 1) * stack_margin
         return min(cap, max(34, total + fudge + stack_extra))
+
+    def _vg_effective_label_cap_px(self, thumb_w: int, info_rows: int = 1) -> int:
+        """
+        Effective caption cap for current info-density.
+        Prevents global clipping when many info rows are enabled.
+        """
+        base_cap = int(getattr(self, "vg_std_label_max_px", 280))
+        tw = max(1, int(thumb_w))
+        rows = max(1, int(info_rows))
+
+        # Count active options from menu state (excluding helper toggle).
+        enabled_fields = 0
+        try:
+            for key, var in getattr(self, "file_info_vars", {}).items():
+                if key == "all_fields":
+                    continue
+                if bool(var.get()):
+                    enabled_fields += 1
+        except Exception:
+            enabled_fields = 0
+
+        # Use stronger cap when grid is dense with text metadata.
+        density = max(rows, enabled_fields)
+        if density >= 5:
+            return max(base_cap, 620)
+        if density >= 4:
+            return max(base_cap, 520)
+        if density >= 3:
+            return max(base_cap, 420 if tw <= 240 else 380)
+        return base_cap
 
     def _vg_fill_std_labels_frame(self, slot: dict, file_path: str, file_name: str, is_folder: bool):
         frame = slot["labels_frame"]
@@ -900,8 +1005,11 @@ class VtpVirtualGridMixin:
         )
         thumb_w = self.thumbnail_size[0]
         lbl_font = ("Helvetica", self._get_effective_thumb_font_size())
-        max_characters = 30
         top, bot = getattr(self, "vg_std_label_row_pady", (9, 3))
+        try:
+            measure_font = tkfont.Font(font=lbl_font)
+        except Exception:
+            measure_font = None
         try:
             parts = self.joininfotexts(file_path, file_name)
         except Exception:
@@ -909,8 +1017,9 @@ class VtpVirtualGridMixin:
         if not parts:
             parts = [(file_name, "#7f848a" if is_folder else "gray70")]
         first_lbl = None
-        for text, color in parts:
-            display = text if len(text) <= max_characters else text[: max_characters - 3] + "..."
+        for idx, (text, color) in enumerate(parts):
+            max_lines = 2 if (idx == 0 and text == file_name) else 1
+            display = self._vg_clamp_wrapped_text(text, measure_font, thumb_w, max_lines=max_lines)
             lbl = tk.Label(
                 frame,
                 text=display,
@@ -962,7 +1071,14 @@ class VtpVirtualGridMixin:
 
     def _vg_recompute_scroll_layout_if_label_height_changed(self):
         thumb_w = self.thumbnail_size[0]
-        cap_px = int(getattr(self, "vg_std_label_max_px", 280))
+        max_rows = 1
+        try:
+            for it in self._vg_data:
+                parts = self.joininfotexts(it["path"], it["name"])
+                max_rows = max(max_rows, max(1, len(parts) if parts else 1))
+        except Exception:
+            pass
+        cap_px = self._vg_effective_label_cap_px(thumb_w, info_rows=max_rows)
         max_h = 34
         for it in self._vg_data:
             h = it.get("_vg_label_h_px")
@@ -1666,7 +1782,14 @@ class VtpVirtualGridMixin:
             )
 
         # --- 3. Nejvyšší blok popisků v této složce ---
-        cap_px = int(getattr(self, "vg_std_label_max_px", 280))
+        max_rows = 1
+        try:
+            for item in video_files:
+                parts = self.joininfotexts(item["path"], item["name"])
+                max_rows = max(max_rows, max(1, len(parts) if parts else 1))
+        except Exception:
+            pass
+        cap_px = self._vg_effective_label_cap_px(self.thumbnail_size[0], info_rows=max_rows)
         max_h = 34
         for item in video_files:
             max_h = max(max_h, int(item.get("_vg_label_h_px", 34)))
