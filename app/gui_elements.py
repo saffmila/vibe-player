@@ -1559,7 +1559,7 @@ def select_keyword_from_textbox(event, textbox, entry):
 def open_autotag_settings_window(app, settings):
     window = ctk.CTkToplevel()
     window.title("AutoTag Settings")
-    window.geometry("420x420")
+    window.geometry("420x560")
     window.grab_set()  # modal window
     window.attributes('-topmost', True) 
     # === TAGGING ENGINE SELECTION ===
