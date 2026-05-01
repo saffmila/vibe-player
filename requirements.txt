@@ -24,7 +24,12 @@ send2trash
 # Plugin dependencies
 tqdm==4.66.2
 transformers>=4.35
-torch>=1.12
+# Require patched torch versions (CVE-2025-32434 fix in >=2.6)
+# Install CUDA-specific wheels separately per machine (cu121/cu124/etc.).
+torch>=2.6,<2.7
+torchvision>=0.21,<0.22
+torchaudio>=2.6,<2.7
+
 open_clip_torch
 dill>=0.4.1
 certifi>=2024.0.0
