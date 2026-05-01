@@ -2,7 +2,11 @@
 
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parent
+try:
+    _ROOT = Path(__file__).resolve().parent
+except NameError:
+    # PyInstaller can execute spec without __file__ in some contexts.
+    _ROOT = Path.cwd()
 _MODELS_DIR = _ROOT / "app" / "models"
 
 _datas = [
