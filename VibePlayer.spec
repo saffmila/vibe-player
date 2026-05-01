@@ -1,24 +1,31 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parent
+_MODELS_DIR = _ROOT / "app" / "models"
+
+_datas = [
+    # GUI prvky a ikony
+    ("app/assets", "assets"),
+    ("app/icons", "icons"),
+    # Pluginy
+    ("app/plugins", "plugins"),
+    # Nastroje jako FFmpeg
+    ("tools/ffmpeg/bin", "tools/ffmpeg/bin"),
+    # Splash screen (pokud je uvnitr app)
+    ("app/splash_image.py", "."),
+]
+
+# Volitelne: local modely pribal jen pokud fyzicky existuji.
+if _MODELS_DIR.is_dir():
+    _datas.append(("app/models", "models"))
+
 a = Analysis(
     ['app\\main.py'],
     pathex=[],
     binaries=[],
-	datas=[
-			# GUI prvky a ikony
-			('app/assets', 'assets'),
-			('app/icons', 'icons'),
-			
-			# AI modely a pluginy
-			('app/models', 'models'),
-			('app/plugins', 'plugins'),
-			
-			# Nástroje jako FFmpeg
-			('tools/ffmpeg/bin', 'tools/ffmpeg/bin'),
-			
-			# Splash screen (pokud je uvnitř app)
-			('app/splash_image.py', '.') 
-	],
+    datas=_datas,
     # Sem se píšou moduly, které PyInstaller sám nenašel
     hiddenimports=['PIL._tkinter_finder'], 
     hookspath=[],

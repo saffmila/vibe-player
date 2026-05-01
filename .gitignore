@@ -35,6 +35,7 @@ app/tag_engine/cache_*.pkl
 tools/
 
 # --- AI Weights (YOLO, ONNX, etc. — user must download to app/models/) ---
+app/yolov8n.pt
 app/models/**/*.pt
 app/models/**/*.pth
 app/models/**/*.onnx

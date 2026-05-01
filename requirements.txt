@@ -27,6 +27,7 @@ transformers>=4.35
 torch>=1.12
 open_clip_torch
 dill>=0.4.1
+certifi>=2024.0.0
 
 # Optional: YOLOv8 support
 ultralytics

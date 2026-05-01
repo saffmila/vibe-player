@@ -16,6 +16,13 @@ class VtpTaggingMixin:
     ###########****   TAGGING    ****##############
     ########################################
 
+    def _show_ai_initialization_hint(self):
+            """Show a one-time info message about first-run model initialization/download."""
+            if getattr(self, "_ai_init_hint_shown", False):
+                return
+            self._ai_init_hint_shown = True
+            self.after(0, lambda: self.status_bar.set_action_message("Initializing AI models (first run may take a moment)..."))
+
 
     def tag_single_image(self, file_path, plugin, update_ui=True):
             """
@@ -72,6 +79,7 @@ class VtpTaggingMixin:
                 # Setup UI for single processing
                 self.after(0, self.status_bar.enable_stop)
                 self.after(0, lambda: self.status_bar.set_action_message(f"Tagging: {os.path.basename(file_path)}"))
+                self._show_ai_initialization_hint()
 
                 self.tag_single_image(file_path, plugin, update_ui=True)
 
@@ -102,6 +110,7 @@ class VtpTaggingMixin:
 
         def tag_worker():
             all_tags = set()
+            self._show_ai_initialization_hint()
             
             # --- UI UPDATE: Standard prefix according to manual ---
             self.after(0, lambda: self.status_bar.set_action_message("Processing thumbnails..."))
