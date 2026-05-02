@@ -21,6 +21,7 @@ import customtkinter as ctk
 from app_settings import TaggingSettings
 from utils import create_menu
 import logging
+from hotkeys import DEFAULT_HOTKEYS, format_accelerator_menu, iter_help_sections, menu_accel
 
 # .app calls video_thumbnail_player, so no need to import it
 
@@ -258,11 +259,12 @@ def setup_menu(app):
 
 def show_hotkeys_window(app):
     """
-    Displays a read-only table of current hotkeys.
-    Reads directly from app.hotkeys_map.
+    Displays a read-only table of current hotkeys (grouped by category).
+    Uses ``app.hotkeys_map`` when set, otherwise defaults from ``hotkeys.DEFAULT_HOTKEYS``.
     """
-    if not hasattr(app, 'hotkeys_map'):
-        logging.warning("Hotkeys map not found in app!")
+    hm = getattr(app, "hotkeys_map", None) or DEFAULT_HOTKEYS
+    if not hm:
+        logging.warning("Hotkeys map empty.")
         return
 
     if hasattr(app, 'hotkeys_window') and app.hotkeys_window is not None and app.hotkeys_window.winfo_exists():
@@ -271,33 +273,46 @@ def show_hotkeys_window(app):
 
     hk_window = ctk.CTkToplevel(app)
     hk_window.title("Keyboard Shortcuts")
-    hk_window.geometry("400x550")
+    hk_window.geometry("580x640")
     hk_window.attributes('-topmost', True) 
     
     app.hotkeys_window = hk_window
 
-    ctk.CTkLabel(hk_window, text="Current Hotkeys", font=("Helvetica", 18, "bold")).pack(pady=(15,10))
+    ctk.CTkLabel(hk_window, text="Keyboard Shortcuts", font=("Helvetica", 18, "bold")).pack(pady=(15, 6))
+    ctk.CTkLabel(
+        hk_window,
+        text="Context menus show the same keys where applicable.",
+        font=("Helvetica", 11),
+        text_color="gray70",
+    ).pack(pady=(0, 8))
 
-    # Scrollable frame
     scroll_frame = ctk.CTkScrollableFrame(hk_window)
     scroll_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
     row = 0
-    for action, key in app.hotkeys_map.items():
-        readable_action = action.replace("_", " ").title()
-        readable_key = key.replace("<", "").replace(">", "")
-        ctk.CTkLabel(scroll_frame, text=readable_action, anchor="w").grid(row=row, column=0, sticky="w", padx=10, pady=5)
-        
-        key_label = ctk.CTkLabel(
-            scroll_frame, 
-            text=f" {readable_key} ", 
-            font=("Consolas", 12, "bold"),
-            fg_color="#3a3a3a",
-            corner_radius=4
-        )
-        key_label.grid(row=row, column=1, sticky="e", padx=10, pady=5)
-        
+    for section_title, items in iter_help_sections(hm):
+        ctk.CTkLabel(
+            scroll_frame,
+            text=section_title,
+            font=("Helvetica", 13, "bold"),
+            anchor="w",
+        ).grid(row=row, column=0, columnspan=2, sticky="ew", padx=8, pady=(14, 6))
         row += 1
+        for action, seq in items:
+            readable_action = action.replace("_", " ").title()
+            readable_key = format_accelerator_menu(seq) if isinstance(seq, str) else str(seq)
+            ctk.CTkLabel(scroll_frame, text=readable_action, anchor="w").grid(
+                row=row, column=0, sticky="w", padx=14, pady=4
+            )
+            key_label = ctk.CTkLabel(
+                scroll_frame,
+                text=f" {readable_key} ",
+                font=("Consolas", 12, "bold"),
+                fg_color="#3a3a3a",
+                corner_radius=4,
+            )
+            key_label.grid(row=row, column=1, sticky="e", padx=10, pady=4)
+            row += 1
 
     scroll_frame.grid_columnconfigure(0, weight=1)
     scroll_frame.grid_columnconfigure(1, weight=0)
@@ -337,19 +352,27 @@ def build_view_menu(app):
     view_menu.add_checkbutton(label="Show Wide Folders",
                               variable=app.wide_folders_check_var)
 
-    app.show_infopanel_var = tk.BooleanVar(value=True)
-    view_menu.add_checkbutton(
-        label="Show Info Panel",
-        variable=app.show_infopanel_var,
-        command=lambda: app.toggle_infopanel_menu(from_view_menu=True),
-    )
+    _acc_ip = menu_accel(DEFAULT_HOTKEYS, "toggle_info_panel")
+    _ip_opts = {
+        "label": "Show Info Panel",
+        "variable": tk.BooleanVar(value=True),
+        "command": lambda: app.toggle_infopanel_menu(from_view_menu=True),
+    }
+    if _acc_ip:
+        _ip_opts["accelerator"] = _acc_ip
+    app.show_infopanel_var = _ip_opts["variable"]
+    view_menu.add_checkbutton(**_ip_opts)
 
-    app.show_timeline_var = tk.BooleanVar(value=True)
-    view_menu.add_checkbutton(
-        label="Show Timeline Widget",
-        variable=app.show_timeline_var,
-        command=lambda: app.toggle_timeline_menu(from_view_menu=True),
-    )
+    _acc_tl = menu_accel(DEFAULT_HOTKEYS, "toggle_timeline")
+    _tl_opts = {
+        "label": "Show Timeline Widget",
+        "variable": tk.BooleanVar(value=True),
+        "command": lambda: app.toggle_timeline_menu(from_view_menu=True),
+    }
+    if _acc_tl:
+        _tl_opts["accelerator"] = _acc_tl
+    app.show_timeline_var = _tl_opts["variable"]
+    view_menu.add_checkbutton(**_tl_opts)
 
     thumbnail_size_menu = create_menu(app, view_menu)
     for size in ["160x120", "240x180", "320x240", "400x300", "480x360"]:
@@ -408,11 +431,19 @@ def build_edit_menu(app):
     """Build Edit menu with Search, Keyboard Shortcuts, Optimize, Preferences, Plugins."""
     edit_menu = create_menu(app, app)
 
-    edit_menu.add_command(label="Search...", command=app.open_search_window)
+    _search_opts = {"label": "Search...", "command": app.open_search_window}
+    _sacc = menu_accel(DEFAULT_HOTKEYS, "search")
+    if _sacc:
+        _search_opts["accelerator"] = _sacc
+    edit_menu.add_command(**_search_opts)
     edit_menu.add_separator()
     edit_menu.add_command(label="Keyboard Shortcuts", command=app.open_hotkeys_window)
     edit_menu.add_command(label="Optimize database", command=app.optimize_database)
-    edit_menu.add_command(label="Preferences", command=app.open_preferences_window)
+    _pref_opts = {"label": "Preferences", "command": app.open_preferences_window}
+    _pacc = menu_accel(DEFAULT_HOTKEYS, "open_preferences")
+    if _pacc:
+        _pref_opts["accelerator"] = _pacc
+    edit_menu.add_command(**_pref_opts)
 
     # --- PLUGINS MENU ---
     plugins_menu = create_menu(app, edit_menu)
@@ -429,10 +460,11 @@ def build_edit_menu(app):
 def build_help_menu(app):
     help_menu = create_menu(app, app)
     help_menu.add_command(label="Help", command=lambda: open_help_page(app))
+    _log_acc = menu_accel(DEFAULT_HOTKEYS, "toggle_log") or "F12"
     help_menu.add_command(
         label="Show Debug Console",
         command=app.toggle_log_window,
-        accelerator="F12",
+        accelerator=_log_acc,
     )
     help_menu.add_command(label="About", command=lambda: show_about_window(app))
     return help_menu
@@ -596,13 +628,25 @@ def build_rating_menu(app):
 
     rating_filter_menu = create_menu(app, rating_menu)
     for i in range(1, 6):
-        rating_filter_menu.add_command(label=f"Rating {i}", command=lambda i=i: set_rating_filter(app, i))
-    rating_filter_menu.add_command(label="No rating", command=lambda: set_rating_filter(app, 0))
+        _ro = {"label": f"Rating {i}", "command": lambda i=i: set_rating_filter(app, i)}
+        _ra = menu_accel(DEFAULT_HOTKEYS, f"rate_{i}")
+        if _ra:
+            _ro["accelerator"] = _ra
+        rating_filter_menu.add_command(**_ro)
+    _r0f = {"label": "No rating", "command": lambda: set_rating_filter(app, 0)}
+    _r0a = menu_accel(DEFAULT_HOTKEYS, "rate_0")
+    if _r0a:
+        _r0f["accelerator"] = _r0a
+    rating_filter_menu.add_command(**_r0f)
     rating_menu.add_cascade(label="Rating Filter", menu=rating_filter_menu)
 
     edit_rating_menu = create_menu(app, rating_menu)
     for i in range(1, 6):
-        edit_rating_menu.add_command(label=f"Set Rating {i}", command=lambda i=i: app.set_rating(i))
+        _eo = {"label": f"Set Rating {i}", "command": lambda i=i: app.set_rating(i)}
+        _ea = menu_accel(DEFAULT_HOTKEYS, f"rate_{i}")
+        if _ea:
+            _eo["accelerator"] = _ea
+        edit_rating_menu.add_command(**_eo)
     rating_menu.add_cascade(label="Edit Rating", menu=edit_rating_menu)
 
     rating_menu.add_separator()

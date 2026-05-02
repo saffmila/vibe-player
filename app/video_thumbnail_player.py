@@ -80,7 +80,7 @@ from playlist import PlaylistManager
 from statusbar import StatusBar
 from database import Database
 from virtual_folders import load_virtual_folders, save_virtual_folders, add_to_virtual_folder, create_virtual_folder
-from clipboard_file_list import clipboard_has_pastable_paths
+from clipboard_file_list import clipboard_has_pastable_paths, clipboard_paste_is_move
 import json
 import sqlite3
 import shutil
@@ -139,7 +139,7 @@ from vtp_mixin_window_layout import VtpWindowLayoutMixin
 from vtp_virtual_grid import VtpVirtualGridMixin
 
 from screeninfo import get_monitors
-from hotkeys import DEFAULT_HOTKEYS
+from hotkeys import DEFAULT_HOTKEYS, menu_accel, rename_accelerators_label
 
 
 # Set the logging level for PIL to WARNING to suppress debug logs
@@ -1897,6 +1897,7 @@ class VideoThumbnailPlayer(
             return
 
         menu = tk.Menu(self, tearoff=0)
+        _hk = getattr(self, "hotkeys_map", None) or DEFAULT_HOTKEYS
 
         # Add context menu options
         # menu.add_command(label="Add Keywords", command=lambda: self.open_keyword_window(file_path))
@@ -1912,19 +1913,40 @@ class VideoThumbnailPlayer(
         # menu.add_command(label="Add to New Playlist", command=lambda: self.add_selected_to_playlist(event, new_playlist=True))
         # menu.add_command(label="Edit Rating", command=lambda: self.edit_rating(file_path))
         menu.add_command(label="Create New Folder", command=lambda: self.create_new_folder(file_path))
-        menu.add_command(label="Rename", command=lambda: self.rename_item(file_path))
+        _rn = rename_accelerators_label(_hk)
+        _rename_opts = {"label": "Rename", "command": lambda: self.rename_item(file_path)}
+        if _rn:
+            _rename_opts["accelerator"] = _rn
+        menu.add_command(**_rename_opts)
 
         menu.add_separator()
-        menu.add_command(
-            label="Copy",
-            command=lambda fp=file_path: self.copy_tree_folder_path_to_clipboard(fp),
-        )
+        _cp = menu_accel(_hk, "files_clipboard_copy")
+        _ct = menu_accel(_hk, "files_clipboard_cut")
+        _copy_opts = {
+            "label": "Copy",
+            "command": lambda fp=file_path: self.copy_tree_folder_path_to_clipboard(fp),
+        }
+        if _cp:
+            _copy_opts["accelerator"] = _cp
+        menu.add_command(**_copy_opts)
+        _cut_opts = {
+            "label": "Cut",
+            "command": lambda fp=file_path: self.copy_tree_folder_path_to_clipboard(fp, cut=True),
+        }
+        if _ct:
+            _cut_opts["accelerator"] = _ct
+        menu.add_command(**_cut_opts)
         self.add_clipboard_paste_cascade(menu, file_path)
 
         # Add delete option using the updated `confirm_delete_item` function
-        menu.add_command(
-            label="Delete", command=lambda: self.confirm_delete_item(paths=[file_path])
-        )
+        _del = menu_accel(_hk, "delete")
+        _del_opts = {
+            "label": "Delete",
+            "command": lambda: self.confirm_delete_item(paths=[file_path]),
+        }
+        if _del:
+            _del_opts["accelerator"] = _del
+        menu.add_command(**_del_opts)
         
 
 
@@ -2008,6 +2030,17 @@ class VideoThumbnailPlayer(
             return
         self.copy_thumb_paths_to_clipboard(primary)
 
+    def hotkey_files_clipboard_cut(self, event=None):
+        if self._skip_file_clipboard_hotkey():
+            return
+        primary = self._primary_path_for_file_clipboard()
+        if not primary:
+            self._clipboard_status_flash(
+                "Nothing to cut — select a file, folder, or tree item.", 3500
+            )
+            return
+        self.copy_thumb_paths_to_clipboard(primary, cut=True)
+
     def hotkey_files_clipboard_paste_copy(self, event=None):
         if self._skip_file_clipboard_hotkey():
             return
@@ -2020,7 +2053,9 @@ class VideoThumbnailPlayer(
                 "No files or folders on the clipboard to paste.", 3500
             )
             return
-        self.paste_clipboard_into_folder(cd, True)
+        # Respect Explorer / in-app Cut (Preferred DropEffect MOVE), not always copy.
+        move = clipboard_paste_is_move()
+        self.paste_clipboard_into_folder(cd, copy_mode=(not move))
 
     def hotkey_files_clipboard_paste_move(self, event=None):
         if self._skip_file_clipboard_hotkey():
@@ -2659,6 +2694,7 @@ class VideoThumbnailPlayer(
         # --- File operations (standard) ---
         self.bind(self.hotkeys_map['delete'], lambda e: self.handle_global_delete(e))
         self.bind_all(self.hotkeys_map['files_clipboard_copy'], g(self.hotkey_files_clipboard_copy))
+        self.bind_all(self.hotkeys_map['files_clipboard_cut'], g(self.hotkey_files_clipboard_cut))
         self.bind_all(self.hotkeys_map['files_clipboard_paste_copy'], g(self.hotkey_files_clipboard_paste_copy))
         # Paste-move: bind every spelling — Windows Tk often emits <Control-Shift-V> for Ctrl+Shift+v
         _seen_paste_move = set()
@@ -2678,10 +2714,15 @@ class VideoThumbnailPlayer(
         self.bind_all(self.hotkeys_map['refresh'], g(lambda e: self.refresh_thumbnails_in_subtree(self.current_directory)))
         self.bind_all(self.hotkeys_map['parent_dir'], g(lambda e: self.go_to_parent_directory()))
         self.bind_all(self.hotkeys_map['rename'], g(lambda e: self.rename_item(self.selected_file_path) if self.selected_file_path else None))
+        self.bind_all(
+            self.hotkeys_map['rename_secondary'],
+            g(lambda e: self.rename_item(self.selected_file_path) if self.selected_file_path else None),
+        )
 
         # --- Panels ---
         self.bind_all(self.hotkeys_map['toggle_info_panel'], g(lambda e: self.toggle_infopanel_menu()))
         self.bind_all(self.hotkeys_map['toggle_timeline'], g(lambda e: self.toggle_timeline_menu()))
+        self.bind_all(self.hotkeys_map['open_preferences'], g(lambda e: self.open_preferences_window()))
 
         # --- Rating ---
         self.bind_all(self.hotkeys_map['rate_0'], g(lambda e: self.set_rating(0)))
@@ -2781,6 +2822,9 @@ class VideoThumbnailPlayer(
                 if len(selected_video_paths) > 1:
                     # _show_multi_timeline applies limit via _apply_strip_limit
                     self._show_multi_timeline(selected_video_paths)
+
+            self._thumb_last_press_shift = False
+            self._thumb_last_press_ctrl = False
 
         except Exception as e:
             logging.info(f"select_all_thumbnails error: {e}")
@@ -3419,11 +3463,14 @@ class VideoThumbnailPlayer(
 
         # After Ctrl+A (etc.), ButtonPress skipped select on an already-selected cell so DnD can keep
         # multi-selection; on release without a real drag, collapse to the clicked thumb.
+        # Use modifiers from Button-1 press (on_thumb_click / select_range), not from release:
+        # Windows often clears Ctrl/Shift in the ButtonRelease-1 state after Ctrl+click, which
+        # wrongly triggered collapse and left only one item selected before Delete.
         if not getattr(self, "_dnd_drag_happened", False):
             if len(self.selected_thumbnails) > 1:
-                shift_rel = (event.state & 0x0001) != 0
-                ctrl_rel = (event.state & 0x0004) != 0
-                if not shift_rel and not ctrl_rel:
+                press_shift = getattr(self, "_thumb_last_press_shift", False)
+                press_ctrl = getattr(self, "_thumb_last_press_ctrl", False)
+                if not press_shift and not press_ctrl:
                     try:
                         nfp = os.path.normcase(os.path.normpath(file_path))
                         idx = next(

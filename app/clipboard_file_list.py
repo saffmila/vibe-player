@@ -13,6 +13,8 @@ from typing import List, Optional
 
 # In-process fallback when CF_HDROP cannot be read/written (non-Windows or errors).
 _internal_paths: List[str] = []
+# Last in-app Cut (Ctrl+X): used when CF_HDROP works but Preferred DropEffect is missing.
+_internal_pending_move: bool = False
 
 # DROPEFFECT_* (used with "Preferred DropEffect" clipboard format)
 DROPEFFECT_COPY = 1
@@ -22,6 +24,12 @@ DROPEFFECT_MOVE = 2
 def _set_internal_paths(paths: List[str]) -> None:
     global _internal_paths
     _internal_paths = [os.path.normpath(p) for p in paths if p]
+
+
+def clear_internal_clipboard_move_flag() -> None:
+    """Reset in-app cut state (call when starting a paste operation)."""
+    global _internal_pending_move
+    _internal_pending_move = False
 
 
 def _build_hdrop_bytes(paths: List[str]) -> bytes:
@@ -41,10 +49,14 @@ def set_clipboard_file_paths(paths: List[str], *, cut: bool = False) -> bool:
     Put file/folder paths on the clipboard. On Windows uses CF_HDROP (+ optional cut effect).
     Always mirrors paths to the in-process fallback for same-app paste reliability.
     """
+    global _internal_pending_move
+
     clean = [os.path.normpath(p) for p in paths if p and os.path.exists(p)]
     if not clean:
         logging.info("[clipboard] set_clipboard_file_paths: nothing to copy")
+        _internal_pending_move = False
         return False
+    _internal_pending_move = bool(cut)
     _set_internal_paths(clean)
 
     if os.name != "nt":
@@ -128,3 +140,43 @@ def get_clipboard_file_paths() -> List[str]:
 
 def clipboard_has_pastable_paths() -> bool:
     return bool(get_clipboard_file_paths())
+
+
+def clipboard_paste_is_move() -> bool:
+    """
+    True if the clipboard represents a Cut (move on paste), not Copy.
+
+    On Windows, reads ``Preferred DropEffect`` (same as Explorer).
+    Otherwise uses the in-app flag set by ``set_clipboard_file_paths(..., cut=True)``.
+    """
+    if os.name == "nt":
+        try:
+            import win32clipboard
+
+            fmt = win32clipboard.RegisterClipboardFormat("Preferred DropEffect")
+            win32clipboard.OpenClipboard(0)
+            try:
+                if win32clipboard.IsClipboardFormatAvailable(fmt):
+                    data = win32clipboard.GetClipboardData(fmt)
+                    if data is not None:
+                        if isinstance(data, int):
+                            eff = data & 0xFFFFFFFF
+                        elif isinstance(data, memoryview):
+                            raw = data.tobytes()
+                            eff = struct.unpack("<I", raw[:4])[0] if len(raw) >= 4 else 0
+                        elif isinstance(data, (bytes, bytearray)):
+                            raw = bytes(data)
+                            eff = struct.unpack("<I", raw[:4])[0] if len(raw) >= 4 else 0
+                        else:
+                            raw = bytes(data)
+                            eff = struct.unpack("<I", raw[:4])[0] if len(raw) >= 4 else 0
+                        if eff & DROPEFFECT_MOVE:
+                            return True
+                        if eff & DROPEFFECT_COPY:
+                            return False
+            finally:
+                win32clipboard.CloseClipboard()
+        except Exception as e:
+            logging.debug("[clipboard] Preferred DropEffect read failed: %s", e)
+
+    return bool(_internal_pending_move)

@@ -26,6 +26,7 @@ from video_operations import VideoPlayer
 from utils import get_video_size
 from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS, preview_skip_subdir
 from virtual_folders import load_virtual_folders
+from hotkeys import DEFAULT_HOTKEYS, menu_accel, rename_accelerators_label
 
 
 class VtpGridMixin:
@@ -2643,7 +2644,8 @@ class VtpGridMixin:
         Show a context menu specifically for thumbnail (file) actions.
         """
         menu = tk.Menu(self, tearoff=0)
-        
+        _hk = getattr(self, "hotkeys_map", None) or DEFAULT_HOTKEYS
+
         video_name = os.path.basename(file_path)
         
         
@@ -2664,19 +2666,48 @@ class VtpGridMixin:
         # menu.add_command(   label="Refresh Thumbnail",command=lambda: self.refresh_single_thumbnail(file_path,True))
         
 
-        menu.add_command(label="Add Keywords", command=lambda: self.open_keyword_window(file_path))
+        _kw = menu_accel(_hk, "keywords")
+        _kw_opts = {"label": "Add Keywords", "command": lambda: self.open_keyword_window(file_path)}
+        if _kw:
+            _kw_opts["accelerator"] = _kw
+        menu.add_command(**_kw_opts)
         menu.add_command(label="Remove Keywords", command=lambda: self.open_remove_keyword_window(file_path))
-        menu.add_command(label="Add to Existing Playlist", command=lambda: self.add_selected_to_playlist())
-        menu.add_command(label="Add to New Playlist", command=lambda: self.add_selected_to_playlist(event, new_playlist=True))
+        _pl = menu_accel(_hk, "add_to_playlist")
+        _pl_opts = {"label": "Add to Existing Playlist", "command": lambda: self.add_selected_to_playlist()}
+        if _pl:
+            _pl_opts["accelerator"] = _pl
+        menu.add_command(**_pl_opts)
+        _pn = menu_accel(_hk, "new_playlist")
+        _pn_opts = {
+            "label": "Add to New Playlist",
+            "command": lambda: self.add_selected_to_playlist(event, new_playlist=True),
+        }
+        if _pn:
+            _pn_opts["accelerator"] = _pn
+        menu.add_command(**_pn_opts)
         menu.add_command(label="Edit Rating", command=lambda: self.edit_rating(file_path))
-        menu.add_command(label="Rename", command=lambda: self.rename_item(file_path))
-        menu.add_command(label="Delete", command=lambda: self.confirm_delete_item(paths=[file_path]))
+        _rn = rename_accelerators_label(_hk)
+        _rename_opts = {"label": "Rename", "command": lambda: self.rename_item(file_path)}
+        if _rn:
+            _rename_opts["accelerator"] = _rn
+        menu.add_command(**_rename_opts)
+        _del = menu_accel(_hk, "delete")
+        _del_opts = {"label": "Delete", "command": lambda: self.confirm_delete_item(paths=[file_path])}
+        if _del:
+            _del_opts["accelerator"] = _del
+        menu.add_command(**_del_opts)
 
         menu.add_separator()
-        menu.add_command(
-            label="Copy",
-            command=lambda fp=file_path: self.copy_thumb_paths_to_clipboard(fp),
-        )
+        _cp = menu_accel(_hk, "files_clipboard_copy")
+        _ct = menu_accel(_hk, "files_clipboard_cut")
+        _copy_opts = {"label": "Copy", "command": lambda fp=file_path: self.copy_thumb_paths_to_clipboard(fp)}
+        if _cp:
+            _copy_opts["accelerator"] = _cp
+        menu.add_command(**_copy_opts)
+        _cut_opts = {"label": "Cut", "command": lambda fp=file_path: self.copy_thumb_paths_to_clipboard(fp, cut=True)}
+        if _ct:
+            _cut_opts["accelerator"] = _ct
+        menu.add_command(**_cut_opts)
         self.add_clipboard_paste_cascade(menu, getattr(self, "current_directory", None))
 
         # Plugin-based auto-tagging (only if plugin is loaded)
@@ -4695,6 +4726,9 @@ class VtpGridMixin:
             return
         shift = (event.state & 0x0001) != 0
         ctrl  = (event.state & 0x0004) != 0
+        # Used on ButtonRelease: release events often omit Ctrl/Shift even when press had them (Windows).
+        self._thumb_last_press_shift = bool(shift)
+        self._thumb_last_press_ctrl = bool(ctrl)
         logging.debug("[Thumb] on_thumb_click idx=%s path=%s", index, os.path.basename(file_path) if file_path else "?")
 
         # Multi-select (e.g. Ctrl+A): do not collapse to single-select when starting drag on a selected item
@@ -4962,6 +4996,9 @@ class VtpGridMixin:
         This function now works EXCLUSIVELY with 3-element tuples (path, label, index)
         to maintain data consistency.
         """
+        self._thumb_last_press_shift = True
+        self._thumb_last_press_ctrl = False
+
         # Get the starting point of the selection (the "anchor")
         start_index = self.selected_thumbnail_index
 

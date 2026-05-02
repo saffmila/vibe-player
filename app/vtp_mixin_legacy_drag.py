@@ -9,11 +9,13 @@ import time
 import tkinter as tk
 
 from clipboard_file_list import (
+    clear_internal_clipboard_move_flag,
     clipboard_has_pastable_paths,
     get_clipboard_file_paths,
     set_clipboard_file_paths,
 )
 from gui_elements import open_conflict_dialog
+from hotkeys import DEFAULT_HOTKEYS, format_accelerator_menu
 
 
 class VtpLegacyDragMixin:
@@ -551,28 +553,30 @@ class VtpLegacyDragMixin:
         except Exception:
             pass
 
-    def copy_thumb_paths_to_clipboard(self, primary_path: str) -> None:
+    def copy_thumb_paths_to_clipboard(self, primary_path: str, *, cut: bool = False) -> None:
         paths = self.paths_for_clipboard_from_thumb_context(primary_path)
         paths = [p for p in paths if os.path.exists(p)]
         if not paths:
             return
-        if set_clipboard_file_paths(paths, cut=False):
-            logging.info("[clipboard] Copied %d path(s) from thumbnail view", len(paths))
+        if set_clipboard_file_paths(paths, cut=cut):
+            verb = "Cut" if cut else "Copied"
+            logging.info("[clipboard] %s %d path(s) from thumbnail view", verb, len(paths))
             n = len(paths)
             if n == 1:
                 self._clipboard_status_flash(
-                    f"Copied to clipboard: {os.path.basename(paths[0])}"
+                    f"{verb} to clipboard: {os.path.basename(paths[0])}"
                 )
             else:
-                self._clipboard_status_flash(f"Copied to clipboard ({n} items).")
+                self._clipboard_status_flash(f"{verb} to clipboard ({n} items).")
 
-    def copy_tree_folder_path_to_clipboard(self, folder_path: str) -> None:
+    def copy_tree_folder_path_to_clipboard(self, folder_path: str, *, cut: bool = False) -> None:
         if not folder_path or not os.path.isdir(folder_path):
             return
-        if set_clipboard_file_paths([os.path.normpath(folder_path)], cut=False):
-            logging.info("[clipboard] Copied folder: %s", folder_path)
+        if set_clipboard_file_paths([os.path.normpath(folder_path)], cut=cut):
+            verb = "Cut" if cut else "Copied"
+            logging.info("[clipboard] %s folder: %s", verb.lower(), folder_path)
             self._clipboard_status_flash(
-                f"Copied to clipboard: folder {os.path.basename(folder_path)}"
+                f"{verb} to clipboard: folder {os.path.basename(folder_path)}"
             )
 
     def add_clipboard_paste_cascade(self, menu: tk.Menu, dest_dir: str | None) -> None:
@@ -581,16 +585,25 @@ class VtpLegacyDragMixin:
         can_paste = bool(
             clipboard_has_pastable_paths() and dest_dir and os.path.isdir(dest_dir)
         )
-        paste_sub.add_command(
-            label="Copy here",
-            command=lambda d=dest_dir: self.paste_clipboard_into_folder(d, True),
-            state=tk.NORMAL if can_paste else tk.DISABLED,
-        )
-        paste_sub.add_command(
-            label="Move here",
-            command=lambda d=dest_dir: self.paste_clipboard_into_folder(d, False),
-            state=tk.NORMAL if can_paste else tk.DISABLED,
-        )
+        hk = getattr(self, "hotkeys_map", None) or DEFAULT_HOTKEYS
+        acc_paste = format_accelerator_menu(hk.get("files_clipboard_paste_copy", ""))
+        acc_move = format_accelerator_menu(hk.get("files_clipboard_paste_move", ""))
+        paste_here: dict = {
+            "label": "Copy here",
+            "command": lambda d=dest_dir: self.paste_clipboard_into_folder(d, True),
+            "state": tk.NORMAL if can_paste else tk.DISABLED,
+        }
+        if acc_paste:
+            paste_here["accelerator"] = acc_paste
+        paste_sub.add_command(**paste_here)
+        move_here: dict = {
+            "label": "Move here",
+            "command": lambda d=dest_dir: self.paste_clipboard_into_folder(d, False),
+            "state": tk.NORMAL if can_paste else tk.DISABLED,
+        }
+        if acc_move:
+            move_here["accelerator"] = acc_move
+        paste_sub.add_command(**move_here)
         menu.add_cascade(
             label="Paste",
             menu=paste_sub,
@@ -639,7 +652,14 @@ class VtpLegacyDragMixin:
             self._clipboard_status_flash("Pasted into folder (move).")
 
     def paste_clipboard_into_folder(self, dest_dir: str, copy_mode: bool = True) -> None:
-        """Paste paths from the system (or in-app) file clipboard into dest_dir."""
+        """Paste paths from the system (or in-app) file clipboard into dest_dir.
+
+        Runs the actual work on the Tk main thread (via ``after``), not a worker
+        ``threading.Thread``. Paste uses ``_legacy_prompt_conflict_choice`` → modal
+        ``wait_window()``; scheduling that from a background thread while blocking
+        on ``Event.wait()`` deadlocks the UI on Windows.
+        """
+        clear_internal_clipboard_move_flag()
         sources = get_clipboard_file_paths()
         if not sources:
             logging.info("[clipboard] Paste: no paths on clipboard")
@@ -649,13 +669,13 @@ class VtpLegacyDragMixin:
             logging.info("[clipboard] Paste: invalid destination %s", dest_dir)
             return
 
-        if self.watchdog_observer and self.watchdog_observer.is_alive():
-            logging.info("Suspending directory watcher for paste...")
-            self.watchdog_observer.stop()
-            time.sleep(0.2)
+        def process_paste_main():
+            if self.watchdog_observer and self.watchdog_observer.is_alive():
+                logging.info("Suspending directory watcher for paste...")
+                self.watchdog_observer.stop()
+                time.sleep(0.2)
 
-        def process_paste():
-            moved_sources = []
+            moved_sources: list = []
             replace_all = False
             skip_all = False
 
@@ -699,20 +719,18 @@ class VtpLegacyDragMixin:
                 except Exception as e:
                     logging.info("Paste error for %s: %s", file_path, e)
 
-            def finalize():
-                self._finalize_paste_operations(
-                    dest_dir, [] if copy_mode else moved_sources, copy_mode
-                )
-                try:
-                    logging.info("Resuming directory watcher after paste...")
-                    time.sleep(0.2)
+            self._finalize_paste_operations(
+                dest_dir, [] if copy_mode else moved_sources, copy_mode
+            )
+            try:
+                logging.info("Resuming directory watcher after paste...")
+                time.sleep(0.2)
+                if self.watchdog_observer:
                     self.watchdog_observer.start()
-                except Exception as e:
-                    logging.info(f"Error restarting directory watcher: {e}")
+            except Exception as e:
+                logging.info("Error restarting directory watcher: %s", e)
 
-            self.after(0, finalize)
-
-        threading.Thread(target=process_paste, daemon=True).start()
+        self.after(1, process_paste_main)
 
     def in_thumbnail_area(self, event):
         """Check if the drop is in the thumbnail view."""
