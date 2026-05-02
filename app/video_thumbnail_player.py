@@ -1118,7 +1118,7 @@ class VideoThumbnailPlayer(
 
                 self.update_tree_view(old_path, os.path.dirname(new_path))
 
-                # 1. Aggressively purge the physical disk cache for the old path
+                # 1. Purge the physical disk cache for the old path
                 try:
                     self.delete_thumbnail_cache(old_path)
                 except Exception as cache_err:
@@ -1127,22 +1127,22 @@ class VideoThumbnailPlayer(
                 # 2. Update current directory if we are inside it
                 if os.path.normcase(self.current_directory) == os.path.normcase(old_path):
                     self.current_directory = new_path
-                    
-                # 3. Halt pending background operations
+
+                # 3. Halt pending background operations and clear stale queues
                 self.stop_preview()
-                if hasattr(self, 'thumb_queue') and not self.thumb_queue.empty():
-                     self.thumb_queue.queue.clear()
-                     self.thumb_queue_running = False
+                if hasattr(self, "thumb_queue") and not self.thumb_queue.empty():
+                    self.thumb_queue.queue.clear()
+                    self.thumb_queue_running = False
 
                 # 4. Clear the UI completely before queuing new items
                 self.clear_thumbnails()
 
-                # 5. Force a fresh subtree scan to guarantee DB and cache consistency
-                self.scan_subtree(os.path.dirname(new_path), force_refresh=True)
-
-                # 6. Finally, display the fresh thumbnails
+                # 5. Reload grid from DB/disk for current folder only. We intentionally do not
+                #    call scan_subtree(parent) here: that walked the entire parent tree with
+                #    force_refresh and could freeze on huge trees; paths are already updated
+                #    via update_folder_path. force_refresh=False avoids bypassing DB thumbnail cache.
                 self.display_thumbnails(
-                    self.current_directory, force_refresh=True, preserve_scroll=True
+                    self.current_directory, force_refresh=False, preserve_scroll=True
                 )
 
             except Exception as e:
