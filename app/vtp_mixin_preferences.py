@@ -120,9 +120,29 @@ class VtpPreferencesMixin:
 
     def parse_thumbnail_size(self, size_string):
         logging.debug("parse_thumbnail_size: %s", size_string)
-
-        width, height = map(int, size_string.split("x"))
+        if isinstance(size_string, (list, tuple)) and len(size_string) == 2:
+            return (int(size_string[0]), int(size_string[1]))
+        if not isinstance(size_string, str):
+            size_string = str(size_string)
+        width, height = map(int, size_string.lower().split("x"))
         return (width, height)
+
+    def _sync_thumbnail_size_toolbar_from_state(self) -> None:
+        """Keep toolbar / View menu StringVar in sync with ``self.thumbnail_size`` (e.g. after load)."""
+        thumb_str = f"{self.thumbnail_size[0]}x{self.thumbnail_size[1]}"
+        if hasattr(self, "thumbnail_size_option"):
+            self.thumbnail_size_option.set(thumb_str)
+        menu = getattr(self, "thumbnail_size_menu", None)
+        if menu is not None:
+            try:
+                if menu.winfo_exists():
+                    # Avoid firing ``change_both_thumbnail_sizes`` (would also overwrite ``widefolder_size``).
+                    old_cmd = menu.cget("command")
+                    menu.configure(command=None)
+                    menu.set(thumb_str)
+                    menu.configure(command=old_cmd)
+            except Exception:
+                pass
 
 
     def apply_panel_states_from_settings(self, settings):
@@ -176,6 +196,7 @@ class VtpPreferencesMixin:
                 # Directly access the settings dictionary
                 self.capture_method_var.set(settings.get("capture_method", "OpenCV"))  # Default to FFmpeg if not set
                 self.thumbnail_size = self.parse_thumbnail_size(settings.get("thumbnail_size", "320x240"))  # Convert to tuple
+                self._sync_thumbnail_size_toolbar_from_state()
                 self.thumbnail_format = settings.get("thumbnail_format", self.thumbnail_format)
                 # self.thumbnail_cache_path = settings.get("thumbnail_cache_path", self.thumbnail_cache_path)
                 # Check if the settings contain more than just the default relative path.
@@ -307,7 +328,7 @@ class VtpPreferencesMixin:
             if "audio_device" in settings:
                     self.audio_device_var.set(settings["audio_device"])
             else:
-                devices = self.audio_devices  # use already-loaded cache
+                devices = self.audio_devices
                 if devices:
                     self.audio_device_var.set(devices[0]['name'])
                    

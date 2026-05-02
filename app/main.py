@@ -353,6 +353,8 @@ def run_application():
     from video_thumbnail_player import VideoThumbnailPlayer
 
     _prepare_lightweight_env()
+    # Match superfast modes: cwd = ``app/`` so ``settings.json`` and paths resolve consistently.
+    os.chdir(APP_DIR)
 
     debug_mode = "--debug" in sys.argv
     log_path_inner = setup_logging(debug=debug_mode)

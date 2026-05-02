@@ -57,6 +57,9 @@ class VtpVirtualGridMixin:
         self._vg_visible_rows = 0
         self._vg_cols = 1
         self._vg_canvas_h = 600
+        # During tk.PanedWindow / CTk repair, canvas winfo_width can be far too small; avoid cols=1 glitches.
+        self._vg_last_good_canvas_w = 0
+        self._vg_last_good_cols = 0
 
         self._vg_scroll_px = 0.0
         self._vg_max_scroll_px = 0.0
@@ -147,8 +150,8 @@ class VtpVirtualGridMixin:
         self._vg_std_pool.clear()
 
         thumb_w, thumb_h = self.thumbnail_size
-        border = getattr(self, "thumb_BorderSize", 14)
-        border_thick = getattr(self, "outlinewidth", 2)
+        border = self.effective_thumb_border_size()
+        border_thick = self.effective_thumb_outlinewidth()
 
         canvas_w = thumb_w + border * 2
         canvas_h = thumb_h + border * 2 + 10
@@ -170,10 +173,11 @@ class VtpVirtualGridMixin:
             )
             thumb_canvas.pack()
 
+            rr = self.effective_thumb_frame_radius()
             self.create_rounded_rectangle(
                 thumb_canvas, border_thick, border_thick,
                 canvas_w - border_thick, canvas_h - border_thick,
-                radius=16, outline=self.thumbBorderColor,
+                radius=rr, outline=self.thumbBorderColor,
                 width=border_thick, fill=self.thumbBGColor, tags="border",
             )
             thumb_canvas.create_image(canvas_w // 2, canvas_h // 2, tags="thumbnail")
@@ -578,8 +582,8 @@ class VtpVirtualGridMixin:
 
     def _vg_recalc(self):
             thumb_w, thumb_h = self.thumbnail_size
-            border = getattr(self, "thumb_BorderSize", 14)
-            padding = getattr(self, "thumb_Padding", 6)
+            border = self.effective_thumb_border_size()
+            padding = self.effective_thumb_cell_padding()
             
             # --- Výška popisku: pixely (oddělené labely + pady + zalamování) ---
             label_h = int(getattr(self, "_vg_dynamic_label_h", 40))
@@ -593,14 +597,41 @@ class VtpVirtualGridMixin:
             cell_w = thumb_w + border * 2 + padding * 2
             cell_h = thumb_h + border * 2 + 10 + padding * 2 + label_h
 
-            canvas_w = self.canvas.winfo_width()
-            canvas_h = self.canvas.winfo_height()
-            if canvas_w < 100:
+            raw_w = int(self.canvas.winfo_width())
+            raw_h = int(self.canvas.winfo_height())
+            canvas_h = raw_h if raw_h >= 100 else 600
+            if raw_w < 100:
                 canvas_w = 800
-            if canvas_h < 100:
-                canvas_h = 600
+            else:
+                canvas_w = raw_w
 
-            self._vg_cols = max(1, canvas_w // cell_w)
+            min_w_stable = max(120, cell_w + 8)
+            last_c = int(getattr(self, "_vg_last_good_cols", 0) or 0)
+            last_w = int(getattr(self, "_vg_last_good_canvas_w", 0) or 0)
+            # Sudden collapse (pane repair) vs user slowly narrowing: only reuse cols if width
+            # dropped sharply from a previously sane value.
+            glitch_width = (
+                raw_w < min_w_stable
+                and last_c >= 1
+                and last_w >= min_w_stable
+                and (raw_w + 120 < last_w)
+            )
+            if glitch_width:
+                self._vg_cols = last_c
+                logging.info(
+                    "[VGrid] recalc: raw_canvas_w=%d < stable_min=%d — keeping cols=%d (last_good_w=%d)",
+                    raw_w,
+                    min_w_stable,
+                    last_c,
+                    last_w,
+                )
+            else:
+                eff_w = canvas_w if raw_w < 100 else raw_w
+                self._vg_cols = max(1, int(eff_w) // cell_w)
+                if raw_w >= min_w_stable:
+                    self._vg_last_good_cols = self._vg_cols
+                    self._vg_last_good_canvas_w = raw_w
+
             self._vg_row_height = cell_h
             self._vg_canvas_h = canvas_h
             inner = int(self.widefolder_size[1]) + 16
@@ -642,9 +673,20 @@ class VtpVirtualGridMixin:
             sr_h = self._vg_total_h + cell_h
             self._vg_scrollregion_h = sr_h
             self.canvas.configure(scrollregion=(0, 0, canvas_w, sr_h))
-            logging.info("[VGrid] recalc: items=%d cols=%d file_rows=%d rh=%d data_h=%d sr_h=%d canvas_h=%d",
-                        len(self._vg_data), self._vg_cols, self._vg_file_rows,
-                        self._vg_row_height, int(self._vg_total_h), int(sr_h), canvas_h)
+            logging.info(
+                "[VGrid] recalc: items=%d cols=%d file_rows=%d cell_w=%d rh=%d data_h=%d sr_h=%d "
+                "canvas_w=%d(raw=%d) canvas_h=%d",
+                len(self._vg_data),
+                self._vg_cols,
+                self._vg_file_rows,
+                int(cell_w),
+                self._vg_row_height,
+                int(self._vg_total_h),
+                int(sr_h),
+                canvas_w,
+                raw_w,
+                canvas_h,
+            )
 
     # ------------------------------------------------------------------
     # 5. Scrollbar — use native canvas yview
@@ -724,7 +766,7 @@ class VtpVirtualGridMixin:
         Slots whose data_idx is unchanged AND position hasn't changed are
         completely skipped.
         """
-        padding = getattr(self, "thumb_Padding", 6)
+        padding = self.effective_thumb_cell_padding()
         canvas_h = self._vg_canvas_h
         rh = self._vg_row_height
         wrh = self._vg_wide_row_height
@@ -741,7 +783,7 @@ class VtpVirtualGridMixin:
             cw = max(100, self.canvas.winfo_width())
             wg_raw = getattr(self, "vg_wide_canvas_gutter", None)
             if wg_raw is None:
-                wide_gutter = int(getattr(self, "thumb_Padding", 6)) + 2
+                wide_gutter = int(self.effective_thumb_cell_padding()) + 2
             else:
                 wide_gutter = int(wg_raw)
             cw_inner = max(50, cw - 2 * wide_gutter)
@@ -1646,11 +1688,12 @@ class VtpVirtualGridMixin:
             if render_id != self._vg_render_id:
                 return
 
+            is_cached = self.database.is_folder_cached(file_path)
             composite = self.file_ops.create_folder_thumbnail(
                 thumbnail_size=self.thumbnail_size, folder_path=file_path,
                 cache_enabled=self.cache_enabled,
                 cache_dir=self.thumbnail_cache_path,
-                database=self.database, is_cached=True,
+                database=self.database, is_cached=is_cached,
             )
             if composite and self.memory_cache:
                 thumbnail_cache.set(file_path, composite, memory_cache=self.memory_cache)

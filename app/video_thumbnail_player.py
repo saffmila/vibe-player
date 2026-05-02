@@ -153,6 +153,11 @@ with open(_crash_log_path, "w", encoding="utf-8") as log_file:
 ctypes.windll.shcore.SetProcessDpiAwareness(2)
 
 
+# Tk iconphoto() with very large bitmaps (e.g. 300×300) has been observed to throw off
+# non-client (caption) metrics on some Windows + per-monitor DPI combinations.
+_WIN_ICONPHOTO_MAX_PX = 64
+
+
 def _apply_windows_immersive_dark_titlebar(widget):
     """
     Use DWM immersive dark mode for the native caption (minimize / maximize / close bar)
@@ -348,12 +353,26 @@ class VideoThumbnailPlayer(
         self._app_icon_image = None
         try:
             if os.path.exists(icon_png_path):
-                self._app_icon_image = ImageTk.PhotoImage(Image.open(icon_png_path))
+                _ico_img = Image.open(icon_png_path)
+                if max(_ico_img.size) > _WIN_ICONPHOTO_MAX_PX:
+                    _ico_img = ImageOps.contain(
+                        _ico_img,
+                        (_WIN_ICONPHOTO_MAX_PX, _WIN_ICONPHOTO_MAX_PX),
+                        Image.LANCZOS,
+                    )
+                self._app_icon_image = ImageTk.PhotoImage(_ico_img.convert("RGBA"))
                 self.iconphoto(True, self._app_icon_image)
                 logging.info(f"[ICON] Loaded app icon from PNG: {icon_png_path}")
             elif os.path.exists(icon_ico_path):
                 # Fallback to .ico for environments where PNG is missing.
-                self._app_icon_image = ImageTk.PhotoImage(Image.open(icon_ico_path))
+                _ico_img = Image.open(icon_ico_path)
+                if max(_ico_img.size) > _WIN_ICONPHOTO_MAX_PX:
+                    _ico_img = ImageOps.contain(
+                        _ico_img,
+                        (_WIN_ICONPHOTO_MAX_PX, _WIN_ICONPHOTO_MAX_PX),
+                        Image.LANCZOS,
+                    )
+                self._app_icon_image = ImageTk.PhotoImage(_ico_img.convert("RGBA"))
                 self.iconphoto(True, self._app_icon_image)
                 logging.info(f"[ICON] Loaded app icon from ICO: {icon_ico_path}")
             else:
@@ -426,19 +445,10 @@ class VideoThumbnailPlayer(
         self._click_interval = 250  # ms
         
 
-        # Initialize empty list to prevent blocking GUI thread
-        self.audio_devices = [] 
-
-        def _delayed_audio_init():
-            """
-            Fetches audio devices 1 second after app startup in the main thread.
-            Prevents sounddevice C++ crashes and keeps the startup fast.
-            """
-            from video_operations import get_audio_devices
-            self.audio_devices = get_audio_devices()
-
-        # Tkinter calls this 1000ms after the GUI is already loaded and visible
-        self.after(1000, _delayed_audio_init)
+        # Filled on demand (Preferences / prefs default) — see ``ensure_audio_devices_loaded``.
+        # Probing PortAudio via sounddevice during heavy UI (DPI move, big folder) has been seen to hard-crash.
+        self.audio_devices = []
+        self._audio_devices_probe_done = False
         
         self.status_bar.set_stop_callback(self.stop_scan)
         self.selected_rating = 0
@@ -466,7 +476,7 @@ class VideoThumbnailPlayer(
         self.get_vidsize = False
         self.get_imgsize = True
         self.autoplay_vid = True
-        self.setup_icons()
+        # Tree/grid PhotoImages: loaded from update_all_scaling() (startup + DPI changes).
         self.thumbnail_labels = {}
         self.current_volume = 100
         self.quick_acces_history = 15
@@ -851,6 +861,36 @@ class VideoThumbnailPlayer(
         self.after(1000, self.set_initial_split_heights)
 
         self._setup_dnd()
+
+        # Per-window DPI can differ from primary monitor (GetDC in get_windows_scaling_factor).
+        # Re-sync once HWND exists so tk/CTk scaling matches the caption monitor.
+        self.after(80, self._sync_window_dpi_from_hwnd)
+        self.after(400, self._sync_window_dpi_from_hwnd)
+
+    def _sync_window_dpi_from_hwnd(self, _attempt: int = 0) -> None:
+        if sys.platform != "win32":
+            return
+        try:
+            self.update_idletasks()
+            wid = int(self.winfo_id())
+            if wid == 0:
+                if _attempt < 10:
+                    self.after(100, lambda: self._sync_window_dpi_from_hwnd(_attempt + 1))
+                return
+            detected = ctypes.windll.user32.GetDpiForWindow(wid) / 96.0
+            prev = float(getattr(self, "current_dpi_scale", 1.0) or 1.0)
+            if abs(detected - prev) <= 0.02:
+                return
+            logging.info(
+                "[DPI] _sync_window_dpi_from_hwnd: scale %.4f -> %.4f (per-window HWND)",
+                prev,
+                detected,
+            )
+            self.current_dpi_scale = detected
+            self.update_all_scaling(detected)
+            _apply_windows_immersive_dark_titlebar(self)
+        except Exception as exc:
+            logging.debug("[DPI] _sync_window_dpi_from_hwnd: %s", exc)
 
     def _demo_toast(self, text_key: str) -> None:
         if getattr(self, "demo_notifier", None):
@@ -2775,6 +2815,16 @@ class VideoThumbnailPlayer(
                 self._demo_toast("demo_timeline")
         
 
+    def ensure_audio_devices_loaded(self) -> None:
+        """Populate ``audio_devices`` once via sounddevice (PortAudio). Call from Preferences, not at startup."""
+        if getattr(self, "_audio_devices_probe_done", False):
+            return
+        self._audio_devices_probe_done = True
+        try:
+            self.audio_devices = get_audio_devices()
+        except Exception as exc:
+            logging.error("[AudioDevice] enumeration failed: %s", exc, exc_info=True)
+            self.audio_devices = []
 
     def change_thumbnail_size(self,size_option):
            

@@ -87,7 +87,15 @@ class FileOperations:
         self._folder_icon_cache[key] = fallback
         return fallback
 
-    def create_folder_preview_thumbnail(self, folder_path, thumbnail_size, cache_enabled=True, cache_dir=None, database=None):
+    def create_folder_preview_thumbnail(
+        self,
+        folder_path,
+        thumbnail_size,
+        cache_enabled=True,
+        cache_dir=None,
+        database=None,
+        for_green_folder_icon: bool = False,
+    ):
         """
         Generates a 2x2 preview grid for a folder icon.
         This modern version uses the fast helper function to get file paths and
@@ -139,23 +147,85 @@ class FileOperations:
                 logging.debug("Could not generate any thumbnails for preview grid: %s", folder_path)
                 return None
     
-            # --- Grid composition logic with rounded corners ---
-            # Ensure you have 'from PIL import ImageDraw' at the top of your file
+            # --- Grid composition: sizes were hardcoded (90x60) for 320x240 only, which
+            #     looked wrong on other thumb presets and diverged per monitor DPI. ---
+            tw, th = int(thumbnail_size[0]), int(thumbnail_size[1])
+            ref_w, ref_h = 320.0, 240.0
+            dpi_s = float(getattr(self.parent, "current_dpi_scale", 1.0) or 1.0)
+            if dpi_s >= 1.5:
+                dpi_k = 0.83
+            elif dpi_s <= 1.0:
+                dpi_k = 1.15
+            else:
+                dpi_k = 1.15 + (dpi_s - 1.0) / 0.5 * (0.83 - 1.15)
+
             rows, cols = 2, 2
-            gap = 6
-            thumb_w, thumb_h = 90, 60
-            top_offset = 14
-            
-            # Define how round the corners should be
-            corner_radius = 6
+            thumb_w = max(28, int(round(90.0 * tw / ref_w * dpi_k)))
+            thumb_h = max(20, int(round(60.0 * th / ref_h * dpi_k)))
+            gap = max(2, int(round(6.0 * tw / ref_w * dpi_k)))
+            top_offset = int(round(14.0 * th / ref_h * dpi_k))
+            corner_radius = max(2, int(round(6.0 * min(tw / ref_w, th / ref_h) * dpi_k)))
+
+            # Uniform enlargement on all monitors (after DPI-relative tuning).
+            inner_boost = 1.3
+            thumb_w = max(28, int(round(thumb_w * inner_boost)))
+            thumb_h = max(20, int(round(thumb_h * inner_boost)))
+            gap = max(2, int(round(gap * inner_boost)))
+            top_offset = int(round(top_offset * inner_boost))
+            corner_radius = max(2, int(round(corner_radius * inner_boost)))
+
+            # folder_g.png uses a visibly tighter inner cut-out than folder.png; the same
+            # cell math overflows the green artwork while fitting the yellow one.
+            if for_green_folder_icon:
+                hole_fit = 0.88
+                thumb_w = max(24, int(round(thumb_w * hole_fit)))
+                thumb_h = max(18, int(round(thumb_h * hole_fit)))
+                gap = max(2, int(round(gap * hole_fit)))
+                top_offset = int(round(top_offset * hole_fit))
+                corner_radius = max(2, int(round(corner_radius * hole_fit)))
 
             total_grid_width = cols * thumb_w + (cols - 1) * gap
             total_grid_height = rows * thumb_h + (rows - 1) * gap
 
-            offset_x = (thumbnail_size[0] - total_grid_width) // 2
-            offset_y = (thumbnail_size[1] - total_grid_height) // 2
+            margin_x = max(8, int(round(12 * tw / ref_w)))
+            margin_y = max(8, int(round(12 * th / ref_h)))
+            if total_grid_width > tw - margin_x:
+                s = (tw - margin_x) / float(max(1, total_grid_width))
+                thumb_w = max(24, int(thumb_w * s))
+                thumb_h = max(18, int(thumb_h * s))
+                gap = max(2, int(gap * s))
+                top_offset = int(top_offset * s)
+                corner_radius = max(2, int(corner_radius * s))
+                total_grid_width = cols * thumb_w + (cols - 1) * gap
+                total_grid_height = rows * thumb_h + (rows - 1) * gap
+            if total_grid_height > th - margin_y:
+                s = (th - margin_y) / float(max(1, total_grid_height))
+                thumb_w = max(24, int(thumb_w * s))
+                thumb_h = max(18, int(thumb_h * s))
+                gap = max(2, int(gap * s))
+                top_offset = int(top_offset * s)
+                corner_radius = max(2, int(corner_radius * s))
+                total_grid_width = cols * thumb_w + (cols - 1) * gap
+                total_grid_height = rows * thumb_h + (rows - 1) * gap
 
-            grid_image = Image.new('RGBA', thumbnail_size, (0, 0, 0, 0))
+            offset_x = (tw - total_grid_width) // 2
+            offset_y = (th - total_grid_height) // 2
+
+            logging.debug(
+                "[FolderPreview] %s tw=%s th=%s dpi=%.3f k=%.3f boost=%s cell=%sx%s gap=%s top=%s",
+                os.path.basename(folder_path),
+                tw,
+                th,
+                dpi_s,
+                dpi_k,
+                inner_boost,
+                thumb_w,
+                thumb_h,
+                gap,
+                top_offset,
+            )
+
+            grid_image = Image.new('RGBA', (tw, th), (0, 0, 0, 0))
 
             # Create a reusable mask with rounded corners for the thumbnails
             mask = Image.new("L", (thumb_w, thumb_h), 0)
@@ -219,7 +289,8 @@ class FileOperations:
             if folder_path and os.path.isdir(folder_path) and is_cached:
                 grid_img = self.create_folder_preview_thumbnail(
                     folder_path=folder_path,
-                    thumbnail_size=thumbnail_size
+                    thumbnail_size=thumbnail_size,
+                    for_green_folder_icon=is_cached,
                 )
                 if grid_img:
                     # Overlay grid onto folder icon

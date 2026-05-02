@@ -903,7 +903,8 @@ def create_preferences_window(app):
     content_frame.bind("<Configure>", on_configure)
     canvas.bind("<Configure>", lambda e: canvas.itemconfig(content_frame_id, width=e.width))
 
-    # audio_devices = app.audio_devices  # use cached list from app when available
+    if hasattr(app, "ensure_audio_devices_loaded"):
+        app.ensure_audio_devices_loaded()
     audio_devices = getattr(app, "audio_devices", [])
     audio_device_options = [f"{d['name']} ({d['index']})" for d in audio_devices] if audio_devices else ["No devices found"]
 

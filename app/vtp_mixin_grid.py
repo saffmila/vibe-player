@@ -604,7 +604,8 @@ class VtpGridMixin:
         # self.update_idletasks() # Ensure frame sizes are current
 
         total_content_height = 0
-        padding_y = self.thumb_Padding * 2 # Or your specific vertical padding
+        pad_e = self.effective_thumb_cell_padding()
+        padding_y = pad_e * 2
 
         # Calculate height from wide folders frame if visible
         try:
@@ -622,7 +623,7 @@ class VtpGridMixin:
         # Use the calculated total thumb height
         try:
             thumb_h = self.thumbnail_size[1]
-            border_size = getattr(self, 'thumb_BorderSize', 14)
+            border_size = self.effective_thumb_border_size()
             label_space = 10
             canvas_height_single = thumb_h + (border_size * 2) + label_space # Includes label space
             total_thumb_height = canvas_height_single + padding_y
@@ -1256,13 +1257,14 @@ class VtpGridMixin:
             return
 
         thumb_w, thumb_h = self.thumbnail_size
-        padding_x = self.thumb_Padding * 2
-        padding_y = self.thumb_Padding * 2
+        pad_e = self.effective_thumb_cell_padding()
+        padding_x = pad_e * 2
+        padding_y = pad_e * 2
 
         # --- Calculate total thumbnail dimensions including borders/padding ---
         try:
             # Use attributes if they exist (safer)
-            border_size = getattr(self, 'thumb_BorderSize', 14) # Default if not found
+            border_size = self.effective_thumb_border_size()
             label_space = 10 # Approximate extra height for the label below the image
             canvas_width_single = thumb_w + (border_size * 2)
             total_thumb_width = canvas_width_single + padding_x
@@ -1337,10 +1339,12 @@ class VtpGridMixin:
         thumb_width, thumb_height = self.thumbnail_size
 
         try:
-            canvas_width = thumb_width + (self.thumb_BorderSize * 2)
-            total_thumb_width = canvas_width + (self.thumb_Padding * 2)
-            canvas_height = thumb_height + (self.thumb_BorderSize * 2) + 10
-            total_thumb_height = canvas_height + (self.thumb_Padding * 2)
+            b = self.effective_thumb_border_size()
+            p = self.effective_thumb_cell_padding()
+            canvas_width = thumb_width + (b * 2)
+            total_thumb_width = canvas_width + (p * 2)
+            canvas_height = thumb_height + (b * 2) + 10
+            total_thumb_height = canvas_height + (p * 2)
             if total_thumb_width <= 0: total_thumb_width = thumb_width + 20
             if total_thumb_height <= 0: total_thumb_height = thumb_height + 20
         except AttributeError:
@@ -1748,7 +1752,7 @@ class VtpGridMixin:
                         cache_enabled=self.cache_enabled,
                         cache_dir=self.thumbnail_cache_path,
                         database=self.database,
-                        is_cached=True
+                        is_cached=is_cached,
                     )
 
                     if not composite_thumbnail:
@@ -1946,15 +1950,37 @@ class VtpGridMixin:
             
             P = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons")
             
-            scaling = float(self.tk.call('tk', 'scaling')) or 1.0
-            if scaling >= 2.0:
-                icon_size = 48
-            elif scaling >= 1.5:
-                icon_size = 32
+            dpi_s = float(getattr(self, "current_dpi_scale", 1.0) or 1.0)
+            # Match perceived size on HiDPI (was 48/32/24 via tk scaling) while staying inside the row.
+            if dpi_s >= 2.25:
+                icon_size = 44
+            elif dpi_s >= 2.0:
+                icon_size = 40
+            elif dpi_s >= 1.75:
+                icon_size = 34
+            elif dpi_s >= 1.5:
+                icon_size = 30
+            elif dpi_s >= 1.25:
+                icon_size = 26
             else:
                 icon_size = 24
+            # ~30% larger folder glyphs on 4K-class DPI (same profile threshold as hi-dpi UI).
+            if dpi_s >= 1.5:
+                icon_size = int(round(icon_size * 1.3))
+            try:
+                rh = int(getattr(self, "row_height", 0) or 0)
+                if rh > 0:
+                    max_by_row = max(22, min(int(rh * 0.90), rh - 4))
+                    icon_size = min(icon_size, max_by_row)
+            except (TypeError, ValueError):
+                pass
 
-            logging.info(f"[DEBUG] Tree icons: DPI scaling={scaling}, using icon_size={icon_size}")
+            logging.info(
+                "[DEBUG] Tree icons: current_dpi_scale=%.3f row_height=%s -> icon_size=%d px",
+                dpi_s,
+                getattr(self, "row_height", "?"),
+                icon_size,
+            )
 
             # 1) Load PIL images from disk
             folder_tree_pil = Image.open(os.path.join(P, "tree_folder.PNG")).resize((icon_size, icon_size), Image.LANCZOS)
@@ -1996,8 +2022,71 @@ class VtpGridMixin:
             messagebox.showerror("Icons", f"Failed to load icons:\n{e}")
             self.quit()
 
-            
-            
+    def _refresh_all_tree_icons_after_icon_reload(self) -> None:
+        """Re-apply tree PhotoImages after setup_icons() replaced them (DPI / monitor change)."""
+        if not hasattr(self, "tree") or not hasattr(self, "database"):
+            return
+        try:
+            if not self.tree.winfo_exists():
+                return
+        except tk.TclError:
+            return
+
+        def _root_icon(path_val: str):
+            p = os.path.normcase(os.path.normpath(str(path_val)))
+            up = os.path.expanduser("~")
+            specials = (
+                (os.path.normcase(os.path.join(up, "Desktop")), self.desktop_icon),
+                (os.path.normcase(os.path.join(up, "Documents")), self.documents_icon),
+                (os.path.normcase(os.path.join(up, "Pictures")), self.pictures_icon),
+                (os.path.normcase(os.path.join(up, "Videos")), self.videos_icon),
+            )
+            for mp, ic in specials:
+                if p == mp and os.path.exists(path_val):
+                    return ic
+            try:
+                g = self.find_google_drive_path()
+            except Exception:
+                g = None
+            if g and p == os.path.normcase(os.path.normpath(g)):
+                return self.google_icon
+            try:
+                drives = self.get_available_drives()
+            except Exception:
+                drives = []
+            for d in drives:
+                dn = os.path.normcase(os.path.normpath(d))
+                pv = p.rstrip(os.sep).upper()
+                dv = dn.rstrip(os.sep).upper()
+                if pv == dv:
+                    return self.hdd_icon
+            return self.folder_treeicon
+
+        def _walk(parent: str) -> None:
+            for item in self.tree.get_children(parent):
+                vals = self.tree.item(item, "values")
+                if vals and vals[0] and vals[0] != "dummy":
+                    path_val = vals[0]
+                    par = self.tree.parent(item)
+                    try:
+                        if par == "":
+                            img = _root_icon(path_val)
+                        else:
+                            cached = self.database.is_folder_cached(path_val)
+                            img = (
+                                self.folder_treeicon_green
+                                if cached
+                                else self.folder_treeicon
+                            )
+                        self.tree.item(item, image=img)
+                    except tk.TclError:
+                        pass
+                _walk(item)
+
+        try:
+            _walk("")
+        except Exception as exc:
+            logging.warning("_refresh_all_tree_icons_after_icon_reload: %s", exc)
 
     def is_cache_empty(self, file_path):
         """Check if the cache folder is empty or if the thumbnail for a specific file doesn't exist"""
@@ -2139,11 +2228,38 @@ class VtpGridMixin:
             """
             Applies all scaling settings to the application based on the new scale_factor.
             """
-            logging.info(f"Applying new scaling factor: {scale_factor}")
-
             profile = self._get_scaling_profile(scale_factor)
+            hi = "hi-dpi" if scale_factor >= 1.5 else "std"
+            logging.info(
+                "[DPI] update_all_scaling: scale_factor=%.4f profile=%s widget_scale=%s window_scale=%s",
+                float(scale_factor),
+                hi,
+                profile["widget_scale"],
+                profile["window_scale"],
+            )
+
             widget_scale = profile["widget_scale"]
             window_scale = profile["window_scale"]
+
+            # Tk keeps its own pixels-per-point factor; after per-monitor DPI change it can
+            # lag behind GetDpiForWindow so ttk / tkfont metrics still behave like the old
+            # monitor (huge tree + caption measurements -> rh=400+ and broken layouts).
+            try:
+                dpi = int(round(float(scale_factor) * 96.0))
+                dpi = max(72, min(768, dpi))
+                px_per_pt = dpi / 72.0
+                try:
+                    self.tk.call("tk", "scaling", "-displayof", self, px_per_pt)
+                except tk.TclError:
+                    self.tk.call("tk", "scaling", px_per_pt)
+                logging.info(
+                    "[DPI] tk scaling -> pixels_per_pt=%.6f (dpi=%s, scale_factor=%.4f)",
+                    px_per_pt,
+                    dpi,
+                    float(scale_factor),
+                )
+            except Exception as exc:
+                logging.warning("[DPI] tk scaling sync failed: %s", exc)
 
             ctk.set_widget_scaling(widget_scale)
             ctk.set_window_scaling(window_scale)
@@ -2151,29 +2267,49 @@ class VtpGridMixin:
             # Keep all font/row/indent sizing idempotent and based on base values.
             self._apply_thumb_font_scaling(scale_factor)
             if hasattr(self, 'update_treeview_scaling'):
-                self.update_treeview_scaling(widget_scale)
+                # Pass scale_factor explicitly so tree profile matches this apply even if
+                # self.current_dpi_scale is updated in the same tick elsewhere.
+                self.update_treeview_scaling(widget_scale, dpi_scale=scale_factor)
+
+            # Tree bitmaps were sized at first setup_icons(); reload when logical DPI changes
+            # so folder glyphs match row height (tk scaling alone is not enough).
+            if hasattr(self, "setup_icons"):
+                try:
+                    self.setup_icons()
+                except SystemExit:
+                    raise
+                except Exception as exc:
+                    logging.error("[DPI] setup_icons after scaling failed: %s", exc, exc_info=True)
+            if hasattr(self, "_refresh_all_tree_icons_after_icon_reload"):
+                try:
+                    self._refresh_all_tree_icons_after_icon_reload()
+                except Exception as exc:
+                    logging.warning("[DPI] refresh tree icons: %s", exc)
 
     def _get_scaling_profile(self, scale_factor):
             """
             Returns a single source of truth for all scale-sensitive UI values.
             Must stay idempotent (same DPI => same sizes, no drift).
             """
-            if scale_factor >= 1.5:  # 4K-ish
+            # scale_factor = GetDpiForWindow/96 (e.g. 1.5 at 150 %, 2.0 at 200 %).
+            # On a 4K panel you are almost always in THIS branch (>= 1.5), not the else below.
+            if scale_factor >= 1.5:
                 return {
                     "widget_scale": 1.2,
                     "window_scale": 1.1,
                     "tree_font_multiplier": 1.2,
                     "thumb_font_multiplier": 1.15,
-                    "tree_row_base": 55,
+                    "tree_row_base": 58,
                     "tree_indent_base": 22,
                 }
+            # 100–125 % displays only (scale_factor < 1.5)
             return {
                 "widget_scale": 0.9,
                 "window_scale": 1.0,
                 "tree_font_multiplier": 1.0,
                 "thumb_font_multiplier": 1.0,
-                "tree_row_base": 55,
-                "tree_indent_base": 22,
+                "tree_row_base": 34,
+                "tree_indent_base": 16,
             }
 
     def _apply_thumb_font_scaling(self, scale_factor):
@@ -2202,6 +2338,30 @@ class VtpGridMixin:
     def _get_effective_thumb_font_size(self):
             profile = self._get_scaling_profile(self.current_dpi_scale)
             return max(7, int(round(self.thumbFontSize * profile["thumb_font_multiplier"])))
+
+    def _thumb_pixel_scale(self) -> float:
+        """1.0 at 320px-wide thumbs; scales chrome for smaller tile presets (e.g. 160x120)."""
+        w, _h = getattr(self, "thumbnail_size", (320, 240))
+        return max(0.42, min(1.0, float(w) / 320.0))
+
+    def effective_thumb_border_size(self) -> int:
+        base = int(getattr(self, "thumb_BorderSize", 14))
+        s = self._thumb_pixel_scale()
+        return max(4, min(14, int(round(base * s))))
+
+    def effective_thumb_outlinewidth(self) -> int:
+        base = int(getattr(self, "outlinewidth", 2))
+        s = self._thumb_pixel_scale()
+        return max(1, min(base, int(round(base * max(s, 0.55)))))
+
+    def effective_thumb_cell_padding(self) -> int:
+        base = int(getattr(self, "thumb_Padding", 2))
+        s = self._thumb_pixel_scale()
+        return max(0, min(8, int(round(base * max(s, 0.45)))))
+
+    def effective_thumb_frame_radius(self) -> int:
+        s = self._thumb_pixel_scale()
+        return max(5, min(16, int(round(16 * s))))
 
 
 
@@ -2265,7 +2425,11 @@ class VtpGridMixin:
                 new_scale = current_dpi / 96.0
 
                 if new_scale != self.current_dpi_scale:
-                    logging.info(f"DPI change detected! Old: {self.current_dpi_scale}, New: {new_scale}")
+                    logging.info(
+                        "[DPI] on_window_resize: GetDpiForWindow scale %.4f -> %.4f (scheduling apply)",
+                        float(self.current_dpi_scale),
+                        float(new_scale),
+                    )
                     self._pending_dpi_scale = new_scale
                     dpi_changed = True 
                     
@@ -2313,9 +2477,17 @@ class VtpGridMixin:
             dpi_applied = False
             if self._pending_dpi_scale is not None:
                 pending_scale = self._pending_dpi_scale
-                self.update_all_scaling(pending_scale)
-                self.current_dpi_scale = pending_scale
+                prev_scale = getattr(self, "current_dpi_scale", None)
                 self._pending_dpi_scale = None
+                # Commit logical DPI before applying so tree/thumb helpers that read
+                # current_dpi_scale stay aligned with this monitor.
+                self.current_dpi_scale = pending_scale
+                logging.info(
+                    "[DPI] _perform_resize_actions: applying pending_scale=%.4f (previous current_dpi_scale=%s)",
+                    float(pending_scale),
+                    prev_scale,
+                )
+                self.update_all_scaling(pending_scale)
                 # Ensure root window remains fully opaque after monitor move.
                 try:
                     self.attributes("-alpha", 1.0)
@@ -2325,6 +2497,19 @@ class VtpGridMixin:
                 logging.info("Running update_idletasks() after scaling change...")
                 self.update_idletasks()
                 logging.info("...update_idletasks() finished.")
+                # Virtual grid column count uses canvas winfo_width; after DPI move Tk/CTk
+                # geometry can lag one frame — nudge recalc so thumbs are not stuck in 1-wide layout.
+                if getattr(self, "_vg_active", False):
+
+                    def _vg_nudge_dpi():
+                        if not getattr(self, "_vg_active", False):
+                            return
+                        try:
+                            self._vg_on_canvas_resize()
+                        except Exception as exc:
+                            logging.debug("[DPI] virtual grid nudge after DPI: %s", exc)
+
+                    self.after(120, _vg_nudge_dpi)
 
             # CTk DPI/window scaling can empty the main tk.PanedWindow; fix before sashes.
             self._repair_main_horizontal_panes()
@@ -2400,7 +2585,7 @@ class VtpGridMixin:
         self._apply_thumb_font_scaling(self.current_dpi_scale)
 
 
-    def update_treeview_scaling(self, widget_scale):
+    def update_treeview_scaling(self, widget_scale, dpi_scale=None):
         """
         Applies scaling to the treeview.
         Uses widget_scale for row height, but a *custom* multiplier
@@ -2408,13 +2593,17 @@ class VtpGridMixin:
         
         Args:
             widget_scale (float): The base CTk scale (e.g., 0.9 or 1.2).
+            dpi_scale (float | None): Logical DPI / 96 for profile lookup; defaults to
+                self.current_dpi_scale (must match the monitor driving tree_font_multiplier).
         """
         
         if not hasattr(self, 'base_font_size') or not hasattr(self, 'LTreeBGColor'):
             logging.warning("[update_treeview_scaling] Skipped (preferences not loaded yet)")
             return 
-            
-        profile = self._get_scaling_profile(self.current_dpi_scale)
+
+        scale_for_profile = self.current_dpi_scale if dpi_scale is None else dpi_scale
+        profile = self._get_scaling_profile(scale_for_profile)
+        hi = "hi-dpi" if float(scale_for_profile) >= 1.5 else "std"
 
         # Keep row height and tree indentation tied to the same profile.
         self.row_height = max(20, int(round(profile["tree_row_base"] * widget_scale)))
@@ -2433,8 +2622,14 @@ class VtpGridMixin:
             indent=tree_indent
         )
         logging.info(
-            f"[update_treeview_scaling] Applied. Scale={widget_scale}, RowHeight={self.row_height}, "
-            f"Font Size={new_font_size}, Indent={tree_indent}"
+            "[update_treeview_scaling] Applied profile=%s dpi_scale=%.4f widget_scale=%s "
+            "row_height=%s font_px=%s indent=%s",
+            hi,
+            float(scale_for_profile),
+            widget_scale,
+            self.row_height,
+            new_font_size,
+            tree_indent,
         )
 
 
@@ -3241,16 +3436,16 @@ class VtpGridMixin:
     def run_thumbnail_to_grid(self, thumbnail, file_path, file_name, row, col, is_folder, index, target_frame):
         # logging.info(f"[DEBUG] run_thumbnail_to_grid: {file_name!r} @ row={row},col={col}, folder={is_folder}, frame_exists={target_frame.winfo_exists()}")
         thumb_backFill = True
-        thumb_FrameSize = 16
-        thumb_BorderSize = 14
-        thumb_Padding = 6
+        thumb_FrameSize = self.effective_thumb_frame_radius()
+        thumb_BorderSize = self.effective_thumb_border_size()
+        thumb_Padding = self.effective_thumb_cell_padding()
 
         thumb_TextColor =  self.thumb_TextColor
 
         labelBGColor = self.labelBGColor #  "#2d2d2d" #BG color  around label text 
         y_offset = 0 # thumb vertical shift
         wideFolderColor = "gold"
-        thumb_BorderThickness = self.outlinewidth
+        thumb_BorderThickness = self.effective_thumb_outlinewidth()
         fill_color = self.thumbBGColor if thumb_backFill else ""
         
         # Ensure target_frame still exists
