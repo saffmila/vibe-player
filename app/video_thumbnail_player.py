@@ -1983,7 +1983,7 @@ class VideoThumbnailPlayer(
         self.show_empty_thumbnail_view_context_menu(event)
 
     def _skip_file_clipboard_hotkey(self) -> bool:
-        """Skip file clipboard shortcuts while typing in any Entry/Text (incl. main window)."""
+        """Skip file/selection hotkeys while typing in Entry/Text/Combo (incl. main window)."""
         if self._is_input_focused():
             return True
         focused = self.focus_get()
@@ -1997,6 +1997,7 @@ class VideoThumbnailPlayer(
             "TText",
             "CTkEntry",
             "CTkTextbox",
+            "CTkComboBox",
         )
 
     def _primary_path_for_file_clipboard(self):
@@ -2018,6 +2019,40 @@ class VideoThumbnailPlayer(
         except Exception:
             pass
         return None
+
+    def _hotkey_rename(self, event=None):
+        """F2 / F6: rename current thumb, last-focused file, or tree selection (same path resolution as clipboard)."""
+        path = self._primary_path_for_file_clipboard()
+        if path and os.path.exists(path):
+            self.rename_item(path)
+        else:
+            self._clipboard_status_flash(
+                "Select a file, folder, or tree item to rename.", 3500
+            )
+
+    def _hotkey_metadata(self, event=None):
+        path = self._primary_path_for_file_clipboard()
+        if path and os.path.exists(path):
+            self.show_metadata_popup(path)
+        else:
+            self._clipboard_status_flash("Select a file or tree item for metadata.", 3500)
+
+    def _hotkey_keywords(self, event=None):
+        path = self._primary_path_for_file_clipboard()
+        if path and os.path.exists(path):
+            self.open_keyword_window(path)
+        else:
+            self._clipboard_status_flash("Select a file or tree item for keywords.", 3500)
+
+    def _hotkey_global_delete(self, event=None):
+        if self._skip_file_clipboard_hotkey():
+            return
+        self.handle_global_delete(event)
+
+    def _hotkey_enter_main(self, event=None):
+        if self._skip_file_clipboard_hotkey():
+            return
+        self.on_thumbnail_enter_key(event)
 
     def hotkey_files_clipboard_copy(self, event=None):
         if self._skip_file_clipboard_hotkey():
@@ -2680,7 +2715,7 @@ class VideoThumbnailPlayer(
         self.bind_all(self.hotkeys_map['bookmark_prev'], g(lambda e: self.skip_to_previous_bookmark_global()))
         self.bind_all(self.hotkeys_map['long_seek_forward'], g(lambda e: self.long_seek_forward_global()))
         self.bind_all(self.hotkeys_map['long_seek_backward'], g(lambda e: self.long_seek_backward_global()))
-        self.bind(self.hotkeys_map['enter_action'], self.on_thumbnail_enter_key)
+        self.bind_all(self.hotkeys_map['enter_action'], g(self._hotkey_enter_main))
 
         # --- Playlists ---
         self.bind_all(self.hotkeys_map['add_to_playlist'], g(self.add_selected_to_playlist))
@@ -2692,7 +2727,7 @@ class VideoThumbnailPlayer(
         self.bind_all(self.hotkeys_map['select_all'], g(self.select_all_thumbnails))
 
         # --- File operations (standard) ---
-        self.bind(self.hotkeys_map['delete'], lambda e: self.handle_global_delete(e))
+        self.bind_all(self.hotkeys_map['delete'], g(self._hotkey_global_delete))
         self.bind_all(self.hotkeys_map['files_clipboard_copy'], g(self.hotkey_files_clipboard_copy))
         self.bind_all(self.hotkeys_map['files_clipboard_cut'], g(self.hotkey_files_clipboard_cut))
         self.bind_all(self.hotkeys_map['files_clipboard_paste_copy'], g(self.hotkey_files_clipboard_paste_copy))
@@ -2707,17 +2742,14 @@ class VideoThumbnailPlayer(
                 _seen_paste_move.add(seq)
                 self.bind_all(seq, g(self.hotkey_files_clipboard_paste_move))
         self.bind_all(self.hotkeys_map['search'], g(lambda event: self.open_search_window()))
-        self.bind_all(self.hotkeys_map['metadata'], g(lambda event: self.show_metadata_popup(self.selected_file_path)))
-        self.bind_all(self.hotkeys_map['keywords'], g(lambda e: self.open_keyword_window(self.selected_file_path)))
+        self.bind_all(self.hotkeys_map['metadata'], g(self._hotkey_metadata))
+        self.bind_all(self.hotkeys_map['keywords'], g(self._hotkey_keywords))
 
         # --- Essentials (Refresh, Rename, Up) ---
         self.bind_all(self.hotkeys_map['refresh'], g(lambda e: self.refresh_thumbnails_in_subtree(self.current_directory)))
         self.bind_all(self.hotkeys_map['parent_dir'], g(lambda e: self.go_to_parent_directory()))
-        self.bind_all(self.hotkeys_map['rename'], g(lambda e: self.rename_item(self.selected_file_path) if self.selected_file_path else None))
-        self.bind_all(
-            self.hotkeys_map['rename_secondary'],
-            g(lambda e: self.rename_item(self.selected_file_path) if self.selected_file_path else None),
-        )
+        self.bind_all(self.hotkeys_map['rename'], g(self._hotkey_rename))
+        self.bind_all(self.hotkeys_map['rename_secondary'], g(self._hotkey_rename))
 
         # --- Panels ---
         self.bind_all(self.hotkeys_map['toggle_info_panel'], g(lambda e: self.toggle_infopanel_menu()))
@@ -3323,7 +3355,7 @@ class VideoThumbnailPlayer(
 
     def on_thumbnail_enter_key(self, event):
         logging.info("[DEBUG] ENTER pressed on thumbnail")
-        file_path = self.selected_file_path
+        file_path = self._primary_path_for_file_clipboard()
         if not file_path or os.path.isdir(file_path):
             logging.info("[DEBUG] No file selected or is a folder, not opening player.")
             return
