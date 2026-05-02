@@ -222,26 +222,29 @@ class Database:
             old_path_normalized = self.normalize_path(old_path)
             new_path_normalized = self.normalize_path(new_path)
 
-            # logging.info(f"DEBUG: Searching for path (normalized): {old_path_normalized}")
+            # 1. Update the exact item (file or folder itself)
+            query_exact = "UPDATE files SET file_path = :new_path WHERE file_path = :old_path"
+            self.db.query(query_exact, new_path=new_path_normalized, old_path=old_path_normalized)
 
-            # Perform an UPDATE query to change the path directly
-            query = "UPDATE files SET file_path = :new_path WHERE LOWER(file_path) = :old_path"
-            params = {"new_path": new_path_normalized, "old_path": old_path_normalized}
+            # 2. Update all children (if old_path was a folder) using string replacement
+            old_prefix = old_path_normalized + os.sep
+            new_prefix = new_path_normalized + os.sep
+            
+            # Prevent database desync and UI starvation by keeping children paths updated
+            query_children = """
+                UPDATE files 
+                SET file_path = :new_prefix || SUBSTR(file_path, LENGTH(:old_prefix) + 1)
+                WHERE file_path LIKE :old_prefix_wildcard
+            """
+            self.db.query(query_children, new_prefix=new_prefix, old_prefix=old_prefix, old_prefix_wildcard=old_prefix + '%')
 
-            # logging.info(f"[DEBUG] Query: {query}, Params: {params}")
-
-            # Execute the query
-            result = self.db.query(query, **params)
-            # logging.info(f"[DEBUG] Query executed. Rows affected: {result}")
-
-            # Confirm the change
-            if result:
-                logging.info(f"SUCCESS: Updated path from {old_path_normalized} to {new_path_normalized}")
-            else:
-                logging.info(f"WARNING: No matching record found to update: {old_path_normalized}")
+            # 3. Clear memory cache to prevent serving stale/None data to the UI
+            self.clear_entry_cache()
+            
+            logging.info(f"SUCCESS: Updated path and children from {old_path_normalized} to {new_path_normalized}")
 
         except Exception as e:
-            logging.info(f"ERROR: {e}")
+            logging.error(f"ERROR updating folder path: {e}")
 
 
 

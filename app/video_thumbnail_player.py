@@ -462,6 +462,8 @@ class VideoThumbnailPlayer(
         optimal_workers = min(32, (os.cpu_count() or 4) + 4)
 
         self.executor = ThreadPoolExecutor(max_workers=optimal_workers, thread_name_prefix='ThumbnailWorker')
+        # Keep directory listing/sorting responsive even when thumbnail workers are saturated.
+        self.io_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='DirLoader')
         
         logging.info(f"[DEBUG INIT] Thread pool created: id={id(self.executor)}, shutdown={self.executor._shutdown}")
 
@@ -1116,9 +1118,29 @@ class VideoThumbnailPlayer(
 
                 self.update_tree_view(old_path, os.path.dirname(new_path))
 
+                # 1. Aggressively purge the physical disk cache for the old path
+                try:
+                    self.delete_thumbnail_cache(old_path)
+                except Exception as cache_err:
+                    logging.warning(f"Failed to clear disk cache for renamed item: {cache_err}")
+
+                # 2. Update current directory if we are inside it
                 if os.path.normcase(self.current_directory) == os.path.normcase(old_path):
                     self.current_directory = new_path
+                    
+                # 3. Halt pending background operations
+                self.stop_preview()
+                if hasattr(self, 'thumb_queue') and not self.thumb_queue.empty():
+                     self.thumb_queue.queue.clear()
+                     self.thumb_queue_running = False
 
+                # 4. Clear the UI completely before queuing new items
+                self.clear_thumbnails()
+
+                # 5. Force a fresh subtree scan to guarantee DB and cache consistency
+                self.scan_subtree(os.path.dirname(new_path), force_refresh=True)
+
+                # 6. Finally, display the fresh thumbnails
                 self.display_thumbnails(
                     self.current_directory, force_refresh=True, preserve_scroll=True
                 )

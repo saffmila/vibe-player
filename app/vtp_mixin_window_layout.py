@@ -174,7 +174,9 @@ class VtpWindowLayoutMixin:
                     eff_right_h = pw_h
 
             # If panes exist but height is still implausible, repair again and retry (CTk race).
-            expected_min_paned_h = max(80, main_window_height - 160)
+            # Use larger top-UI allowance to prevent repeated false "too low"
+            # detections and infinite Tkinter splitter repair/retry loops.
+            expected_min_paned_h = max(80, main_window_height - 350)
             if (
                 _split_retry < 15
                 and main_window_height > 120

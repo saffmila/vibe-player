@@ -513,8 +513,9 @@ class VtpGridMixin:
         sort_option = self.sort_option.get()
         filter_option = self.filter_option.get()
 
-        # 4. Heavy work (listdir, sort) in thread pool
-        self.executor.submit(
+        # 4. Heavy work (listdir, sort) in dedicated I/O pool.
+        # Prevent starvation when thumbnail workers are busy generating images.
+        self.io_executor.submit(
             self._worker_prepare_and_display,
             dir_path,
             force_refresh,
@@ -5449,8 +5450,10 @@ class VtpGridMixin:
         self.selected_thumbnails = [] 
         self.selected_thumbnail_index = None
         self._prev_selected_indices = set()
-        self._wide_folder_stats_cache.clear()
-        self._folder_media_presence_cache.clear()
+        # Keep folder stats/media caches across refresh to avoid synchronous DB
+        # lookups on main thread after rename/navigation (prevents UI stalls).
+        # self._wide_folder_stats_cache.clear()
+        # self._folder_media_presence_cache.clear()
         self._wide_folder_left_gutter_px = None
         logging.debug("[WIDE_GUTTER] gutter cache cleared (clear_thumbnails)")
 
