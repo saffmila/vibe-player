@@ -23,6 +23,14 @@ class VtpTaggingMixin:
             self._ai_init_hint_shown = True
             self.after(0, lambda: self.status_bar.set_action_message("Initializing AI models (first run may take a moment)..."))
 
+    def _notify_gpu_pack_missing_once(self, message: str):
+            """Show a one-time warning when optional autotag GPU pack is missing."""
+            if getattr(self, "_gpu_pack_missing_shown", False):
+                return
+            self._gpu_pack_missing_shown = True
+            self.after(0, lambda: self.status_bar.set_action_message(message))
+            self.after(0, lambda: messagebox.showwarning("Autotag", message))
+
 
     def tag_single_image(self, file_path, plugin, update_ui=True):
             """
@@ -37,6 +45,9 @@ class VtpTaggingMixin:
                 # Running the AI model logic
                 result = plugin.run(file_path)
                 tags = result.get("tags", [])
+                if result.get("error") == "gpu_pack_missing":
+                    self._notify_gpu_pack_missing_once(result.get("message", "Není nainstalovaný Autotag GPU Pack"))
+                    return
 
                 if tags:
                     cleaned = ", ".join(tag.strip() for tag in tags if tag.strip())
@@ -129,6 +140,9 @@ class VtpTaggingMixin:
                 try:
                     result = plugin.run(thumb_path)
                     tags = result.get("tags", [])
+                    if result.get("error") == "gpu_pack_missing":
+                        self._notify_gpu_pack_missing_once(result.get("message", "Není nainstalovaný Autotag GPU Pack"))
+                        break
                     if tags:
                         all_tags.update(tag.strip() for tag in tags if tag.strip())
                         

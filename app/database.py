@@ -13,6 +13,8 @@ from collections import Counter
 
 from sqlalchemy.pool import NullPool
 
+from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS
+
 _ENTRY_CACHE_MAXSIZE = 8_000
 
 # SQLite + dataset: each OS thread caches one SQLAlchemy Connection (see dataset.Database.executable).
@@ -198,6 +200,22 @@ class Database:
         """
         return unicodedata.normalize('NFC', os.path.normcase(os.path.abspath(path.strip())))
 
+    def _guess_media_dimensions(self, file_path: str) -> tuple[int, int]:
+        """Best-effort width/height for DB rows created lazily during autotag."""
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in VIDEO_FORMATS:
+            return 0, 0
+        if ext in IMAGE_FORMATS:
+            try:
+                from PIL import Image
+
+                with Image.open(file_path) as img:
+                    w, h = img.size
+                    return int(w), int(h)
+            except Exception:
+                return 0, 0
+        return 0, 0
+
     def update_folder_path(self, old_path, new_path):
         try:
             # Normalize both paths
@@ -252,7 +270,23 @@ class Database:
                 self.table.update(record, ["id"])
                 logging.info(f"Updated keywords for {file_path}: {record['keywords']}")
             else:
-                logging.info(f"No existing entry for {file_path}, cannot update keywords.")
+                # Autotag can run before the thumbnail pipeline inserted a row.
+                # Upsert a minimal record so keywords persist and UI can refresh.
+                width, height = self._guess_media_dimensions(file_path)
+                filename_normalized = os.path.basename(file_path).strip().lower()
+                merged = ", ".join(sorted(set(keyword_list)))
+                new_row = dict(
+                    filename=filename_normalized,
+                    file_path=normalized_path,
+                    width=width,
+                    height=height,
+                    keywords=merged,
+                    rating=0,
+                    is_cached=False,
+                )
+                self.table.upsert(new_row, keys=["file_path"])
+                self._entry_cache[normalized_path] = self.table.find_one(file_path=normalized_path)
+                logging.info(f"Inserted keywords for new DB entry {file_path}: {merged}")
 
         except Exception as e:
             logging.error(f"Error updating keywords for {file_path}: {e}")

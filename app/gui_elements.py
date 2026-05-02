@@ -429,6 +429,11 @@ def build_edit_menu(app):
 def build_help_menu(app):
     help_menu = create_menu(app, app)
     help_menu.add_command(label="Help", command=lambda: open_help_page(app))
+    help_menu.add_command(
+        label="Show Debug Console",
+        command=app.toggle_log_window,
+        accelerator="F12",
+    )
     help_menu.add_command(label="About", command=lambda: show_about_window(app))
     return help_menu
 

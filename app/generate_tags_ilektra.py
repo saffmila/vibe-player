@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import ssl
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -47,7 +48,24 @@ torch = None
 autocast = None
 
 BASE_DIR = Path(__file__).resolve().parent
-TAGS_DIR = BASE_DIR / "tag_engine"
+
+
+def _resolve_tags_dir() -> Path:
+    """Resolve tag_engine directory for dev runs and PyInstaller frozen bundles."""
+    candidates: list[Path] = []
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        candidates.append(Path(sys._MEIPASS) / "tag_engine")
+    candidates.append(BASE_DIR / "tag_engine")
+    candidates.append(BASE_DIR.parent / "tag_engine")
+
+    for path in candidates:
+        if path.is_dir():
+            return path
+
+    return BASE_DIR / "tag_engine"
+
+
+TAGS_DIR = _resolve_tags_dir()
 
 logging.debug("Loaded generate_tags_ilektra from: %s", __file__)
 
