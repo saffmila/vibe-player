@@ -4818,6 +4818,16 @@ class VtpGridMixin:
                 )
                 return
 
+            if click_widget is not None:
+                try:
+                    now = time.monotonic()
+                    tree_ts = float(
+                        getattr(self, "_last_tree_rename_scope_ts", 0.0) or 0.0
+                    )
+                    self._last_thumb_rename_scope_ts = max(now, tree_ts + 1e-6)
+                except Exception:
+                    pass
+
             thumb_tuple = (file_path, label_info, idx)
 
             # --- SHIFT-SELECT LOGIC (Rewritten to use tuples) ---

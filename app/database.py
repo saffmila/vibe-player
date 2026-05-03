@@ -380,6 +380,22 @@ class Database:
 
 
 
+    def folder_has_cached_descendant(self, folder_path: str) -> bool:
+        """
+        True if folder_path or any path under it has is_cached in the fast tree set.
+        Used after DnD moves to fix parent folder icons.
+        """
+        if not folder_path:
+            return False
+        norm = self.normalize_path(folder_path)
+        prefix = norm + os.sep
+        if norm in self._cached_paths_set:
+            return True
+        for p in self._cached_paths_set:
+            if p.startswith(prefix):
+                return True
+        return False
+
     def update_cache_status(self, file_path, status):
         """Updates DB and memory set at once. Unified on 'file_path'."""
         norm_path = self.normalize_path(file_path)

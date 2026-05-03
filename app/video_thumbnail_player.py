@@ -405,6 +405,8 @@ class VideoThumbnailPlayer(
         self._folder_cache_mark_blocked_roots: set[str] = set()
         # After Clear Thumbnails: show empty preview slots until user leaves folder or runs scan/refresh.
         self._thumb_grid_suppress_decode_until_nav = False
+        self._last_tree_rename_scope_ts = 0.0
+        self._last_thumb_rename_scope_ts = 0.0
         self._video_health_cache = {}  # normalize_path(file) -> {"k": (size, mtime_ns), "health": str}
         self.wide_folder_stats_font = ctk.CTkFont(size=10)
         self._tree_sync_after_id = None
@@ -2041,9 +2043,27 @@ class VideoThumbnailPlayer(
             pass
         return None
 
+    def _path_for_rename_hotkey(self) -> str | None:
+        """
+        F2/F6 target: prefer tree selection if the user last clicked the tree row (not a thumb);
+        otherwise same as clipboard primary (thumb / last file).
+        """
+        t_tree = float(getattr(self, "_last_tree_rename_scope_ts", 0.0) or 0.0)
+        t_thumb = float(getattr(self, "_last_thumb_rename_scope_ts", 0.0) or 0.0)
+        if t_tree > t_thumb:
+            try:
+                sel = self.tree.selection()
+                if sel:
+                    p = self.get_file_path_from_item_id(sel[0])
+                    if p and os.path.exists(p):
+                        return p
+            except Exception:
+                pass
+        return self._primary_path_for_file_clipboard()
+
     def _hotkey_rename(self, event=None):
-        """F2 / F6: rename current thumb, last-focused file, or tree selection (same path resolution as clipboard)."""
-        path = self._primary_path_for_file_clipboard()
+        """F2 / F6: rename tree row if that was last clicked, else thumb / clipboard primary."""
+        path = self._path_for_rename_hotkey()
         if path and os.path.exists(path):
             self.rename_item(path)
         else:
@@ -4385,6 +4405,9 @@ class VideoThumbnailPlayer(
                 pass
             return "break"
 
+        now = time.monotonic()
+        thumb_ts = float(getattr(self, "_last_thumb_rename_scope_ts", 0.0) or 0.0)
+        self._last_tree_rename_scope_ts = max(now, thumb_ts + 1e-6)
         return self.select_item(event)
 
     def select_item(self, event):

@@ -315,6 +315,28 @@ class VtpDndMixin:
         rel = abs_path.replace(":", "")
         return os.path.join(self.thumbnail_cache_path, rel)
 
+    def _bubble_cached_status_to_ancestors(self, dir_path: str) -> None:
+        """Mark dir_path and every dirname ancestor as cached (green chain up to drive root)."""
+        if not dir_path:
+            return
+        try:
+            if not os.path.isdir(dir_path):
+                return
+        except Exception:
+            return
+        p = os.path.abspath(dir_path)
+        seen: set[str] = set()
+        while p and p not in seen:
+            seen.add(p)
+            try:
+                self.database.update_cache_status(p, True)
+            except Exception as e:
+                logging.debug("[DnD] bubble cache True %s: %s", p, e)
+            parent = os.path.dirname(p)
+            if parent == p:
+                break
+            p = parent
+
     def _sync_cache_after_copy_move(self, src: str, dst: str, is_dir: bool, is_move: bool):
         """
         Best-effort disk cache sync after copy/move (folder subtree or file prefix variants).
@@ -353,8 +375,17 @@ class VtpDndMixin:
                 # keep DB cache flags in sync for folder icons
                 try:
                     self.database.update_cache_status(dst, True)
+                    self._bubble_cached_status_to_ancestors(dst)
                     if is_move:
                         self.database.update_cache_status(src, False)
+                        old_parent = os.path.dirname(src)
+                        if old_parent and os.path.normcase(
+                            os.path.normpath(old_parent)
+                        ) != os.path.normcase(os.path.normpath(src)):
+                            still = self.database.folder_has_cached_descendant(
+                                old_parent
+                            )
+                            self.database.update_cache_status(old_parent, still)
                 except Exception as e:
                     logging.warning(f"[DnD][Cache] status update failed for dir {src}->{dst}: {e}")
                 return
