@@ -1195,22 +1195,29 @@ class VideoThumbnailPlayer(
         """
         dialog_window = ctk.CTkToplevel(self)
         dialog_window.title(title)
-        self._center_toplevel_window(dialog_window, 400, 200)
+        _dw, _dh = (600, 220) if input_field else (400, 200)
+        self._center_toplevel_window(dialog_window, _dw, _dh)
         dialog_window.resizable(False, False)
+        try:
+            dialog_window.transient(self)
+        except Exception:
+            pass
 
         # Bring the dialog to the front
         dialog_window.attributes('-topmost', True)
         dialog_window.grab_set()
 
-        # Display the message
-        label = ctk.CTkLabel(dialog_window, text=message, wraplength=350, anchor="w", justify="left")
-        label.pack(padx=10, pady=10)
+        _msg_wrap = 540 if input_field else 350
+        label = ctk.CTkLabel(
+            dialog_window, text=message, wraplength=_msg_wrap, anchor="w", justify="left"
+        )
+        label.pack(padx=14, pady=10)
 
         # Add input field if required
         input_var = ctk.StringVar(value=default_input) if input_field else None
         if input_field:
-            input_entry = ctk.CTkEntry(dialog_window, textvariable=input_var)
-            input_entry.pack(padx=10, pady=5)
+            input_entry = ctk.CTkEntry(dialog_window, textvariable=input_var, height=32)
+            input_entry.pack(fill="x", expand=True, padx=14, pady=(4, 8))
 
         # Confirm button
         def on_confirm():
@@ -1260,7 +1267,7 @@ class VideoThumbnailPlayer(
         if btn_cancel is not None:
             dialog_window.bind("<Escape>", lambda e: btn_cancel.invoke())
 
-        # Better UX for input dialogs: focus + select all text
+        # Input dialogs: robust focus on Windows / CustomTkinter (parent can steal focus early).
         if input_field:
             def _safe_focus_input():
                 try:
@@ -1268,12 +1275,19 @@ class VideoThumbnailPlayer(
                         return
                     if not input_entry.winfo_exists():
                         return
+                    dialog_window.lift()
+                    dialog_window.focus_force()
+                    try:
+                        dialog_window.update_idletasks()
+                    except tk.TclError:
+                        pass
                     input_entry.focus_set()
                     input_entry.select_range(0, "end")
                     input_entry.icursor("end")
                 except tk.TclError:
                     pass
-            dialog_window.after(25, _safe_focus_input)
+
+            dialog_window.after(100, _safe_focus_input)
 
     def prepare_file_deletion_release_handles(self, file_path: str) -> None:
         """
