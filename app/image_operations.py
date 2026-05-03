@@ -66,12 +66,14 @@ class ImageViewerLegacy:
         self.photo = ImageTk.PhotoImage(self.image)
 
         self.canvas_image = self.canvas.create_image(0, 0, image=self.photo, anchor=tk.NW)
-        self.canvas.config(scrollregion=self.canvas.bbox(tk.ALL))
 
         self.image_window.geometry(f"{self.image.width}x{self.image.height}")
 
         self.zoom_factor = 1.0
-        
+        # Uživatelsky zvolený režim zobrazení — při přechodu na další obrázek se znovu aplikuje,
+        # dokud uživatel nezmění zoom (manual) nebo nezvolí jiný režim.
+        self._view_fit_mode = "none"  # none | best_fit | fit_width | actual | manual
+
         # Proměnná pro časovač HQ renderu
         self._hq_timer = None
         
@@ -136,7 +138,8 @@ class ImageViewerLegacy:
         self.image_window.bind("<F10>", lambda e: self.debug_print_monitor())
 
         self.update_scrollbars()
-        
+        self._set_image_scrollregion_only()
+
         #Na konci initu vynutíme první vykreslení HUDu
         self.image_window.after(100, self.draw_info_hud)
 
@@ -183,6 +186,24 @@ class ImageViewerLegacy:
 
         # logging.info(f"DEBUG Center image: Canvas={canvas_width}x{canvas_height}, Img={image_width}x{image_height}")
         self.canvas.coords(self.canvas_image, x, y)
+        self._set_image_scrollregion_only()
+
+    def _center_image_for_size(self, image_width, image_height):
+        """Center canvas image using known resized dimensions (reduces visible recenter jitter)."""
+        self.canvas.update_idletasks()
+        canvas_width = self.canvas.winfo_width()
+        canvas_height = self.canvas.winfo_height()
+        x = max((canvas_width - int(image_width)) // 2, 0)
+        y = max((canvas_height - int(image_height)) // 2, 0)
+        self.canvas.coords(self.canvas_image, x, y)
+
+    def _set_image_scrollregion_only(self):
+        """Scroll jen podle obrázku — HUD nesmí rozšiřovat scrollregion (posuny / skoky)."""
+        r = self.canvas.bbox(self.canvas_image)
+        if r:
+            self.canvas.config(scrollregion=r)
+        else:
+            self.canvas.config(scrollregion=(0, 0, 1, 1))
 
     def load_image(self, path, name):
         self.image_path = path
@@ -191,16 +212,26 @@ class ImageViewerLegacy:
         try:
             self.image = PILImage.open(path)
             self.original_image = self.image.copy()
-            self.zoom_factor = 1.0  # reset zoom při přeskoku
-
-            self.update_image() # Toto by mělo HUD zavolat, ale pro jistotu...
             self.image_window.title(name)
-            self.center_image()
-            
+
+            mode = self._view_fit_mode
+            if mode == "best_fit":
+                self.best_fit()
+            elif mode == "fit_width":
+                self.fit_width()
+            elif mode == "actual":
+                self.zoom_factor = 1.0
+                self.update_image(center=True)
+            elif mode == "manual":
+                self.update_image(center=True)
+            else:
+                self.zoom_factor = 1.0
+                self.update_image(center=True)
+
             # --- AKTUALIZACE HUD ---
             # Zavoláme to explicitně, aby se aktualizoval index souboru (např. 5/120)
-            self.draw_info_hud() 
-            
+            self.draw_info_hud()
+
         except Exception as e:
             logging.error(f"Failed to load image {name}: {e}")
 
@@ -229,26 +260,32 @@ class ImageViewerLegacy:
 
     def resize_canvas(self, event):
         self.update_scrollbars()
+        self._set_image_scrollregion_only()
         # self.canvas.update_idletasks() # Není nutné volat při každém pohybu, zpomaluje resize
 
     def zoom(self, event):
+        self._view_fit_mode = "manual"
         scale = 1.1 if event.delta > 0 else 0.9
         self.zoom_factor *= scale
         self.update_image()
 
     def zoom_in(self, event=None):
+        self._view_fit_mode = "manual"
         self.zoom_factor *= 1.1
         self.update_image()
 
     def zoom_out(self, event=None):
+        self._view_fit_mode = "manual"
         self.zoom_factor *= 0.9
         self.update_image()
 
     def actual_size(self):
+        self._view_fit_mode = "actual"
         self.zoom_factor = 1.0
-        self.update_image()
+        self.update_image(center=True)
 
     def best_fit(self):
+        self._view_fit_mode = "best_fit"
         self.image_window.update_idletasks() # Update to get real dims
         canvas_width = self.canvas.winfo_width()
         canvas_height = self.canvas.winfo_height()
@@ -258,25 +295,46 @@ class ImageViewerLegacy:
         scale_w = canvas_width / img_width
         scale_h = canvas_height / img_height
         self.zoom_factor = min(scale_w, scale_h)
-        self.update_image()
+        self.update_image(center=True)
 
     def fit_width(self):
+        self._view_fit_mode = "fit_width"
         self.image_window.update_idletasks()
         canvas_width = self.canvas.winfo_width()
         img_width, _ = self.original_image.size
         if img_width == 0: return
         self.zoom_factor = canvas_width / img_width
-        self.update_image()
+        self.update_image(center=True)
         
     def rotate_left(self):
         self.original_image = self.original_image.rotate(90, expand=True)
-        self.zoom_factor = 1.0
-        self.update_image()
+        if self._view_fit_mode == "best_fit":
+            self.best_fit()
+        elif self._view_fit_mode == "fit_width":
+            self.fit_width()
+        elif self._view_fit_mode == "actual":
+            self.zoom_factor = 1.0
+            self.update_image(center=True)
+        elif self._view_fit_mode == "manual":
+            self.update_image(center=True)
+        else:
+            self.zoom_factor = 1.0
+            self.update_image(center=True)
 
     def rotate_right(self):
         self.original_image = self.original_image.rotate(-90, expand=True)
-        self.zoom_factor = 1.0
-        self.update_image()
+        if self._view_fit_mode == "best_fit":
+            self.best_fit()
+        elif self._view_fit_mode == "fit_width":
+            self.fit_width()
+        elif self._view_fit_mode == "actual":
+            self.zoom_factor = 1.0
+            self.update_image(center=True)
+        elif self._view_fit_mode == "manual":
+            self.update_image(center=True)
+        else:
+            self.zoom_factor = 1.0
+            self.update_image(center=True)
 
     def flip_horizontal(self):
         self.original_image = self.original_image.transpose(PILImage.FLIP_LEFT_RIGHT)
@@ -331,6 +389,7 @@ class ImageViewerLegacy:
             self.image_window.geometry(f"{min(1200, self.original_image.width)}x{min(900, self.original_image.height)}")
 
         self.update_scrollbars()
+        self._set_image_scrollregion_only()
         # Po změně velikosti vycentrujeme
         self.image_window.after(100, self.center_image)
 
@@ -377,7 +436,7 @@ class ImageViewerLegacy:
                 self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
 
 
-    def update_image(self, high_quality=False):
+    def update_image(self, high_quality=False, center=False):
         """
         Aktualizuje obrázek na plátně.
         high_quality=False -> Použije rychlý BILINEAR (pro zoomování).
@@ -403,15 +462,16 @@ class ImageViewerLegacy:
         resized_image = self.original_image.resize((width, height), method)
         self.photo = ImageTk.PhotoImage(resized_image)
         self.canvas.itemconfig(self.canvas_image, image=self.photo)
+        if center:
+            self._center_image_for_size(width, height)
 
-        # Update GUI
-        self.canvas.config(scrollregion=self.canvas.bbox(tk.ALL))
-        
-        # Pokud voláme z HQ timeru, už necentrujeme a neposouváme scrollbary, 
-        # aby obraz "neskákal" pod rukama.
-        if not high_quality:
-            self.update_scrollbars()
-            # self.center_image() # Volitelné - při zoomu na myš je lepší necentrovat
+        # Scrollbary mění vnitřní rozměr canvasu — proto centrovat znovu po jejich grid_remove/grid.
+        self.update_scrollbars()
+        if center:
+            self.canvas.update_idletasks()
+            self._center_image_for_size(width, height)
+
+        self._set_image_scrollregion_only()
 
         # 4. Naplánování HQ renderu (Debounce)
         # Pokud jsme teď jeli v rychlém režimu, řekneme: 
@@ -444,10 +504,9 @@ class ImageViewerLegacy:
 
     def draw_info_hud(self):
         """Vykreslí textové info v levém horním rohu."""
-        # Smazat starý text
-        if self.info_text_id:
-            self.canvas.delete(self.info_text_id)
-            self.info_text_id = None
+        # Smazat celý HUD (včetně stínového řádku — jinak leak a rozbitý bbox).
+        self.canvas.delete("hud")
+        self.info_text_id = None
 
         if not self.show_info:
             return
@@ -503,8 +562,6 @@ class ImageViewerLegacy:
             self.hbar.grid() if image_width > canvas_width else self.hbar.grid_remove()
             self.vbar.grid() if image_height > canvas_height else self.vbar.grid_remove()
 
-        self.canvas.config(scrollregion=self.canvas.bbox(tk.ALL))
-
     def show_context_menu(self, event):
         menu = tk.Menu(self.image_window, tearoff=0)
         
@@ -514,9 +571,36 @@ class ImageViewerLegacy:
                 return key.replace("<", "").replace(">", "")
             return default
 
-        menu.add_command(label=f"Actual Size ({hk_label('image_actual_size', 'A')})", command=self.actual_size)
-        menu.add_command(label=f"Best Fit ({hk_label('image_fit_best', 'B')})", command=self.best_fit)
-        menu.add_command(label=f"Fit Width ({hk_label('image_fit_width', 'W')})", command=self.fit_width)
+        # Vzájemně výlučné režimy — systémový „radio“ v menu (manual/none = žádná tečka).
+        if not hasattr(self, "_ctx_fit_var"):
+            self._ctx_fit_var = tk.StringVar(master=self.image_window)
+        _m = self._view_fit_mode
+        if _m in ("actual", "best_fit", "fit_width"):
+            self._ctx_fit_var.set(_m)
+        else:
+            self._ctx_fit_var.set("")
+
+        menu.add_radiobutton(
+            label=f"Actual Size ({hk_label('image_actual_size', 'A')})",
+            variable=self._ctx_fit_var,
+            value="actual",
+            command=self.actual_size,
+        )
+        menu.add_radiobutton(
+            label=f"Best Fit ({hk_label('image_fit_best', 'B')})",
+            variable=self._ctx_fit_var,
+            value="best_fit",
+            command=self.best_fit,
+        )
+        menu.add_radiobutton(
+            label=f"Fit Width ({hk_label('image_fit_width', 'W')})",
+            variable=self._ctx_fit_var,
+            value="fit_width",
+            command=self.fit_width,
+        )
+        menu.add_separator()
+        menu.add_command(label=f"Previous Image ({hk_label('image_prev', 'Left')})", command=self.show_prev_image)
+        menu.add_command(label=f"Next Image ({hk_label('image_next', 'Right')})", command=self.show_next_image)
         menu.add_separator()
         menu.add_command(label=f"Zoom In (+)", command=self.zoom_in)
         menu.add_command(label=f"Zoom Out (-)", command=self.zoom_out)
@@ -837,6 +921,8 @@ class ImageViewerGPU:
         self.zoom  = 1.0
         self.pan_x = 0.0
         self.pan_y = 0.0
+        # Stejné významy jako ImageViewerLegacy._view_fit_mode; výchozí = best fit (worker ho hned aplikuje).
+        self._view_fit_mode = "best_fit"
 
         # UI state
         self.bg_index  = 0
@@ -1016,7 +1102,7 @@ class ImageViewerGPU:
             on_close         = self._on_close,
         )
 
-        self._apply_best_fit(win_w, win_h)
+        self._apply_viewport_fit(win_w, win_h)
         self._update_hud()
         self._build_hotkey_map()
 
@@ -1116,6 +1202,31 @@ class ImageViewerGPU:
         self.pan_x = (win_w  - self._img_w * self.zoom) / 2
         self.pan_y = (win_h - self._img_h * self.zoom) / 2
 
+    def _apply_viewport_fit(self, win_w=None, win_h=None):
+        """Nastaví zoom/pan podle uloženého režimu a velikosti okna."""
+        if win_w is None:
+            win_w = self.window.width
+        if win_h is None:
+            win_h = self.window.height
+        if self._img_w <= 0 or self._img_h <= 0:
+            return
+        mode = getattr(self, "_view_fit_mode", "best_fit")
+        if mode == "best_fit":
+            self._apply_best_fit(win_w, win_h)
+        elif mode == "fit_width":
+            self.zoom = win_w / self._img_w
+            self.pan_x = 0.0
+            self.pan_y = (win_h - self._img_h * self.zoom) / 2
+        elif mode == "actual":
+            self.zoom = 1.0
+            self.pan_x = (win_w - self._img_w) / 2
+            self.pan_y = (win_h - self._img_h) / 2
+        elif mode == "manual":
+            self.pan_x = (win_w - self._img_w * self.zoom) / 2
+            self.pan_y = (win_h - self._img_h * self.zoom) / 2
+        else:
+            self._apply_best_fit(win_w, win_h)
+
     # ------------------------------------------------------------------
     # Render  (worker thread)
     # ------------------------------------------------------------------
@@ -1138,7 +1249,7 @@ class ImageViewerGPU:
     def _on_resize(self, width, height):
         from pyglet.gl import glViewport
         glViewport(0, 0, width, height)
-        self._apply_best_fit(width, height)
+        self._apply_viewport_fit(width, height)
         self._update_hud()
 
     # ------------------------------------------------------------------
@@ -1211,6 +1322,7 @@ class ImageViewerGPU:
         ctrl  = self._keys[k.LCTRL]  or self._keys[k.RCTRL]
         shift = self._keys[k.LSHIFT] or self._keys[k.RSHIFT]
         if ctrl or shift:
+            self._view_fit_mode = "manual"
             mx       = float(x)
             my       = float(self.window.height - y)
             new_zoom = max(0.01, min(50.0, self.zoom * (1.1 if scroll_y > 0 else 0.9)))
@@ -1324,7 +1436,7 @@ class ImageViewerGPU:
                 img = img.convert('RGBA')
             self.original_image = img
             self._upload_texture(img)
-            self._apply_best_fit()
+            self._apply_viewport_fit()
             self.window.set_caption(name)
             self._hud_cache_path = None
             self._update_hud()
@@ -1332,33 +1444,39 @@ class ImageViewerGPU:
             logging.error(f"[ImageViewer] Failed to load {name}: {e}")
 
     def _do_zoom_in(self):
+        self._view_fit_mode = "manual"
         self.zoom = min(50.0, self.zoom * 1.1);  self._update_hud()
 
     def _do_zoom_out(self):
+        self._view_fit_mode = "manual"
         self.zoom = max(0.01, self.zoom * 0.9);  self._update_hud()
 
     def _do_actual_size(self):
-        self.zoom  = 1.0
-        self.pan_x = (self.window.width  - self._img_w) / 2
-        self.pan_y = (self.window.height - self._img_h) / 2
+        self._view_fit_mode = "actual"
+        self._apply_viewport_fit()
         self._update_hud()
 
     def _do_best_fit(self):
-        self._apply_best_fit();  self._update_hud()
+        self._view_fit_mode = "best_fit"
+        self._apply_viewport_fit()
+        self._update_hud()
 
     def _do_fit_width(self):
-        self.zoom  = self.window.width / self._img_w
-        self.pan_x = 0.0
-        self.pan_y = (self.window.height - self._img_h * self.zoom) / 2
+        self._view_fit_mode = "fit_width"
+        self._apply_viewport_fit()
         self._update_hud()
 
     def _do_rotate_left(self):
         self.original_image = self.original_image.rotate(90, expand=True)
-        self._upload_texture(self.original_image);  self._apply_best_fit();  self._update_hud()
+        self._upload_texture(self.original_image)
+        self._apply_viewport_fit()
+        self._update_hud()
 
     def _do_rotate_right(self):
         self.original_image = self.original_image.rotate(-90, expand=True)
-        self._upload_texture(self.original_image);  self._apply_best_fit();  self._update_hud()
+        self._upload_texture(self.original_image)
+        self._apply_viewport_fit()
+        self._update_hud()
 
     def _do_flip_h(self):
         self.original_image = self.original_image.transpose(PILImage.FLIP_LEFT_RIGHT)
@@ -1511,9 +1629,28 @@ class ImageViewerGPU:
             return default
 
         menu = CTkFlatContextMenu(self.parent, app=self.controller)
-        menu.add_command(label="Actual Size", accelerator=hk('image_actual_size', 'A'), command=self.actual_size)
-        menu.add_command(label="Best Fit", accelerator=hk('image_fit_best', 'B'), command=self.best_fit)
-        menu.add_command(label="Fit Width", accelerator=hk('image_fit_width', 'W'), command=self.fit_width)
+        mode = getattr(self, "_view_fit_mode", "best_fit")
+        menu.add_command(
+            label="Actual Size",
+            accelerator=hk('image_actual_size', 'A'),
+            command=self.actual_size,
+            is_selected=(mode == "actual"),
+        )
+        menu.add_command(
+            label="Best Fit",
+            accelerator=hk('image_fit_best', 'B'),
+            command=self.best_fit,
+            is_selected=(mode == "best_fit"),
+        )
+        menu.add_command(
+            label="Fit Width",
+            accelerator=hk('image_fit_width', 'W'),
+            command=self.fit_width,
+            is_selected=(mode == "fit_width"),
+        )
+        menu.add_separator()
+        menu.add_command(label="Previous Image", accelerator=hk('image_prev', 'Left'), command=self.show_prev_image)
+        menu.add_command(label="Next Image", accelerator=hk('image_next', 'Right'), command=self.show_next_image)
         menu.add_separator()
         menu.add_command(label="Zoom In", accelerator="+", command=self.zoom_in)
         menu.add_command(label="Zoom Out", accelerator="-", command=self.zoom_out)

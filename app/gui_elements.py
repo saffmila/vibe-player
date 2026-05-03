@@ -1825,6 +1825,8 @@ class CTkFlatContextMenu(ctk.CTkToplevel):
         label: str,
         command: Callable[[], Any] | None = None,
         accelerator: str | None = None,
+        *,
+        is_selected: bool = False,
     ) -> None:
         run = self._wrap_command(command)
         hover = getattr(self._app, "hover_menu_row", None) or "#4a4a4a"
@@ -1832,11 +1834,18 @@ class CTkFlatContextMenu(ctk.CTkToplevel):
         item_frame = ctk.CTkFrame(self.items_frame, fg_color="transparent", corner_radius=2)
         item_frame.pack(fill="x", padx=0, pady=0)
 
+        display = f"✓  {label}" if is_selected else label
+        row_font = (
+            ctk.CTkFont(family="Segoe UI", size=11, weight="bold")
+            if is_selected
+            else self._menu_font
+        )
+
         lbl_text = ctk.CTkLabel(
             item_frame,
-            text=label,
+            text=display,
             anchor="w",
-            font=self._menu_font,
+            font=row_font,
             height=20,
         )
         lbl_text.pack(side="left", padx=(5, 2), pady=0)

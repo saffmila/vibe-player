@@ -4234,18 +4234,22 @@ class VtpGridMixin:
             logging.info("[DEBUG] No active video player for previous bookmark")
 
     def long_seek_forward_global(self):
-        """Long seek forward on the active video player."""
+        """Long seek forward on the active video player, or next image when image viewer is open."""
         active_video = getattr(self, "current_video_window", None) or getattr(self, "active_player", None)
         if active_video and hasattr(active_video, "long_seek"):
             active_video.long_seek(direction=1)
+        elif hasattr(self, "current_image_window") and self.current_image_window:
+            self.current_image_window.show_next_image()
         else:
             logging.info("[DEBUG] No active video player for long seek forward")
 
     def long_seek_backward_global(self):
-        """Long seek backward on the active video player."""
+        """Long seek backward on the active video player, or previous image when image viewer is open."""
         active_video = getattr(self, "current_video_window", None) or getattr(self, "active_player", None)
         if active_video and hasattr(active_video, "long_seek"):
             active_video.long_seek(direction=-1)
+        elif hasattr(self, "current_image_window") and self.current_image_window:
+            self.current_image_window.show_prev_image()
         else:
             logging.info("[DEBUG] No active video player for long seek backward")
 
