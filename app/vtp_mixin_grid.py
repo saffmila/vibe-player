@@ -39,9 +39,8 @@ class VtpGridMixin:
         - Sets the current directory.
         Returns True if initialization is successful, False if loading is already in progress or path is invalid.
         """
+        prev_cd = getattr(self, "current_directory", None)
 
-
-        
         # --- Phase 0: Cancel any in-progress load and cancel old after-jobs ---
         # Instead of blocking (return False), we preempt the old load by incrementing
         # _render_id. Every async phase (worker thread, chunk loop) holds a snapshot
@@ -104,6 +103,12 @@ class VtpGridMixin:
         # Path is now either a valid normalized path or a virtual library path
         self.current_directory = dir_path
         logging.info(f"--- [START Load] Displaying: {self.current_directory} ---")
+
+        _nav_clear = getattr(
+            self, "_maybe_clear_folder_cache_mark_blocks_after_display_nav", None
+        )
+        if callable(_nav_clear):
+            _nav_clear(prev_cd, dir_path)
 
         return True # Indicate successful initialization
 
@@ -2221,8 +2226,11 @@ class VtpGridMixin:
                 self.thumb_queue_running = False
                 
                 if hasattr(self, 'current_directory') and self.current_directory:
-                    self.database.update_cache_status(self.current_directory, True)
-                    self.refresh_folder_icon(self.current_directory)
+                    cd = self.current_directory
+                    _blocked = getattr(self, "_folder_cache_auto_mark_is_blocked", None)
+                    if not (callable(_blocked) and _blocked(cd)):
+                        self.database.update_cache_status(cd, True)
+                        self.refresh_folder_icon(cd)
 
       
 

@@ -400,6 +400,11 @@ class VideoThumbnailPlayer(
         self._wide_folder_stats_cache = {}  # normalize_path(folder) -> aggregate stats dict
         self._wide_folder_left_gutter_px = None  # one left-column width per wide-folder batch
         self._folder_media_presence_cache = {}  # normalize_path(folder) -> bool
+        # After "Remove thumbnails in tree", block VGrid/legacy auto update_cache_status(cd, True)
+        # until the user runs subtree scan on that path (or a covering path).
+        self._folder_cache_mark_blocked_roots: set[str] = set()
+        # After Clear Thumbnails: show empty preview slots until user leaves folder or runs scan/refresh.
+        self._thumb_grid_suppress_decode_until_nav = False
         self._video_health_cache = {}  # normalize_path(file) -> {"k": (size, mtime_ns), "health": str}
         self.wide_folder_stats_font = ctk.CTkFont(size=10)
         self._tree_sync_after_id = None
@@ -1802,10 +1807,12 @@ class VideoThumbnailPlayer(
                     logging.error(f"[Cache] Could not delete {path}: {e}")
 
             try:
-                # 1. Clear memory references
-                if hasattr(self, 'thumbnail_cache'):
-                    self.thumbnail_cache.clear()
-                
+                # 1. Drop in-memory thumbs for this subtree (keeps other folders warm).
+                if hasattr(self, "thumbnail_cache"):
+                    self.thumbnail_cache.discard_under_directory(
+                        path, self.database.normalize_path
+                    )
+
                 # 2. Force Python to release file handles held by PIL or other objects
                 gc.collect()
 
@@ -1902,11 +1909,25 @@ class VideoThumbnailPlayer(
         # Add context menu options
         # menu.add_command(label="Add Keywords", command=lambda: self.open_keyword_window(file_path))
         # menu.add_command(label="Remove Keywords", command=lambda: self.open_remove_keyword_window(file_path))
-        menu.add_command(label="Scan Thumbnails in tree", command=lambda: self.scan_subtree(file_path))
+        menu.add_command(label="Scan Thumbnails", command=lambda: self.scan_subtree(file_path))
         
-        menu.add_command(label="Refresh Thumbnails in tree", command=lambda: self.refresh_thumbnails_in_subtree(file_path))
-        
-        menu.add_command(label="Refresh Wide Folders preview", command=lambda: self.refresh_folder_wide_thumbnail(file_path))
+        menu.add_command(label="Refresh Thumbnails", command=lambda: self.refresh_thumbnails_in_subtree(file_path))
+        menu.add_command(
+            label="Clear Thumbnails",
+            command=lambda: self.remove_thumbnails_in_subtree(file_path),
+        )
+
+        try:
+            _wide = bool(self.wide_folders_check_var.get())
+        except (tk.TclError, AttributeError):
+            _wide = getattr(self, "folder_view_mode", None) and (
+                self.folder_view_mode.get() == "Wide"
+            )
+        menu.add_command(
+            label="Refresh Wide Previews",
+            command=lambda: self.refresh_folder_wide_thumbnail(file_path),
+            state=tk.NORMAL if _wide else tk.DISABLED,
+        )
         menu.add_separator()
         
         # menu.add_command(label="Add to Existing Playlist", command=lambda: self.add_selected_to_playlist())
@@ -2109,24 +2130,27 @@ class VideoThumbnailPlayer(
     # V souboru video_thumbnail_player.py
 
 
+    def _delete_wide_folder_preview_cache_files(self, folder_path):
+        """Remove cached wide-folder PNG previews for this folder (not recursive)."""
+        cache_dir_path, _ = get_cache_dir_path(folder_path, self.thumbnail_cache_path)
+        _bn = os.path.basename(folder_path.rstrip(os.sep))
+        _prefix = f"!folder_wide_{_bn}_"
+        if not os.path.isdir(cache_dir_path):
+            return
+        for fn in os.listdir(cache_dir_path):
+            if fn.startswith(_prefix) and fn.lower().endswith(".png"):
+                try:
+                    os.remove(os.path.join(cache_dir_path, fn))
+                    logging.info(f"[Wide cache] Deleted cached wide thumbnail: {fn}")
+                except OSError as e:
+                    logging.error(f"[Wide cache] Failed to delete cache {fn}: {e}")
+
     def refresh_folder_wide_thumbnail(self, folder_path):
         """
         Forces a refresh of a wide folder thumbnail. 
         Refreshes the parent directory to prevent jumping into the subfolder.
         """
-        target_height = self.widefolder_size[1]
-        cache_dir_path, _ = get_cache_dir_path(folder_path, self.thumbnail_cache_path)
-        
-        _bn = os.path.basename(folder_path)
-        _prefix = f"!folder_wide_{_bn}_"
-        if os.path.isdir(cache_dir_path):
-            for fn in os.listdir(cache_dir_path):
-                if fn.startswith(_prefix) and fn.lower().endswith(".png"):
-                    try:
-                        os.remove(os.path.join(cache_dir_path, fn))
-                        logging.info(f"[Refresh] Deleted cached wide thumbnail: {fn}")
-                    except OSError as e:
-                        logging.error(f"[Refresh] Failed to delete cache {fn}: {e}")
+        self._delete_wide_folder_preview_cache_files(folder_path)
 
         parent_dir = os.path.dirname(folder_path)
         cd = getattr(self, "current_directory", None)
@@ -2151,16 +2175,15 @@ class VideoThumbnailPlayer(
         """
         logging.info("Full subtree refresh: clearing UI and caches")
 
+        self._thumb_grid_suppress_decode_until_nav = False
+
         if hasattr(self, 'stop_preview'):
             self.stop_preview()
 
         self.clear_thumbnails()
 
-        if hasattr(self, 'thumbnail_cache'):
-            self.thumbnail_cache.clear()
-
         gc.collect()
-        logging.debug("UI and memory cache cleared before disk delete")
+        logging.debug("UI cleared before disk delete; subtree memory dropped in delete_thumbnail_cache")
 
         self.delete_thumbnail_cache(folder_path)
 
@@ -2178,6 +2201,131 @@ class VideoThumbnailPlayer(
             thumbnail_time=self.thumbnail_time,
             preserve_scroll=True,
         )
+
+    def remove_thumbnails_in_subtree(self, folder_path):
+        """
+        Remove on-disk thumbnail cache, wide-folder preview PNGs, and catalog rows for
+        folder_path and all descendants; reset folder tree icons. Does not rescan.
+        """
+        if not folder_path or (
+            isinstance(folder_path, str) and folder_path.startswith("virtual_library://")
+        ):
+            return
+        if not os.path.isdir(folder_path):
+            logging.info("remove_thumbnails_in_subtree: not a directory: %s", folder_path)
+            return
+
+        logging.info("Remove thumbnails in subtree: %s", folder_path)
+
+        affects_view = self._thumb_view_is_under_cleared_subtree(folder_path)
+
+        if hasattr(self, "stop_preview"):
+            self.stop_preview()
+
+        if affects_view:
+            self.clear_thumbnails()
+            gc.collect()
+
+        for root, _dirs, _files in os.walk(folder_path):
+            self._delete_wide_folder_preview_cache_files(root)
+
+        self.delete_thumbnail_cache(folder_path)
+
+        self._wide_folder_stats_cache.clear()
+        self._folder_media_presence_cache.clear()
+
+        self._block_folder_cache_auto_mark_for_removed_subtree(folder_path)
+
+        if affects_view:
+            self._thumb_grid_suppress_decode_until_nav = True
+            self.display_thumbnails(
+                self.current_directory,
+                force_refresh=True,
+                thumbnail_time=self.thumbnail_time,
+                preserve_scroll=True,
+            )
+
+    def _thumb_view_is_under_cleared_subtree(self, cleared_root: str) -> bool:
+        """True if the thumbnail grid is showing a path inside cleared_root."""
+        cd = getattr(self, "current_directory", None)
+        if (
+            not cd
+            or not isinstance(cd, str)
+            or cd.startswith("virtual_library://")
+            or not cleared_root
+            or not isinstance(cleared_root, str)
+        ):
+            return False
+        try:
+            n_root = self.database.normalize_path(cleared_root)
+            n_cd = self.database.normalize_path(cd)
+        except Exception:
+            return False
+        return n_cd == n_root or n_cd.startswith(n_root + os.sep)
+
+    def _folder_cache_auto_mark_is_blocked(self, path: str) -> bool:
+        roots = getattr(self, "_folder_cache_mark_blocked_roots", None)
+        if not roots or not path:
+            return False
+        try:
+            np = self.database.normalize_path(path)
+        except Exception:
+            return False
+        for bn in roots:
+            if np == bn or np.startswith(bn + os.sep):
+                return True
+        return False
+
+    def _block_folder_cache_auto_mark_for_removed_subtree(self, folder_path: str) -> None:
+        try:
+            self._folder_cache_mark_blocked_roots.add(
+                self.database.normalize_path(folder_path)
+            )
+        except Exception:
+            pass
+
+    def _clear_folder_cache_mark_blocks_for_scan_root(self, scan_root: str) -> None:
+        roots = getattr(self, "_folder_cache_mark_blocked_roots", None)
+        if not roots:
+            return
+        try:
+            sr = self.database.normalize_path(scan_root)
+        except Exception:
+            return
+        to_remove: set[str] = set()
+        for p in roots:
+            try:
+                pn = self.database.normalize_path(p)
+                if pn == sr or pn.startswith(sr + os.sep) or sr.startswith(pn + os.sep):
+                    to_remove.add(p)
+            except Exception:
+                continue
+        roots -= to_remove
+
+    def _display_path_changed_for_folder_cache_block(self, prev_cd, new_cd) -> bool:
+        if prev_cd is None or new_cd is None:
+            return False
+        ps, ns = str(prev_cd), str(new_cd)
+        if ps.startswith("virtual_library://") or ns.startswith("virtual_library://"):
+            return os.path.normcase(ps) != os.path.normcase(ns)
+        try:
+            return self.database.normalize_path(ps) != self.database.normalize_path(ns)
+        except Exception:
+            return os.path.normcase(os.path.normpath(ps)) != os.path.normcase(
+                os.path.normpath(ns)
+            )
+
+    def _maybe_clear_folder_cache_mark_blocks_after_display_nav(
+        self, prev_cd, new_cd
+    ) -> None:
+        """Clear Thumbnails blocks auto cache marks only until user opens another folder."""
+        if not self._display_path_changed_for_folder_cache_block(prev_cd, new_cd):
+            return
+        roots = getattr(self, "_folder_cache_mark_blocked_roots", None)
+        if roots:
+            roots.clear()
+            logging.debug("folder_cache_mark_blocked_roots cleared after directory change")
+        self._thumb_grid_suppress_decode_until_nav = False
 
     # Extract the set_rating function outside of edit_rating
     def set_rating(self, rating):
@@ -2369,6 +2517,8 @@ class VideoThumbnailPlayer(
             Initiates a background thread to scan the entire subtree for media files.
             Resets the progress bar and submits the worker task to the executor.
             """
+            self._clear_folder_cache_mark_blocks_for_scan_root(folder_path)
+            self._thumb_grid_suppress_decode_until_nav = False
             logging.debug("Scheduling subtree scan for: %s", folder_path)
             self.status_bar.reset_progress()
             self.total_files_to_process = 0

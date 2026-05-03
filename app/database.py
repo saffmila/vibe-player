@@ -360,6 +360,7 @@ class Database:
             self.table.delete(file_path=file_path)
             self.db.commit()
             self._invalidate_cache(file_path)
+            self._cached_paths_set.discard(file_path)
         except Exception as e:
             logging.error(f"Error removing entry for {file_path}: {e}")
             self.db.rollback()

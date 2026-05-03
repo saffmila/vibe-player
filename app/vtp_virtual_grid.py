@@ -1570,6 +1570,12 @@ class VtpVirtualGridMixin:
         self._vg_render_id = render_id
         self._vg_pending_gen.clear()
 
+        if getattr(self, "_thumb_grid_suppress_decode_until_nav", False):
+            logging.info(
+                "[VGrid] Thumbnail decode suppressed after Clear — switch folder or use Refresh/Scan to rebuild."
+            )
+            return
+
         items_to_generate = []
         for item in self._vg_data:
             fp = item["path"]
@@ -1602,6 +1608,9 @@ class VtpVirtualGridMixin:
         if not cd or not os.path.isdir(cd):
             return
         if isinstance(cd, str) and cd.startswith("virtual_library://"):
+            return
+        _blocked = getattr(self, "_folder_cache_auto_mark_is_blocked", None)
+        if callable(_blocked) and _blocked(cd):
             return
         try:
             self.database.update_cache_status(cd, True)

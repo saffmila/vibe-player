@@ -13,7 +13,7 @@ import os
 import re
 import subprocess
 from tkinter import Menu
-from typing import Any
+from typing import Any, Callable
 
 import cv2
 from pymediainfo import MediaInfo
@@ -51,6 +51,35 @@ class ThumbnailCache:
         self.cache.clear()
         self.reset_stats()
         logging.info("ThumbnailCache memory cache cleared.")
+
+    def discard_under_directory(
+        self, folder_path: str, normalize_path: Callable[[str], str]
+    ) -> None:
+        """Remove cached thumbnails whose path lies under folder_path (inclusive)."""
+        if not folder_path:
+            return
+        try:
+            norm_root = normalize_path(folder_path)
+        except Exception:
+            norm_root = os.path.normcase(os.path.normpath(folder_path))
+        prefix = norm_root + os.sep
+        removed = 0
+        for key in list(self.cache.keys()):
+            sk = str(key)
+            base_path = sk.split("\x00", 1)[0]
+            try:
+                nk = normalize_path(base_path)
+            except Exception:
+                nk = os.path.normcase(os.path.normpath(base_path))
+            if nk == norm_root or nk.startswith(prefix):
+                self.cache.pop(key, None)
+                removed += 1
+        if removed:
+            logging.info(
+                "ThumbnailCache discarded %d in-memory entries under %s",
+                removed,
+                folder_path,
+            )
 
     def cache_stats(self) -> dict[str, Any]:
         """Return cache statistics for debugging."""
