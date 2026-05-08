@@ -87,7 +87,6 @@ class VideoExportDialog(ctk.CTkToplevel):
             self.height_var = ctk.StringVar(value="1200")
             self.fps_var = ctk.StringVar(value="30")
             self.sound_var = ctk.BooleanVar(value=True)
-            self.lossless_var = ctk.BooleanVar(value=False)
             self.lossless_container_var = ctk.StringVar(value="MKV (recommended)")
 
             # Source duration (used when no loop is provided so we can default end-time).
@@ -97,53 +96,6 @@ class VideoExportDialog(ctk.CTkToplevel):
                 self._source_duration = 0.0
 
             self.export_mode_var = ctk.StringVar(value="active")
-
-            # --- Lossless cut switch (LosslessCut-style, no recompression) ---
-            lossless_frame = ctk.CTkFrame(self, fg_color="transparent")
-            lossless_frame.pack(pady=(10, 0), padx=10, fill="x")
-            self.lossless_switch = ctk.CTkSwitch(
-                lossless_frame,
-                text="Lossless cut (keep original quality)",
-                variable=self.lossless_var,
-                command=self._on_lossless_toggled,
-            )
-            self.lossless_switch.pack(anchor="w")
-            self.lossless_hint = ctk.CTkLabel(
-                self,
-                text="Cuts on the nearest preceding keyframe (LosslessCut-style). MKV is the safest container.",
-                text_color="#888888",
-                font=("", 10),
-            )
-            self.lossless_hint.pack(pady=(0, 4))
-
-            self.lossless_container_menu = ctk.CTkOptionMenu(
-                self,
-                variable=self.lossless_container_var,
-                values=["MKV (recommended)", "Same as source"],
-            )
-            self.lossless_container_menu.pack(pady=(0, 6))
-            self.lossless_container_menu.configure(state="disabled")
-
-            ctk.CTkLabel(self, text="Choose preset:").pack(pady=(10, 5))
-            self.preset_menu = ctk.CTkOptionMenu(self, variable=self.preset_var, values=list(self.presets.keys()), command=self.apply_preset)
-            self.preset_menu.pack(pady=5)
-
-            ctk.CTkLabel(self, text="Custom settings:").pack(pady=(15, 5))
-
-            form_frame = ctk.CTkFrame(self)
-            form_frame.pack(pady=5, padx=10, fill="x")
-
-            self.width_entry = self._add_entry(form_frame, "Width:", self.width_var)
-            self.height_entry = self._add_entry(form_frame, "Height:", self.height_var)
-            self.fps_entry = self._add_entry(form_frame, "FPS:", self.fps_var)
-
-            self.supported_formats = [".mp4", ".avi", ".mkv", ".mov", ".webm"]
-
-            ctk.CTkLabel(self, text="Output Format:").pack(pady=(10, 2))
-            self.format_menu = ctk.CTkOptionMenu(self, variable=self.ext_var, values=self.supported_formats)
-            self.format_menu.pack(pady=2)
-
-            ctk.CTkCheckBox(self, text="Include audio (not supported yet)", variable=self.sound_var, state="disabled").pack(pady=5)
 
             # --- Segment-based export selection ---
             active_seg = self._get_active_segment()
@@ -194,14 +146,6 @@ class VideoExportDialog(ctk.CTkToplevel):
             )
             self.all_cuts_merged_radio.pack(anchor="w", padx=10, pady=(2, 6))
             self.export_duration_var = ctk.StringVar(value="")
-            self.export_duration_label = ctk.CTkLabel(
-                export_scope_frame,
-                textvariable=self.export_duration_var,
-                text_color="#bfc7d5",
-                font=("", 10),
-                anchor="w",
-            )
-            self.export_duration_label.pack(fill="x", padx=10, pady=(0, 6))
             if not active_seg:
                 self.active_cut_radio.configure(state="disabled")
                 if seg_count <= 0:
@@ -210,16 +154,70 @@ class VideoExportDialog(ctk.CTkToplevel):
             self._active_seg_len_for_ui = active_seg_len
             self._total_seg_len_for_ui = total_seg_len
             self.export_mode_var.trace_add("write", lambda *_: self._update_export_duration_label())
+
+            # --- Export mode tabs ---
+            self.tabs = ctk.CTkTabview(self)
+            self.tabs.pack(pady=(8, 4), padx=10, fill="x", expand=True)
+            lossless_tab = self.tabs.add("Lossless Cut")
+            custom_tab = self.tabs.add("Custom (Re-encode)")
+
+            self.lossless_hint = ctk.CTkLabel(
+                lossless_tab,
+                text="Cuts on nearest keyframe (LosslessCut-style). MKV is the safest container.",
+                text_color="#888888",
+                font=("", 10),
+                justify="left",
+                anchor="w",
+            )
+            self.lossless_hint.pack(fill="x", padx=8, pady=(8, 4))
+
+            self.lossless_container_menu = ctk.CTkOptionMenu(
+                lossless_tab,
+                variable=self.lossless_container_var,
+                values=["MKV (recommended)", "Same as source"],
+            )
+            self.lossless_container_menu.pack(fill="x", padx=8, pady=(0, 8))
+
+            ctk.CTkLabel(custom_tab, text="Choose preset:").pack(pady=(8, 5))
+            self.preset_menu = ctk.CTkOptionMenu(
+                custom_tab,
+                variable=self.preset_var,
+                values=list(self.presets.keys()),
+                command=self.apply_preset,
+            )
+            self.preset_menu.pack(pady=(0, 6))
+
+            form_frame = ctk.CTkFrame(custom_tab)
+            form_frame.pack(pady=5, padx=8, fill="x")
+            self.width_entry = self._add_entry(form_frame, "Width:", self.width_var)
+            self.height_entry = self._add_entry(form_frame, "Height:", self.height_var)
+            self.fps_entry = self._add_entry(form_frame, "FPS:", self.fps_var)
+
+            self.supported_formats = [".mp4", ".avi", ".mkv", ".mov", ".webm"]
+            ctk.CTkLabel(custom_tab, text="Output Format:").pack(pady=(8, 2))
+            self.format_menu = ctk.CTkOptionMenu(custom_tab, variable=self.ext_var, values=self.supported_formats)
+            self.format_menu.pack(pady=(0, 8))
+
+            ctk.CTkCheckBox(custom_tab, text="Include audio (not supported yet)", variable=self.sound_var, state="disabled").pack(pady=(0, 8))
+
+            self.tabs.set("Lossless Cut")
             self._update_export_duration_label()
 
             # Keep close/destroy handlers only.
             self.protocol("WM_DELETE_WINDOW", self._on_close)
             self.bind("<Destroy>", self._on_destroy_event, add="+")
 
-            # Bottom action bar — pinned to the bottom so it's always visible
-            # even when the window is resized smaller than the content.
+            # Bottom pinned section: duration + actions.
             button_bar = ctk.CTkFrame(self, fg_color="transparent")
             button_bar.pack(side="bottom", fill="x", padx=10, pady=10)
+            self.export_duration_label = ctk.CTkLabel(
+                button_bar,
+                textvariable=self.export_duration_var,
+                text_color="#bfc7d5",
+                font=("", 10),
+                anchor="w",
+            )
+            self.export_duration_label.pack(fill="x", pady=(0, 6))
             self.close_btn = ctk.CTkButton(
                 button_bar, text="Close", width=100, command=self._on_close
             )
@@ -235,30 +233,6 @@ class VideoExportDialog(ctk.CTkToplevel):
             # NOTE: no grab_set() — the dialog stays open after a successful export
             # so the user can immediately re-export with different settings.
             self.transient(self.master)
-
-    def _on_lossless_toggled(self):
-        """Locks/unlocks custom-encode controls when 'Lossless cut' is toggled."""
-        lossless = self.lossless_var.get()
-        custom_state = "disabled" if lossless else "normal"
-        for widget in (
-            getattr(self, "preset_menu", None),
-            getattr(self, "width_entry", None),
-            getattr(self, "height_entry", None),
-            getattr(self, "fps_entry", None),
-            getattr(self, "format_menu", None),
-        ):
-            if widget is not None:
-                try:
-                    widget.configure(state=custom_state)
-                except Exception:
-                    pass
-
-        container_widget = getattr(self, "lossless_container_menu", None)
-        if container_widget is not None:
-            try:
-                container_widget.configure(state="normal" if lossless else "disabled")
-            except Exception:
-                pass
 
     def _add_entry(self, frame, label, var):
         row = ctk.CTkFrame(frame)
@@ -382,7 +356,10 @@ class VideoExportDialog(ctk.CTkToplevel):
                 if e > s:
                     serializable_segments.append({"start": s, "end": e})
 
-            if self.lossless_var.get():
+            selected_tab = self.tabs.get() if hasattr(self, "tabs") else "Lossless Cut"
+            is_lossless = selected_tab == "Lossless Cut"
+
+            if is_lossless:
                 # Lossless mode: stream copy + keyframe cut. Container choice drives compatibility.
                 source_ext = (os.path.splitext(self.video_path)[1] or ".mp4").lower()
                 container_choice = self.lossless_container_var.get()
@@ -498,8 +475,38 @@ class TimelineBarWidget(ctk.CTkFrame):
                 start = max(0.0, end - min_len)
         seg = self._get_active_segment()
         if seg is not None:
+            old_start = seg.get("start")
+            old_end = seg.get("end")
             seg["start"] = start
             seg["end"] = end
+            logging.info(
+                "[CUT_DEBUG] set_active_bounds idx=%s old=(%.3f, %.3f) new=(%.3f, %.3f)",
+                self.active_segment_index,
+                float(old_start) if old_start is not None else -1.0,
+                float(old_end) if old_end is not None else -1.0,
+                float(start),
+                float(end),
+            )
+
+    def _log_segments_state(self, reason):
+        try:
+            compact = []
+            for i, seg in enumerate(self.segments):
+                s = seg.get("start")
+                e = seg.get("end")
+                if s is None or e is None:
+                    compact.append(f"{i}:(None,None)")
+                else:
+                    compact.append(f"{i}:({float(s):.3f},{float(e):.3f})")
+            logging.info(
+                "[CUT_DEBUG] %s | active=%s | count=%s | %s",
+                reason,
+                self.active_segment_index,
+                len(self.segments),
+                " ".join(compact) if compact else "<empty>",
+            )
+        except Exception as e:
+            logging.info(f"[CUT_DEBUG] {reason} | failed to serialize segments: {e}")
 
     @property
     def loop_start(self):
@@ -639,10 +646,13 @@ class TimelineBarWidget(ctk.CTkFrame):
         menu = tk.Menu(self, tearoff=0, bg="#2b2b2b", fg="white", activebackground="#444")
         if seg_hit is not None:
             seg_idx = int(seg_hit["index"])
+            if 0 <= seg_idx < len(self.segments):
+                self.active_segment_index = seg_idx
 
             def _delete_segment(idx=seg_idx):
                 if not (0 <= idx < len(self.segments)):
                     return
+                logging.info("[CUT_DEBUG] delete requested idx=%s", idx)
                 del self.segments[idx]
                 if not self.segments:
                     self.active_segment_index = None
@@ -654,7 +664,12 @@ class TimelineBarWidget(ctk.CTkFrame):
                     self.active_segment_index -= 1
                 self.save_segments_for_path(self.video_path)
                 self.redraw_timeline()
+                self._log_segments_state(f"delete completed idx={idx}")
 
+            menu.add_command(
+                label=f"▶ Play Active Cut {seg_idx + 1}",
+                command=lambda i=seg_idx: self._activate_and_preview_segment(i),
+            )
             menu.add_command(label=f"🗑 Delete Cut {seg_idx + 1}", command=_delete_segment)
             menu.add_separator()
 
@@ -942,6 +957,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.canvas.bind("<ButtonRelease-1>", self.on_canvas_release)
         self.canvas.bind("<Configure>", self.on_canvas_resize)
         self.canvas.bind("<Button-1>", self.on_canvas_primary_click)
+        self.canvas.bind("<Double-Button-1>", self.on_canvas_double_click)
         self.canvas.bind("<Shift-MouseWheel>", self.on_ctrl_mousewheel)
         self.canvas.bind("<Button-2>", self.on_pan_start)
         self.canvas.bind("<B2-Motion>", self.on_pan_drag)
@@ -985,7 +1001,12 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.options_btn = tk.Button(self, text="⚙ Options", command=self.show_options_menu, **btn_style)
         self.options_btn.grid(row=2, column=4, pady=(2, 2))
 
-        self.convert_btn = tk.Button(self, text="⏎ Convert", command=self.show_convert_menu, **btn_style)
+        self.convert_btn = tk.Button(
+            self,
+            text="⏎ Export",
+            command=lambda: self.open_export_dialog(self.video_path, self.loop_start, self.loop_end),
+            **btn_style,
+        )
         self.convert_btn.grid(row=2, column=5, pady=(2, 2))
         
         self.load_thumbnails()  # Initial load
@@ -1133,21 +1154,6 @@ class TimelineBarWidget(ctk.CTkFrame):
   
 
 
-
-    def show_convert_menu(self):
-        """
-        Displays the popup menu for conversion, gathering active loop data from the player.
-        """
-        export_loop_start = self.loop_start
-        export_loop_end = self.loop_end
-
-        menu = create_menu(self, self)
-        menu.add_command(label="Open Export Dialog",
-                         command=lambda: self.open_export_dialog(self.video_path, export_loop_start, export_loop_end))
-        
-        x = self.convert_btn.winfo_rootx()
-        y = self.convert_btn.winfo_rooty() + self.convert_btn.winfo_height()
-        menu.tk_popup(x, y)
 
     def show_options_menu(self):
         if not hasattr(self, "marker_vars"):
@@ -2049,6 +2055,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.loop_mode = False
         self.segments.append({"start": clicked_time, "end": clicked_time})
         self.active_segment_index = len(self.segments) - 1
+        self._log_segments_state(f"shift_click create at {clicked_time:.3f}s")
 
         self.loop_drag = "select"
         self.canvas.config(cursor="sb_h_double_arrow")
@@ -2111,13 +2118,15 @@ class TimelineBarWidget(ctk.CTkFrame):
             x_e = self.time_to_x(float(e))
             if min(x_s, x_e) <= x <= max(x_s, x_e):
                 self.active_segment_index = i
-                self.loop_drag = "move"
+                self.loop_drag = "move_pending"
+                self._drag_pending_start_x = x
                 x0, x1 = self.get_timeline_bounds()
                 duration = self._get_current_duration() or 60
                 clicked_time = self.x_to_rel(x, x0, x1) * duration
                 self.drag_offset_time = clicked_time - float(s)
                 self.canvas.config(cursor="fleur")
                 self.redraw_timeline()
+                self._log_segments_state(f"primary_click activate idx={i} x={x}")
                 return
 
         # 2. Fallback: playhead seek when no segment was hit.
@@ -2148,6 +2157,93 @@ class TimelineBarWidget(ctk.CTkFrame):
         # 4. Standardní seek na timeline, pokud jsme neklikli na marker nebo kurzor
         self.loop_drag = None
         self.on_timeline_click(event)
+
+    def on_canvas_double_click(self, event):
+        """Double-click a segment to preview it as active loop."""
+        seg_hit = self._get_segment_hover_at(event.x, event.y)
+        if seg_hit is None:
+            # UX fallback: double-click outside segments seeks and starts playback.
+            self.on_timeline_click(event)
+            active_player = getattr(self.controller, "current_video_window", None) or getattr(self.controller, "active_player", None)
+            if active_player is not None:
+                if hasattr(active_player, "play_video"):
+                    try:
+                        active_player.play_video()
+                    except Exception:
+                        pass
+                elif hasattr(active_player, "toggle_play"):
+                    is_playing = bool(getattr(active_player, "is_playing", False))
+                    if not is_playing:
+                        try:
+                            active_player.toggle_play()
+                        except Exception:
+                            pass
+            return "break"
+
+        idx = int(seg_hit["index"])
+        if not (0 <= idx < len(self.segments)):
+            return "break"
+
+        self._activate_and_preview_segment(idx)
+        self._log_segments_state(f"double_click preview idx={idx}")
+        return "break"
+
+    def _activate_and_preview_segment(self, idx):
+        if not (0 <= idx < len(self.segments)):
+            return
+
+        self.active_segment_index = idx
+        seg = self.segments[idx]
+        start = float(seg.get("start", 0.0))
+        end = float(seg.get("end", start))
+        if end <= start:
+            return
+
+        self.loop_drag = None
+        self.canvas.config(cursor="")
+        active_player = getattr(self.controller, "current_video_window", None) or getattr(self.controller, "active_player", None)
+        if active_player is not None:
+            try:
+                active_player.loop_active = True
+                if hasattr(active_player, "set_loop_start_from_timeline"):
+                    active_player.set_loop_start_from_timeline(start)
+                else:
+                    active_player.loop_start = start
+                if hasattr(active_player, "set_loop_end_from_timeline"):
+                    active_player.set_loop_end_from_timeline(end)
+                else:
+                    active_player.loop_end = end
+            except Exception:
+                active_player.loop_start = start
+                active_player.loop_end = end
+                active_player.loop_active = True
+
+        if self.on_seek:
+            self.on_seek(start)
+        elif active_player and hasattr(active_player, "seek"):
+            try:
+                active_player.seek(start)
+            except Exception:
+                pass
+
+        if active_player is not None:
+            if hasattr(active_player, "play_video"):
+                try:
+                    active_player.play_video()
+                except Exception:
+                    pass
+            elif hasattr(active_player, "toggle_play"):
+                is_playing = bool(getattr(active_player, "is_playing", False))
+                if not is_playing:
+                    try:
+                        active_player.toggle_play()
+                    except Exception:
+                        pass
+
+        if hasattr(self, "loop_button"):
+            self.loop_button.config(text="🔁 Loop: ON")
+        self.redraw_timeline()
+        self._log_segments_state(f"activate_preview idx={idx} start={start:.3f} end={end:.3f}")
 
     
 
@@ -2305,9 +2401,10 @@ class TimelineBarWidget(ctk.CTkFrame):
             player_s = getattr(active_player, "loop_start", None) if active_player else None
             player_e = getattr(active_player, "loop_end", None) if active_player else None
             if player_s is not None and player_e is not None:
-                start_time = player_s
-                end_time = player_e
-                self._set_active_segment_bounds(start_time, end_time)
+                # IMPORTANT: redraw must never mutate segment data from player loop state.
+                # We keep segment bounds as source of truth and only use player loop for playback.
+                start_time = float(start_time)
+                end_time = float(end_time)
 
         if start_time is not None and end_time is not None:
             x_s = self.time_to_x(float(start_time))
@@ -2633,6 +2730,7 @@ class TimelineBarWidget(ctk.CTkFrame):
             }
             with open(segments_file, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2, ensure_ascii=False)
+            self._log_segments_state(f"saved to {os.path.basename(segments_file)}")
         except Exception as e:
             logging.error(f"[Timeline] Failed to save segments: {e}")
 
@@ -2682,6 +2780,7 @@ class TimelineBarWidget(ctk.CTkFrame):
                 self.active_segment_index = 0
             else:
                 self.active_segment_index = None
+            self._log_segments_state(f"loaded from {os.path.basename(segments_file)}")
         except Exception as e:
             logging.error(f"[Timeline] Failed to load segments: {e}")
             self.segments = []
@@ -2701,6 +2800,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         self._cached_duration_path = self.video_path
         if hasattr(self, "loop_button"):
             self.loop_button.config(text="🔁 Loop: off")
+        self._log_segments_state("clear_selection")
 
     def reload_all_markers_and_redraw(self, video_path=None):
         old_path = self.video_path
@@ -3063,7 +3163,14 @@ class TimelineBarWidget(ctk.CTkFrame):
             self.redraw_timeline()
             return
 
-        elif self.loop_drag == "move":
+        elif self.loop_drag == "move_pending":
+            start_x = getattr(self, "_drag_pending_start_x", x)
+            if abs(x - start_x) < 6:
+                return
+            self.loop_drag = "move"
+            logging.info("[CUT_DEBUG] move_pending -> move (dx=%s)", abs(x - start_x))
+
+        if self.loop_drag == "move":
             if active_seg is None or self.loop_start is None or self.loop_end is None:
                 return
             loop_duration = self.loop_end - self.loop_start
@@ -3106,7 +3213,14 @@ class TimelineBarWidget(ctk.CTkFrame):
                         new_start = max(0.0, new_end - default_len)
                     self._set_active_segment_bounds(new_start, new_end)
                     self.redraw_timeline()
+        if self.loop_drag == "move_pending":
+            # Simple click selected the segment; do not move it.
+            self._log_segments_state("release move_pending (no move)")
+            self.loop_drag = None
+            self.canvas.config(cursor="")
+            return
         if self.loop_drag:
+            self._log_segments_state(f"release drag={self.loop_drag}")
             active_player = getattr(self.controller, "current_video_window", None)
             if active_player and hasattr(active_player, "update_loop_bar_display"):
                 active_player.update_loop_bar_display()
