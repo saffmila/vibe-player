@@ -1107,6 +1107,66 @@ def get_ffmpeg_path():
     raise FileNotFoundError("FFmpeg not found! Please run install.bat or add ffmpeg to PATH.")
 
 
+def get_ffprobe_path():
+    """Returns ffprobe.exe next to ffmpeg (same search layout as ``get_ffmpeg_path``)."""
+    candidates: list[str] = []
+    if getattr(sys, "frozen", False):
+        _base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+        candidates.append(os.path.join(_base, "tools", "ffmpeg", "bin", "ffprobe.exe"))
+        candidates.append(os.path.join(_base, "tools", "ffmpeg", "ffprobe.exe"))
+    _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates.append(os.path.join(_repo_root, "tools", "ffmpeg", "bin", "ffprobe.exe"))
+    candidates.append(os.path.join(_repo_root, "tools", "ffmpeg", "ffprobe.exe"))
+    candidates.append(os.path.abspath(os.path.join("tools", "ffmpeg", "bin", "ffprobe.exe")))
+    candidates.append(os.path.abspath(os.path.join("tools", "ffmpeg", "ffprobe.exe")))
+    for p in candidates:
+        if os.path.isfile(p):
+            return p
+    path = shutil.which("ffprobe")
+    if path:
+        return path
+    raise FileNotFoundError("ffprobe not found! Use the same bundle as FFmpeg (tools/ffmpeg/bin).")
+
+
+def probe_first_video_stream(video_path: str) -> dict | None:
+    """
+    Returns the first video stream's codec info, or None if probing fails.
+    Used for lossless export compatibility (e.g. HEVC needs hvc1 in MP4).
+    """
+    try:
+        ffprobe = get_ffprobe_path()
+    except FileNotFoundError:
+        return None
+    cmd = [
+        ffprobe,
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=codec_name,codec_tag_string",
+        "-of",
+        "json",
+        video_path,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            startupinfo=startupinfo,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        data = json.loads(result.stdout)
+        streams = data.get("streams") or []
+        if not streams:
+            return None
+        return streams[0]
+    except Exception:
+        return None
+
 
 def get_file_info(path):
     """Return formatted string with file name, dimensions, size, and modification time."""

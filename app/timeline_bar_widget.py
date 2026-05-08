@@ -9,6 +9,8 @@ import logging
 import math
 import os
 import queue
+import re
+import subprocess
 import threading
 import tkinter as tk
 from functools import partial
@@ -18,15 +20,28 @@ import customtkinter as ctk
 import cv2
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
-from file_operations import create_video_thumbnail, get_video_duration_mediainfo
+from file_operations import (
+    create_video_thumbnail,
+    get_ffmpeg_path,
+    get_video_duration_mediainfo,
+    probe_first_video_stream,
+)
 from utils import create_menu, parse_srt_file
+
+
+# Hide subprocess console windows on Windows (matches the pattern used in file_operations.py).
+_SUBPROCESS_STARTUPINFO = None
+if os.name == "nt":
+    _SUBPROCESS_STARTUPINFO = subprocess.STARTUPINFO()
+    _SUBPROCESS_STARTUPINFO.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    _SUBPROCESS_STARTUPINFO.wShowWindow = subprocess.SW_HIDE
 
 
 class VideoExportDialog(ctk.CTkToplevel):
     """
     Simple dialog for selecting video export preset or custom settings.
     """
-    def __init__(self, parent, video_path, convert_callback, loop_start=None, loop_end=None):
+    def __init__(self, parent, video_path, convert_callback, loop_start=None, loop_end=None, controller=None):
             """
             Initializes the export dialog. 
             Sets up the UI elements, variables, and dynamically adjusts window size.
@@ -37,13 +52,15 @@ class VideoExportDialog(ctk.CTkToplevel):
             self.loop_mode = False
             self.fill_timeline_gaps = True  # Enables continuous filmstrip by default
 
-            self.geometry("400x550") 
+            self.geometry("440x780")
+            self.minsize(420, 660)
             self.video_path = video_path
             self.convert_callback = convert_callback
             self.loop_start = loop_start
             self.loop_end = loop_end
-            
-            self.resizable(True, True) 
+            self.controller = controller
+
+            self.resizable(True, True)
 
             self.presets = {
                 "MP4 1600x1200 HQ": { "ext": ".mp4", "width": 1600, "height": 1200, "fps": 30 },
@@ -57,6 +74,61 @@ class VideoExportDialog(ctk.CTkToplevel):
             self.height_var = ctk.StringVar(value="1200")
             self.fps_var = ctk.StringVar(value="30")
             self.sound_var = ctk.BooleanVar(value=True)
+            self.lossless_var = ctk.BooleanVar(value=False)
+            self.lossless_container_var = ctk.StringVar(value="MKV (recommended)")
+
+            # Source duration (used when no loop is provided so we can default end-time).
+            try:
+                self._source_duration = float(get_video_duration_mediainfo(video_path) or 0.0)
+            except Exception:
+                self._source_duration = 0.0
+
+            initial_start = float(loop_start) if loop_start is not None else 0.0
+            initial_end = (
+                float(loop_end)
+                if loop_end is not None
+                else (self._source_duration if self._source_duration > 0 else 0.0)
+            )
+            initial_start_str = self._format_seconds(initial_start)
+            initial_end_str = self._format_seconds(initial_end)
+            self.range_start_var = ctk.StringVar(value=initial_start_str)
+            self.range_end_var = ctk.StringVar(value=initial_end_str)
+            self.range_duration_var = ctk.StringVar(
+                value=self._format_seconds(max(initial_end - initial_start, 0.0))
+            )
+
+            # Snapshot of the values we last pushed FROM the timeline INTO the inputs.
+            # Auto-sync only overwrites the inputs while they still match this snapshot,
+            # so a user-edited range is never silently overwritten.
+            self._last_synced_start_str = initial_start_str
+            self._last_synced_end_str = initial_end_str
+            self._auto_sync_after_id = None
+
+            # --- Lossless cut switch (LosslessCut-style, no recompression) ---
+            lossless_frame = ctk.CTkFrame(self, fg_color="transparent")
+            lossless_frame.pack(pady=(10, 0), padx=10, fill="x")
+            self.lossless_switch = ctk.CTkSwitch(
+                lossless_frame,
+                text="Lossless cut (keep original quality)",
+                variable=self.lossless_var,
+                command=self._on_lossless_toggled,
+            )
+            self.lossless_switch.pack(anchor="w")
+            self.lossless_hint = ctk.CTkLabel(
+                self,
+                text="Cuts on the nearest preceding keyframe (LosslessCut-style). MKV is the safest container.",
+                text_color="#888888",
+                font=("", 10),
+            )
+            self.lossless_hint.pack(pady=(0, 4))
+
+            self.lossless_container_menu = ctk.CTkOptionMenu(
+                self,
+                variable=self.lossless_container_var,
+                values=["MKV (recommended)", "Same as source"],
+            )
+            self.lossless_container_menu.pack(pady=(0, 6))
+            self.lossless_container_menu.configure(state="disabled")
 
             ctk.CTkLabel(self, text="Choose preset:").pack(pady=(10, 5))
             self.preset_menu = ctk.CTkOptionMenu(self, variable=self.preset_var, values=list(self.presets.keys()), command=self.apply_preset)
@@ -67,35 +139,274 @@ class VideoExportDialog(ctk.CTkToplevel):
             form_frame = ctk.CTkFrame(self)
             form_frame.pack(pady=5, padx=10, fill="x")
 
-            self._add_entry(form_frame, "Width:", self.width_var)
-            self._add_entry(form_frame, "Height:", self.height_var)
-            self._add_entry(form_frame, "FPS:", self.fps_var)
-            
+            self.width_entry = self._add_entry(form_frame, "Width:", self.width_var)
+            self.height_entry = self._add_entry(form_frame, "Height:", self.height_var)
+            self.fps_entry = self._add_entry(form_frame, "FPS:", self.fps_var)
+
             self.supported_formats = [".mp4", ".avi", ".mkv", ".mov", ".webm"]
-            
+
             ctk.CTkLabel(self, text="Output Format:").pack(pady=(10, 2))
             self.format_menu = ctk.CTkOptionMenu(self, variable=self.ext_var, values=self.supported_formats)
             self.format_menu.pack(pady=2)
 
             ctk.CTkCheckBox(self, text="Include audio (not supported yet)", variable=self.sound_var, state="disabled").pack(pady=5)
 
-            if self.loop_start is not None and self.loop_end is not None:
-                ctk.CTkLabel(self, text=f"Exporting selection: {int(self.loop_start)}s - {int(self.loop_end)}s", text_color="#00bfff").pack(pady=5)
+            # --- Export range section ---
+            range_label_color = "#00bfff" if (self.loop_start is not None and self.loop_end is not None) else "#aaaaaa"
+            range_header = (
+                "Export range (loop selection)"
+                if self.loop_start is not None and self.loop_end is not None
+                else "Export range (full video)"
+            )
+            ctk.CTkLabel(self, text=range_header, text_color=range_label_color).pack(pady=(8, 2))
 
-            # TOTO TLAČIDLO TERAZ UVIDÍŠ!
-            ctk.CTkButton(self, text="Start Export", command=self.start_export).pack(pady=15)
+            range_frame = ctk.CTkFrame(self)
+            range_frame.pack(pady=2, padx=10, fill="x")
+            self._add_time_row(range_frame, "From:", self.range_start_var)
+            self._add_time_row(range_frame, "To:", self.range_end_var)
+
+            duration_row = ctk.CTkFrame(range_frame, fg_color="transparent")
+            duration_row.pack(fill="x", pady=2)
+            ctk.CTkLabel(duration_row, text="Duration:", width=120, anchor="w").pack(side="left")
+            self.duration_label = ctk.CTkLabel(
+                duration_row, textvariable=self.range_duration_var, anchor="w", text_color="#cccccc"
+            )
+            self.duration_label.pack(side="left", fill="x", expand=True)
+
+            sync_row = ctk.CTkFrame(self, fg_color="transparent")
+            sync_row.pack(pady=(2, 4), padx=10, fill="x")
+            ctk.CTkButton(
+                sync_row,
+                text="Reset to timeline loop",
+                width=180,
+                command=self._sync_range_from_timeline,
+            ).pack(side="left")
+            self.auto_sync_label = ctk.CTkLabel(
+                sync_row,
+                text="(auto-sync: on)",
+                text_color="#6dd3a0",
+                font=("", 10),
+            )
+            self.auto_sync_label.pack(side="left", padx=(8, 0))
+
+            self.range_start_var.trace_add("write", lambda *_: self._update_duration_label())
+            self.range_end_var.trace_add("write", lambda *_: self._update_duration_label())
+
+            # Start polling the timeline for loop changes; cleanly cancelled on close.
+            self.protocol("WM_DELETE_WINDOW", self._on_close)
+            self.bind("<Destroy>", self._on_destroy_event, add="+")
+            self.after(300, self._auto_sync_tick)
+
+            # Bottom action bar — pinned to the bottom so it's always visible
+            # even when the window is resized smaller than the content.
+            button_bar = ctk.CTkFrame(self, fg_color="transparent")
+            button_bar.pack(side="bottom", fill="x", padx=10, pady=10)
+            self.close_btn = ctk.CTkButton(
+                button_bar, text="Close", width=100, command=self._on_close
+            )
+            self.close_btn.pack(side="left")
+            self.start_btn = ctk.CTkButton(
+                button_bar, text="Start Export", command=self.start_export
+            )
+            self.start_btn.pack(side="right", fill="x", expand=True, padx=(10, 0))
 
             self.apply_preset(self.preset_var.get())
             self.lift()
             self.focus_force()
-            self.grab_set()
+            # NOTE: no grab_set() — the dialog stays open after a successful export
+            # so the user can immediately re-export with different settings.
             self.transient(self.master)
+
+    def _on_lossless_toggled(self):
+        """Locks/unlocks custom-encode controls when 'Lossless cut' is toggled."""
+        lossless = self.lossless_var.get()
+        custom_state = "disabled" if lossless else "normal"
+        for widget in (
+            getattr(self, "preset_menu", None),
+            getattr(self, "width_entry", None),
+            getattr(self, "height_entry", None),
+            getattr(self, "fps_entry", None),
+            getattr(self, "format_menu", None),
+        ):
+            if widget is not None:
+                try:
+                    widget.configure(state=custom_state)
+                except Exception:
+                    pass
+
+        container_widget = getattr(self, "lossless_container_menu", None)
+        if container_widget is not None:
+            try:
+                container_widget.configure(state="normal" if lossless else "disabled")
+            except Exception:
+                pass
 
     def _add_entry(self, frame, label, var):
         row = ctk.CTkFrame(frame)
         row.pack(fill="x", pady=2)
         ctk.CTkLabel(row, text=label, width=120, anchor="w").pack(side="left")
-        ctk.CTkEntry(row, textvariable=var).pack(side="left", fill="x", expand=True)
+        entry = ctk.CTkEntry(row, textvariable=var)
+        entry.pack(side="left", fill="x", expand=True)
+        return entry
+
+    def _add_time_row(self, frame, label, var):
+        row = ctk.CTkFrame(frame, fg_color="transparent")
+        row.pack(fill="x", pady=2)
+        ctk.CTkLabel(row, text=label, width=120, anchor="w").pack(side="left")
+        entry = ctk.CTkEntry(row, textvariable=var, placeholder_text="HH:MM:SS.mmm")
+        entry.pack(side="left", fill="x", expand=True)
+        return entry
+
+    @staticmethod
+    def _format_seconds(seconds: float) -> str:
+        """Render seconds as HH:MM:SS.mmm (always 3-digit ms for precision)."""
+        try:
+            total = max(float(seconds), 0.0)
+        except (TypeError, ValueError):
+            total = 0.0
+        hours = int(total // 3600)
+        minutes = int((total % 3600) // 60)
+        secs = total - hours * 3600 - minutes * 60
+        return f"{hours:02d}:{minutes:02d}:{secs:06.3f}"
+
+    @staticmethod
+    def _parse_time_str(value: str) -> float:
+        """
+        Accept either a plain number of seconds ('90.5') or HH:MM:SS / MM:SS / SS notation
+        with optional fractional seconds. Returns seconds as float.
+        Raises ValueError on bad input.
+        """
+        if value is None:
+            raise ValueError("empty time")
+        text = value.strip()
+        if not text:
+            raise ValueError("empty time")
+        if ":" not in text:
+            return float(text)
+        parts = text.split(":")
+        if len(parts) > 3:
+            raise ValueError(f"invalid time: {value}")
+        parts = [p.strip() for p in parts]
+        seconds = float(parts[-1])
+        minutes = int(parts[-2]) if len(parts) >= 2 else 0
+        hours = int(parts[-3]) if len(parts) == 3 else 0
+        if seconds < 0 or minutes < 0 or hours < 0:
+            raise ValueError(f"negative time: {value}")
+        return hours * 3600 + minutes * 60 + seconds
+
+    def _update_duration_label(self):
+        try:
+            start = self._parse_time_str(self.range_start_var.get())
+            end = self._parse_time_str(self.range_end_var.get())
+            duration = max(end - start, 0.0)
+            self.range_duration_var.set(self._format_seconds(duration))
+            self.duration_label.configure(text_color="#cccccc")
+        except (ValueError, AttributeError):
+            self.range_duration_var.set("--:--:--.---")
+            try:
+                self.duration_label.configure(text_color="#ff8080")
+            except Exception:
+                pass
+
+    def _read_timeline_loop(self):
+        """Returns (start, end) in seconds if a loop is active on the player, else None."""
+        active_player = getattr(self.controller, "current_video_window", None) if self.controller else None
+        if not active_player:
+            return None
+        loop_s = getattr(active_player, "loop_start", None)
+        loop_e = getattr(active_player, "loop_end", None)
+        loop_active = bool(getattr(active_player, "loop_active", False))
+        if not loop_active or loop_s is None or loop_e is None or loop_e <= loop_s:
+            return None
+        return float(loop_s), float(loop_e)
+
+    def _apply_range(self, start_str: str, end_str: str):
+        """Sets the inputs and updates the snapshot used to detect manual edits."""
+        self.range_start_var.set(start_str)
+        self.range_end_var.set(end_str)
+        self._last_synced_start_str = start_str
+        self._last_synced_end_str = end_str
+
+    def _sync_range_from_timeline(self):
+        """Manual override: pulls the latest loop bounds (or full file) into the inputs."""
+        loop = self._read_timeline_loop()
+        if loop is not None:
+            start_s, end_s = loop
+        else:
+            start_s = 0.0
+            end_s = self._source_duration if self._source_duration > 0 else 0.0
+        self._apply_range(self._format_seconds(start_s), self._format_seconds(end_s))
+        self._set_auto_sync_indicator(active=True)
+
+    def _set_auto_sync_indicator(self, active: bool):
+        widget = getattr(self, "auto_sync_label", None)
+        if widget is None:
+            return
+        try:
+            if active:
+                widget.configure(text="(auto-sync: on)", text_color="#6dd3a0")
+            else:
+                widget.configure(text="(auto-sync: paused — manual edit)", text_color="#d4a55a")
+        except Exception:
+            pass
+
+    def _auto_sync_tick(self):
+        """Polls the player loop and mirrors it into the inputs while the user hasn't typed."""
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+
+        loop = self._read_timeline_loop()
+        if loop is not None:
+            new_start_str = self._format_seconds(loop[0])
+            new_end_str = self._format_seconds(loop[1])
+            current_start = self.range_start_var.get()
+            current_end = self.range_end_var.get()
+            user_dirty = (
+                current_start != self._last_synced_start_str
+                or current_end != self._last_synced_end_str
+            )
+            if user_dirty:
+                self._set_auto_sync_indicator(active=False)
+            else:
+                if (
+                    new_start_str != self._last_synced_start_str
+                    or new_end_str != self._last_synced_end_str
+                ):
+                    self._apply_range(new_start_str, new_end_str)
+                self._set_auto_sync_indicator(active=True)
+        else:
+            current_start = self.range_start_var.get()
+            current_end = self.range_end_var.get()
+            user_dirty = (
+                current_start != self._last_synced_start_str
+                or current_end != self._last_synced_end_str
+            )
+            self._set_auto_sync_indicator(active=not user_dirty)
+
+        try:
+            self._auto_sync_after_id = self.after(300, self._auto_sync_tick)
+        except Exception:
+            self._auto_sync_after_id = None
+
+    def _on_close(self):
+        if self._auto_sync_after_id is not None:
+            try:
+                self.after_cancel(self._auto_sync_after_id)
+            except Exception:
+                pass
+            self._auto_sync_after_id = None
+        self.destroy()
+
+    def _on_destroy_event(self, event):
+        if event.widget is self and self._auto_sync_after_id is not None:
+            try:
+                self.after_cancel(self._auto_sync_after_id)
+            except Exception:
+                pass
+            self._auto_sync_after_id = None
 
     def apply_preset(self, preset_name):
         preset = self.presets[preset_name]
@@ -106,16 +417,66 @@ class VideoExportDialog(ctk.CTkToplevel):
 
     def start_export(self):
         try:
-            settings = {
-                "ext": self.ext_var.get(),
-                "width": int(self.width_var.get()),
-                "height": int(self.height_var.get()),
-                "fps": float(self.fps_var.get()),
-                "start_time": self.loop_start,
-                "end_time": self.loop_end
-            }
+            try:
+                start_time = self._parse_time_str(self.range_start_var.get())
+                end_time = self._parse_time_str(self.range_end_var.get())
+            except ValueError as ve:
+                messagebox.showerror(
+                    "Invalid range",
+                    f"Could not parse Start/End time: {ve}\n\nUse HH:MM:SS.mmm or seconds.",
+                )
+                return
+
+            if end_time <= start_time:
+                messagebox.showerror(
+                    "Invalid range",
+                    "End time must be greater than Start time.",
+                )
+                return
+
+            if self._source_duration > 0:
+                eps = 0.05  # tiny tolerance: typed values may be rounded ms
+                if start_time < 0 or end_time > self._source_duration + eps:
+                    messagebox.showerror(
+                        "Invalid range",
+                        f"Range must be within 00:00:00.000 — "
+                        f"{self._format_seconds(self._source_duration)}.",
+                    )
+                    return
+
+            # If the range covers (almost) the whole source, treat as full-file export.
+            full_file = (
+                self._source_duration > 0
+                and start_time <= 0.001
+                and end_time >= self._source_duration - 0.05
+            )
+            export_start = None if full_file else start_time
+            export_end = None if full_file else end_time
+
+            if self.lossless_var.get():
+                # Lossless mode: stream copy + keyframe cut. Container choice drives compatibility.
+                source_ext = (os.path.splitext(self.video_path)[1] or ".mp4").lower()
+                container_choice = self.lossless_container_var.get()
+                out_ext = ".mkv" if container_choice.startswith("MKV") else source_ext
+                settings = {
+                    "mode": "original",
+                    "ext": out_ext,
+                    "start_time": export_start,
+                    "end_time": export_end,
+                }
+            else:
+                settings = {
+                    "mode": "custom",
+                    "ext": self.ext_var.get(),
+                    "width": int(self.width_var.get()),
+                    "height": int(self.height_var.get()),
+                    "fps": float(self.fps_var.get()),
+                    "start_time": export_start,
+                    "end_time": export_end,
+                }
+            # Keep the dialog open after kicking off the export so the user can
+            # tweak settings and re-export without re-opening the menu.
             self.convert_callback(self.video_path, settings)
-            self.destroy()
         except Exception as e:
             messagebox.showerror("Invalid input", str(e))
 
@@ -314,6 +675,17 @@ class TimelineBarWidget(ctk.CTkFrame):
                 if hasattr(self, "loop_button"): self.loop_button.config(text="🔁 Loop: ON")
                 active_player.set_loop_start_from_timeline(self.loop_start)
                 active_player.set_loop_end_from_timeline(self.loop_end)
+                self.loop_start = getattr(active_player, "loop_start", self.loop_start)
+                self.loop_end = getattr(active_player, "loop_end", self.loop_end)
+                self.redraw_timeline()
+
+            def cmd_toggle_loop():
+                active_player.toggle_loop()
+                self.loop_start = getattr(active_player, "loop_start", self.loop_start)
+                self.loop_end = getattr(active_player, "loop_end", self.loop_end)
+                if hasattr(self, "loop_button"):
+                    self.loop_button.config(text=f"🔁 Loop: {'ON' if getattr(active_player, 'loop_active', False) else 'OFF'}")
+                self.redraw_timeline()
 
             menu.add_command(label="Set LOOP START", command=cmd_set_loop_start)
             menu.add_command(label="Set LOOP END", command=cmd_set_loop_end)
@@ -324,15 +696,15 @@ class TimelineBarWidget(ctk.CTkFrame):
 
             loop_state = "Disable" if getattr(active_player, "loop_active", False) else "Enable"
             if hasattr(active_player, "toggle_loop"):
-                menu.add_command(label=f"{loop_state} LOOP", command=active_player.toggle_loop)
+                menu.add_command(label=f"{loop_state} LOOP", command=cmd_toggle_loop)
 
         # --- EXPORT SELECTION ---
         loop_s = getattr(active_player, "loop_start", None) if active_player else getattr(self, "loop_start", None)
         loop_e = getattr(active_player, "loop_end", None) if active_player else getattr(self, "loop_end", None)
         
         # Pojistka pro pripad, ze prehravac ma smazany loop_start (ma hodnotu None), tak vezmeme lokální
-        if not loop_s and self.loop_start: loop_s = self.loop_start
-        if not loop_e and self.loop_end: loop_e = self.loop_end
+        if loop_s is None and self.loop_start is not None: loop_s = self.loop_start
+        if loop_e is None and self.loop_end is not None: loop_e = self.loop_end
         
         if loop_s is not None and loop_e is not None:
             menu.add_separator()
@@ -625,11 +997,15 @@ class TimelineBarWidget(ctk.CTkFrame):
                 if sel_len < dur - 0.5:
                     start_str = self.format_time(self.loop_start).split('.')[0]
                     end_str = self.format_time(self.loop_end).split('.')[0]
+                    length_secs = int(round(sel_len))
                     
                     state_str = "ON" if loop_active else "OFF"
                     color = "lime" if loop_active else "#FFA500"  # Zelená pokud běží, oranžová pokud je to jen výběr
                     
-                    self.selection_label.configure(text=f"Loop {state_str}  |  {start_str} - {end_str}", text_color=color)
+                    self.selection_label.configure(
+                        text=f"Loop {state_str}  |  Range: {start_str} - {end_str}  |  Length: {length_secs}s",
+                        text_color=color
+                    )
                 else:
                     self.selection_label.configure(text="")
             else:
@@ -702,7 +1078,14 @@ class TimelineBarWidget(ctk.CTkFrame):
             def run_export(path, settings):
                 self.convert_video_format(path, settings)
 
-            VideoExportDialog(self.master, video_path, convert_callback=run_export, loop_start=loop_start, loop_end=loop_end)
+            VideoExportDialog(
+                self.master,
+                video_path,
+                convert_callback=run_export,
+                loop_start=loop_start,
+                loop_end=loop_end,
+                controller=self.controller,
+            )
 
   
 
@@ -717,9 +1100,13 @@ class TimelineBarWidget(ctk.CTkFrame):
         loop_end = getattr(active_player, "loop_end", None) if active_player else None
         loop_active = getattr(active_player, "loop_active", False) if active_player else False
 
+        # Pass loop bounds only when the loop is actually active; otherwise export the whole video.
+        export_loop_start = loop_start if loop_active else None
+        export_loop_end = loop_end if loop_active else None
+
         menu = create_menu(self, self)
-        menu.add_command(label="Open Export Dialog", 
-                         command=lambda: self.open_export_dialog(self.video_path, loop_start, loop_end, loop_active))
+        menu.add_command(label="Open Export Dialog",
+                         command=lambda: self.open_export_dialog(self.video_path, export_loop_start, export_loop_end))
         
         x = self.convert_btn.winfo_rootx()
         y = self.convert_btn.winfo_rooty() + self.convert_btn.winfo_height()
@@ -875,15 +1262,60 @@ class TimelineBarWidget(ctk.CTkFrame):
         return x
 
 
+    # Containers that are well known to fail or play black when remuxed lossless
+    # into the same container (typically due to broken/missing PTS, weird stream layout, etc.).
+    _FRAGILE_LOSSLESS_CONTAINERS = (
+        ".mpg", ".mpeg", ".vob", ".m2v", ".m1v", ".ts", ".mts", ".m2ts",
+    )
+
     def convert_video_format(self, input_path, settings):
         if not input_path or not os.path.isfile(input_path):
             messagebox.showerror("Error", "No video selected.")
             return
 
+        mode = settings.get("mode", "custom")
         target_ext = settings["ext"]
+
+        # Proactive compatibility warning for known-fragile lossless targets.
+        # We only ask when the user picked "Same as source" (i.e. target_ext == src_ext);
+        # if they already chose MKV explicitly, this is silently skipped.
+        if mode == "original":
+            src_ext = (os.path.splitext(input_path)[1] or "").lower()
+            if src_ext in self._FRAGILE_LOSSLESS_CONTAINERS and target_ext == src_ext:
+                choice = messagebox.askyesnocancel(
+                    "Container compatibility warning",
+                    (
+                        f"Saving a lossless cut as {src_ext} often produces a file "
+                        f"that won't play (no readable video stream).\n\n"
+                        f"MKV is a safer container that keeps the original quality.\n\n"
+                        f"  Yes  -  Save as MKV (recommended)\n"
+                        f"  No   -  Save as {src_ext} anyway\n"
+                        f"  Cancel  -  Abort export"
+                    ),
+                )
+                if choice is None:
+                    logging.info("[Export][Lossless] User cancelled container-compat dialog.")
+                    return
+                if choice:
+                    logging.info(
+                        "[Export][Lossless] User accepted MKV fallback for fragile container '%s'.",
+                        src_ext,
+                    )
+                    target_ext = ".mkv"
+                    settings["ext"] = ".mkv"
+                else:
+                    logging.info(
+                        "[Export][Lossless] User chose to keep fragile container '%s' anyway.",
+                        src_ext,
+                    )
+
+        suffix = "_cut" if mode == "original" else "_export"
+        base_name = os.path.splitext(os.path.basename(input_path))[0]
+
         save_path = filedialog.asksaveasfilename(
             defaultextension=target_ext,
-            filetypes=[(f"{target_ext.upper()} files", f"*{target_ext}")]
+            initialfile=f"{base_name}{suffix}{target_ext}",
+            filetypes=[(f"{target_ext.upper()} files", f"*{target_ext}")],
         )
         if not save_path:
             return
@@ -902,6 +1334,10 @@ class TimelineBarWidget(ctk.CTkFrame):
         def set_status(msg):
             if status_bar:
                 self.after(0, lambda m=msg: status_bar.set_action_message(m))
+
+        if settings.get("mode") == "original":
+            self._convert_worker_lossless(input_path, save_path, settings, video_name, set_status)
+            return
 
         cap = None
         out = None
@@ -968,6 +1404,228 @@ class TimelineBarWidget(ctk.CTkFrame):
                 cap.release()
             if out is not None:
                 out.release()
+
+    def _convert_worker_lossless(self, input_path, save_path, settings, video_name, set_status):
+        """
+        Lossless cut via FFmpeg stream copy (LosslessCut-style "keyframe cut").
+        No re-encoding: bitrate, resolution, fps and codec are preserved.
+        Cut points snap to the nearest preceding keyframe in the source.
+        """
+        status_bar = getattr(self.controller, "status_bar", None)
+        proc = None
+        stderr_thread = None
+        stderr_lines: list[str] = []
+        try:
+            try:
+                ffmpeg_bin = get_ffmpeg_path()
+            except FileNotFoundError as fnf:
+                self.after(0, lambda err=str(fnf): messagebox.showerror("Export Error", err))
+                set_status(f"Export failed: {fnf}")
+                return
+
+            start_time = settings.get("start_time")
+            end_time = settings.get("end_time")
+
+            # Total duration of the segment we are exporting (for progress %).
+            total_seconds = None
+            if start_time is not None and end_time is not None and end_time > start_time:
+                total_seconds = float(end_time) - float(start_time)
+            else:
+                try:
+                    src_total = float(get_video_duration_mediainfo(input_path) or 0.0)
+                except Exception:
+                    src_total = 0.0
+                if src_total > 0:
+                    s = float(start_time) if start_time is not None else 0.0
+                    e = float(end_time) if end_time is not None else src_total
+                    total_seconds = max(e - s, 0.0) or None
+
+            target_ext = (os.path.splitext(save_path)[1] or "").lower()
+
+            vinfo = probe_first_video_stream(input_path)
+            codec_name = (vinfo or {}).get("codec_name") or ""
+            codec_name_lower = codec_name.lower()
+
+            if not codec_name_lower:
+                err_msg = (
+                    "Lossless export needs a video stream, but none was detected in this file.\n"
+                    "(ffprobe could not read a video track.)"
+                )
+                logging.error("[Export][Lossless] %s for %s", err_msg, input_path)
+                self.after(0, lambda m=err_msg: messagebox.showerror("Export Error", m))
+                set_status("Export failed: no video track")
+                return
+
+            # Input seek (-ss BEFORE -i) — fast and snaps to the nearest preceding keyframe.
+            # This is what LosslessCut calls "Keyframe cut" and is the safe default for stream copy:
+            # the output always starts on a real I-frame, so decoders never see mid-GOP garbage.
+            #
+            # +genpts on the INPUT generates PTS where the source has none — old MPEG-PS / VOB / TS
+            # streams often lack PTS on non-key packets, and the Matroska muxer (and some others)
+            # refuse to write packets with unknown timestamps ("Invalid argument", code -22).
+            cmd = [
+                ffmpeg_bin,
+                "-hide_banner",
+                "-loglevel",
+                "warning",
+                "-y",
+                "-nostdin",
+                "-fflags",
+                "+genpts+igndts",
+            ]
+            if start_time is not None:
+                cmd += ["-ss", f"{float(start_time):.3f}"]
+            cmd += ["-i", input_path]
+            if end_time is not None:
+                # -t is interpreted relative to the seek point when -ss is before -i.
+                duration = float(end_time) - float(start_time or 0.0)
+                if duration > 0:
+                    cmd += ["-t", f"{duration:.3f}"]
+
+            # Map first video + all audio only (skip subtitles/extra video like cover art).
+            cmd += [
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a?",
+                "-ignore_unknown",
+                "-c",
+                "copy",
+                "-avoid_negative_ts",
+                "make_zero",
+            ]
+
+            # Container-specific tweaks.
+            if target_ext in (".mp4", ".mov", ".m4v", ".m4a"):
+                # HEVC needs hvc1 (not hev1) for wide playback in DirectShow / Apple stacks.
+                if codec_name_lower in ("hevc", "h265"):
+                    cmd += ["-tag:v", "hvc1"]
+                # moov at start: faster open + survives interrupted writes.
+                cmd += ["-movflags", "+faststart"]
+
+            if codec_name_lower == "vp9" and target_ext == ".mp4":
+                logging.warning(
+                    "[Export][Lossless] VP9 in MP4 has poor player support; MKV is recommended."
+                )
+
+            cmd += ["-progress", "pipe:1", save_path]
+
+            logging.info(f"[Export][Lossless] {' '.join(cmd)}")
+            set_status(f"Exporting (lossless): {video_name}  0%")
+
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                startupinfo=_SUBPROCESS_STARTUPINFO,
+            )
+
+            # Drain stderr in a background thread so the OS pipe buffer never fills
+            # and blocks ffmpeg mid-write (which would leave the MP4 without a moov atom).
+            def _drain_stderr(pipe, sink):
+                try:
+                    for line in pipe:
+                        sink.append(line.rstrip("\r\n"))
+                except Exception:
+                    pass
+
+            if proc.stderr is not None:
+                stderr_thread = threading.Thread(
+                    target=_drain_stderr,
+                    args=(proc.stderr, stderr_lines),
+                    daemon=True,
+                )
+                stderr_thread.start()
+
+            last_pct = -1
+            time_re = re.compile(r"^out_time_ms=(-?\d+)")
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                m = time_re.match(line)
+                if m and total_seconds:
+                    out_us = int(m.group(1))
+                    if out_us < 0:
+                        continue
+                    out_seconds = out_us / 1_000_000.0
+                    pct = int(out_seconds / total_seconds * 100)
+                    pct = max(0, min(100, pct))
+                    if pct != last_pct:
+                        last_pct = pct
+                        set_status(f"Exporting (lossless): {video_name}  {pct}%")
+                elif line == "progress=end":
+                    break
+
+            return_code = proc.wait()
+            if stderr_thread is not None:
+                stderr_thread.join(timeout=5)
+
+            if stderr_lines:
+                # Always log the full stderr; it is invaluable for diagnosing broken outputs.
+                logging.warning(
+                    "[Export][Lossless] FFmpeg stderr (%d lines):\n%s",
+                    len(stderr_lines),
+                    "\n".join(stderr_lines[-50:]),
+                )
+
+            # Sanity-check the output: a successful copy should never be just a few KB.
+            try:
+                out_size = os.path.getsize(save_path) if os.path.isfile(save_path) else 0
+            except OSError:
+                out_size = 0
+
+            if return_code != 0:
+                err_msg = "\n".join(stderr_lines[-10:]) or f"FFmpeg exited with code {return_code}"
+                logging.error(f"[Export][Lossless] FFmpeg failed (rc={return_code}): {err_msg}")
+                set_status(f"Export failed: {video_name}")
+                self.after(0, lambda msg=err_msg: messagebox.showerror("Export Error", msg))
+                return
+
+            if out_size < 64 * 1024:
+                detail = "\n".join(stderr_lines[-10:]) or "(no stderr captured)"
+                err_msg = (
+                    f"Output file looks corrupted ({out_size} bytes).\n"
+                    f"The source may be damaged or incompatible with stream copy.\n\n"
+                    f"FFmpeg said:\n{detail}"
+                )
+                logging.error(f"[Export][Lossless] Suspicious output size: {out_size} bytes for {save_path}")
+                set_status(f"Export failed: {video_name} (corrupted output)")
+                self.after(0, lambda msg=err_msg: messagebox.showerror("Export Error", msg))
+                return
+
+            out_vinfo = probe_first_video_stream(save_path)
+            if not out_vinfo or not out_vinfo.get("codec_name"):
+                detail = "\n".join(stderr_lines[-15:]) or "(no FFmpeg stderr)"
+                err_msg = (
+                    "Export finished, but the output file has no readable video stream.\n"
+                    "Try turning off lossless and re-encoding, or remux to MKV.\n\n"
+                    f"FFmpeg stderr (last lines):\n{detail}"
+                )
+                logging.error("[Export][Lossless] Output has no video stream: %s", save_path)
+                set_status(f"Export failed: {video_name} (no video in output)")
+                self.after(0, lambda msg=err_msg: messagebox.showerror("Export Error", msg))
+                return
+
+            set_status(f"Export complete: {video_name}")
+            self.after(0, lambda: messagebox.showinfo("Done", f"Video saved to:\n{save_path}"))
+            if status_bar:
+                self.after(5000, status_bar.clear_action_message)
+
+        except Exception as e:
+            logging.error(f"[Export][Lossless] Error during export: {e}")
+            set_status(f"Export failed: {e}")
+            self.after(0, lambda err=str(e): messagebox.showerror("Export Error", err))
+        finally:
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            if stderr_thread is not None and stderr_thread.is_alive():
+                stderr_thread.join(timeout=2)
 
 
     def set_num_thumbs(self, num):
@@ -1104,6 +1762,8 @@ class TimelineBarWidget(ctk.CTkFrame):
         if active_player and hasattr(active_player, "toggle_loop"):
             active_player.toggle_loop()
             new_loop_state = getattr(active_player, "loop_active", False)
+            self.loop_start = getattr(active_player, "loop_start", self.loop_start)
+            self.loop_end = getattr(active_player, "loop_end", self.loop_end)
             self.loop_button.config(text=f"🔁 Loop: {'ON' if new_loop_state else 'OFF'}")
             self.redraw_timeline()
         else:
@@ -1352,9 +2012,18 @@ class TimelineBarWidget(ctk.CTkFrame):
             self.draw_markers_above_thumbs(x0, x1, y_bar_top, duration)
 
         active_player = getattr(self.controller, "current_video_window", None) or getattr(self.controller, "active_player", None)
-        start_time = getattr(self, "loop_start", None)
-        end_time = getattr(self, "loop_end", None)
-        is_repeating = active_player and getattr(active_player, "loop_active", False)
+        is_repeating = bool(active_player and getattr(active_player, "loop_active", False))
+
+        # Always prefer loop bounds from active player when loop is enabled.
+        if is_repeating:
+            start_time = getattr(active_player, "loop_start", None)
+            end_time = getattr(active_player, "loop_end", None)
+            if start_time is None or end_time is None:
+                start_time = getattr(self, "loop_start", None)
+                end_time = getattr(self, "loop_end", None)
+        else:
+            start_time = getattr(self, "loop_start", None)
+            end_time = getattr(self, "loop_end", None)
 
         # --- SELECTION STRIP (Updated height to 20) ---
         if start_time is not None and end_time is not None:
