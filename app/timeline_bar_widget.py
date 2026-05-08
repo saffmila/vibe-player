@@ -11,6 +11,7 @@ import os
 import queue
 import re
 import subprocess
+import tempfile
 import threading
 import tkinter as tk
 from functools import partial
@@ -41,7 +42,17 @@ class VideoExportDialog(ctk.CTkToplevel):
     """
     Simple dialog for selecting video export preset or custom settings.
     """
-    def __init__(self, parent, video_path, convert_callback, loop_start=None, loop_end=None, controller=None):
+    def __init__(
+        self,
+        parent,
+        video_path,
+        convert_callback,
+        loop_start=None,
+        loop_end=None,
+        controller=None,
+        segments=None,
+        active_segment_index=None,
+    ):
             """
             Initializes the export dialog. 
             Sets up the UI elements, variables, and dynamically adjusts window size.
@@ -59,6 +70,8 @@ class VideoExportDialog(ctk.CTkToplevel):
             self.loop_start = loop_start
             self.loop_end = loop_end
             self.controller = controller
+            self.segments = list(segments or [])
+            self.active_segment_index = active_segment_index if isinstance(active_segment_index, int) else None
 
             self.resizable(True, True)
 
@@ -83,26 +96,7 @@ class VideoExportDialog(ctk.CTkToplevel):
             except Exception:
                 self._source_duration = 0.0
 
-            initial_start = float(loop_start) if loop_start is not None else 0.0
-            initial_end = (
-                float(loop_end)
-                if loop_end is not None
-                else (self._source_duration if self._source_duration > 0 else 0.0)
-            )
-            initial_start_str = self._format_seconds(initial_start)
-            initial_end_str = self._format_seconds(initial_end)
-            self.range_start_var = ctk.StringVar(value=initial_start_str)
-            self.range_end_var = ctk.StringVar(value=initial_end_str)
-            self.range_duration_var = ctk.StringVar(
-                value=self._format_seconds(max(initial_end - initial_start, 0.0))
-            )
-
-            # Snapshot of the values we last pushed FROM the timeline INTO the inputs.
-            # Auto-sync only overwrites the inputs while they still match this snapshot,
-            # so a user-edited range is never silently overwritten.
-            self._last_synced_start_str = initial_start_str
-            self._last_synced_end_str = initial_end_str
-            self._auto_sync_after_id = None
+            self.export_mode_var = ctk.StringVar(value="active")
 
             # --- Lossless cut switch (LosslessCut-style, no recompression) ---
             lossless_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -151,51 +145,76 @@ class VideoExportDialog(ctk.CTkToplevel):
 
             ctk.CTkCheckBox(self, text="Include audio (not supported yet)", variable=self.sound_var, state="disabled").pack(pady=5)
 
-            # --- Export range section ---
-            range_label_color = "#00bfff" if (self.loop_start is not None and self.loop_end is not None) else "#aaaaaa"
-            range_header = (
-                "Export range (loop selection)"
-                if self.loop_start is not None and self.loop_end is not None
-                else "Export range (full video)"
+            # --- Segment-based export selection ---
+            active_seg = self._get_active_segment()
+            active_seg_len = 0.0
+            if active_seg:
+                active_seg_len = max(0.0, float(active_seg["end"]) - float(active_seg["start"]))
+            seg_count = len(self.segments)
+            total_seg_len = 0.0
+            for seg in self.segments:
+                try:
+                    s = float(seg.get("start"))
+                    e = float(seg.get("end"))
+                except (TypeError, ValueError):
+                    continue
+                if e > s:
+                    total_seg_len += (e - s)
+            if not active_seg and seg_count > 0:
+                self.export_mode_var.set("all_separate")
+
+            ctk.CTkLabel(self, text="Export scope", text_color="#00bfff").pack(pady=(8, 2))
+            export_scope_frame = ctk.CTkFrame(self)
+            export_scope_frame.pack(pady=2, padx=10, fill="x")
+            active_label = (
+                f"Export Active Cut only ({active_seg_len:.1f}s)"
+                if active_seg
+                else "Export Active Cut only (no active cut)"
             )
-            ctk.CTkLabel(self, text=range_header, text_color=range_label_color).pack(pady=(8, 2))
-
-            range_frame = ctk.CTkFrame(self)
-            range_frame.pack(pady=2, padx=10, fill="x")
-            self._add_time_row(range_frame, "From:", self.range_start_var)
-            self._add_time_row(range_frame, "To:", self.range_end_var)
-
-            duration_row = ctk.CTkFrame(range_frame, fg_color="transparent")
-            duration_row.pack(fill="x", pady=2)
-            ctk.CTkLabel(duration_row, text="Duration:", width=120, anchor="w").pack(side="left")
-            self.duration_label = ctk.CTkLabel(
-                duration_row, textvariable=self.range_duration_var, anchor="w", text_color="#cccccc"
+            all_label = f"Export All Cuts (as separate files) ({seg_count} cuts)"
+            self.active_cut_radio = ctk.CTkRadioButton(
+                export_scope_frame,
+                text=active_label,
+                variable=self.export_mode_var,
+                value="active",
             )
-            self.duration_label.pack(side="left", fill="x", expand=True)
-
-            sync_row = ctk.CTkFrame(self, fg_color="transparent")
-            sync_row.pack(pady=(2, 4), padx=10, fill="x")
-            ctk.CTkButton(
-                sync_row,
-                text="Reset to timeline loop",
-                width=180,
-                command=self._sync_range_from_timeline,
-            ).pack(side="left")
-            self.auto_sync_label = ctk.CTkLabel(
-                sync_row,
-                text="(auto-sync: on)",
-                text_color="#6dd3a0",
+            self.active_cut_radio.pack(anchor="w", padx=10, pady=(6, 2))
+            self.all_cuts_separate_radio = ctk.CTkRadioButton(
+                export_scope_frame,
+                text=f"Export All Cuts (as separate files) ({seg_count} cuts)",
+                variable=self.export_mode_var,
+                value="all_separate",
+            )
+            self.all_cuts_separate_radio.pack(anchor="w", padx=10, pady=(2, 2))
+            self.all_cuts_merged_radio = ctk.CTkRadioButton(
+                export_scope_frame,
+                text=f"Export All Cuts (Merged into a single video) ({seg_count} cuts)",
+                variable=self.export_mode_var,
+                value="all_merged",
+            )
+            self.all_cuts_merged_radio.pack(anchor="w", padx=10, pady=(2, 6))
+            self.export_duration_var = ctk.StringVar(value="")
+            self.export_duration_label = ctk.CTkLabel(
+                export_scope_frame,
+                textvariable=self.export_duration_var,
+                text_color="#bfc7d5",
                 font=("", 10),
+                anchor="w",
             )
-            self.auto_sync_label.pack(side="left", padx=(8, 0))
+            self.export_duration_label.pack(fill="x", padx=10, pady=(0, 6))
+            if not active_seg:
+                self.active_cut_radio.configure(state="disabled")
+                if seg_count <= 0:
+                    self.all_cuts_separate_radio.configure(state="disabled")
+                    self.all_cuts_merged_radio.configure(state="disabled")
+            self._active_seg_len_for_ui = active_seg_len
+            self._total_seg_len_for_ui = total_seg_len
+            self.export_mode_var.trace_add("write", lambda *_: self._update_export_duration_label())
+            self._update_export_duration_label()
 
-            self.range_start_var.trace_add("write", lambda *_: self._update_duration_label())
-            self.range_end_var.trace_add("write", lambda *_: self._update_duration_label())
-
-            # Start polling the timeline for loop changes; cleanly cancelled on close.
+            # Keep close/destroy handlers only.
             self.protocol("WM_DELETE_WINDOW", self._on_close)
             self.bind("<Destroy>", self._on_destroy_event, add="+")
-            self.after(300, self._auto_sync_tick)
 
             # Bottom action bar — pinned to the bottom so it's always visible
             # even when the window is resized smaller than the content.
@@ -294,119 +313,41 @@ class VideoExportDialog(ctk.CTkToplevel):
             raise ValueError(f"negative time: {value}")
         return hours * 3600 + minutes * 60 + seconds
 
-    def _update_duration_label(self):
-        try:
-            start = self._parse_time_str(self.range_start_var.get())
-            end = self._parse_time_str(self.range_end_var.get())
-            duration = max(end - start, 0.0)
-            self.range_duration_var.set(self._format_seconds(duration))
-            self.duration_label.configure(text_color="#cccccc")
-        except (ValueError, AttributeError):
-            self.range_duration_var.set("--:--:--.---")
-            try:
-                self.duration_label.configure(text_color="#ff8080")
-            except Exception:
-                pass
-
-    def _read_timeline_loop(self):
-        """Returns (start, end) in seconds if a loop is active on the player, else None."""
-        active_player = getattr(self.controller, "current_video_window", None) if self.controller else None
-        if not active_player:
+    def _get_active_segment(self):
+        idx = self.active_segment_index
+        if idx is None or not (0 <= idx < len(self.segments)):
             return None
-        loop_s = getattr(active_player, "loop_start", None)
-        loop_e = getattr(active_player, "loop_end", None)
-        loop_active = bool(getattr(active_player, "loop_active", False))
-        if not loop_active or loop_s is None or loop_e is None or loop_e <= loop_s:
+        seg = self.segments[idx]
+        if not isinstance(seg, dict):
             return None
-        return float(loop_s), float(loop_e)
+        s = seg.get("start")
+        e = seg.get("end")
+        if s is None or e is None:
+            return None
+        try:
+            s = float(s)
+            e = float(e)
+        except (TypeError, ValueError):
+            return None
+        if e <= s:
+            return None
+        return {"start": s, "end": e}
 
-    def _apply_range(self, start_str: str, end_str: str):
-        """Sets the inputs and updates the snapshot used to detect manual edits."""
-        self.range_start_var.set(start_str)
-        self.range_end_var.set(end_str)
-        self._last_synced_start_str = start_str
-        self._last_synced_end_str = end_str
-
-    def _sync_range_from_timeline(self):
-        """Manual override: pulls the latest loop bounds (or full file) into the inputs."""
-        loop = self._read_timeline_loop()
-        if loop is not None:
-            start_s, end_s = loop
+    def _update_export_duration_label(self):
+        mode = self.export_mode_var.get()
+        if mode == "active":
+            duration = float(getattr(self, "_active_seg_len_for_ui", 0.0))
+            self.export_duration_var.set(f"Duration: {duration:.1f}s (active cut)")
         else:
-            start_s = 0.0
-            end_s = self._source_duration if self._source_duration > 0 else 0.0
-        self._apply_range(self._format_seconds(start_s), self._format_seconds(end_s))
-        self._set_auto_sync_indicator(active=True)
-
-    def _set_auto_sync_indicator(self, active: bool):
-        widget = getattr(self, "auto_sync_label", None)
-        if widget is None:
-            return
-        try:
-            if active:
-                widget.configure(text="(auto-sync: on)", text_color="#6dd3a0")
-            else:
-                widget.configure(text="(auto-sync: paused — manual edit)", text_color="#d4a55a")
-        except Exception:
-            pass
-
-    def _auto_sync_tick(self):
-        """Polls the player loop and mirrors it into the inputs while the user hasn't typed."""
-        try:
-            if not self.winfo_exists():
-                return
-        except Exception:
-            return
-
-        loop = self._read_timeline_loop()
-        if loop is not None:
-            new_start_str = self._format_seconds(loop[0])
-            new_end_str = self._format_seconds(loop[1])
-            current_start = self.range_start_var.get()
-            current_end = self.range_end_var.get()
-            user_dirty = (
-                current_start != self._last_synced_start_str
-                or current_end != self._last_synced_end_str
-            )
-            if user_dirty:
-                self._set_auto_sync_indicator(active=False)
-            else:
-                if (
-                    new_start_str != self._last_synced_start_str
-                    or new_end_str != self._last_synced_end_str
-                ):
-                    self._apply_range(new_start_str, new_end_str)
-                self._set_auto_sync_indicator(active=True)
-        else:
-            current_start = self.range_start_var.get()
-            current_end = self.range_end_var.get()
-            user_dirty = (
-                current_start != self._last_synced_start_str
-                or current_end != self._last_synced_end_str
-            )
-            self._set_auto_sync_indicator(active=not user_dirty)
-
-        try:
-            self._auto_sync_after_id = self.after(300, self._auto_sync_tick)
-        except Exception:
-            self._auto_sync_after_id = None
+            duration = float(getattr(self, "_total_seg_len_for_ui", 0.0))
+            self.export_duration_var.set(f"Duration: {duration:.1f}s (sum of all cuts)")
 
     def _on_close(self):
-        if self._auto_sync_after_id is not None:
-            try:
-                self.after_cancel(self._auto_sync_after_id)
-            except Exception:
-                pass
-            self._auto_sync_after_id = None
         self.destroy()
 
     def _on_destroy_event(self, event):
-        if event.widget is self and self._auto_sync_after_id is not None:
-            try:
-                self.after_cancel(self._auto_sync_after_id)
-            except Exception:
-                pass
-            self._auto_sync_after_id = None
+        # No periodic sync timers are used in segment mode.
+        return
 
     def apply_preset(self, preset_name):
         preset = self.presets[preset_name]
@@ -417,41 +358,29 @@ class VideoExportDialog(ctk.CTkToplevel):
 
     def start_export(self):
         try:
-            try:
-                start_time = self._parse_time_str(self.range_start_var.get())
-                end_time = self._parse_time_str(self.range_end_var.get())
-            except ValueError as ve:
-                messagebox.showerror(
-                    "Invalid range",
-                    f"Could not parse Start/End time: {ve}\n\nUse HH:MM:SS.mmm or seconds.",
-                )
+            active_seg = self._get_active_segment()
+            export_mode = self.export_mode_var.get()
+            if export_mode == "active" and active_seg is None:
+                messagebox.showerror("No active cut", "No active cut is selected for export.")
                 return
-
-            if end_time <= start_time:
-                messagebox.showerror(
-                    "Invalid range",
-                    "End time must be greater than Start time.",
-                )
+            if export_mode in ("all_separate", "all_merged") and not self.segments:
+                messagebox.showerror("No cuts", "There are no cuts to export.")
                 return
-
-            if self._source_duration > 0:
-                eps = 0.05  # tiny tolerance: typed values may be rounded ms
-                if start_time < 0 or end_time > self._source_duration + eps:
-                    messagebox.showerror(
-                        "Invalid range",
-                        f"Range must be within 00:00:00.000 — "
-                        f"{self._format_seconds(self._source_duration)}.",
-                    )
-                    return
-
-            # If the range covers (almost) the whole source, treat as full-file export.
-            full_file = (
-                self._source_duration > 0
-                and start_time <= 0.001
-                and end_time >= self._source_duration - 0.05
-            )
-            export_start = None if full_file else start_time
-            export_end = None if full_file else end_time
+            export_start = active_seg["start"] if (export_mode == "active" and active_seg) else None
+            export_end = active_seg["end"] if (export_mode == "active" and active_seg) else None
+            serializable_segments = []
+            for seg in self.segments:
+                s = seg.get("start")
+                e = seg.get("end")
+                if s is None or e is None:
+                    continue
+                try:
+                    s = float(s)
+                    e = float(e)
+                except (TypeError, ValueError):
+                    continue
+                if e > s:
+                    serializable_segments.append({"start": s, "end": e})
 
             if self.lossless_var.get():
                 # Lossless mode: stream copy + keyframe cut. Container choice drives compatibility.
@@ -463,6 +392,8 @@ class VideoExportDialog(ctk.CTkToplevel):
                     "ext": out_ext,
                     "start_time": export_start,
                     "end_time": export_end,
+                    "export_mode": export_mode,
+                    "segments": serializable_segments,
                 }
             else:
                 settings = {
@@ -473,6 +404,8 @@ class VideoExportDialog(ctk.CTkToplevel):
                     "fps": float(self.fps_var.get()),
                     "start_time": export_start,
                     "end_time": export_end,
+                    "export_mode": export_mode,
+                    "segments": serializable_segments,
                 }
             # Keep the dialog open after kicking off the export so the user can
             # tweak settings and re-export without re-opening the menu.
@@ -516,8 +449,8 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.grid_columnconfigure(0, weight=1)
         self.loop_mode = False
         self.loop_drag = None
-        self.loop_start = 0
-        self.loop_end = None
+        self.segments = []
+        self.active_segment_index = None
         
         self.thumb_images = [] # This will now store PhotoImage objects.
         # self.THUMB_W, self.THUMB_H = 190, 130
@@ -534,6 +467,89 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.marker_canvas_ids = {}
         self.start_periodic_update()
         self._process_thumb_queue() # Start the queue checker loop
+
+    def _get_active_segment(self):
+        idx = getattr(self, "active_segment_index", None)
+        if idx is None:
+            return None
+        if not (0 <= idx < len(self.segments)):
+            self.active_segment_index = None
+            return None
+        seg = self.segments[idx]
+        if not isinstance(seg, dict):
+            return None
+        return seg
+
+    def _set_active_segment_bounds(self, start, end):
+        duration = self._get_current_duration() or 0.0
+        min_len = 0.1
+        if duration > 0:
+            start = max(0.0, min(float(start), duration))
+            end = max(0.0, min(float(end), duration))
+        else:
+            start = max(0.0, float(start))
+            end = max(0.0, float(end))
+        if end < start:
+            start, end = end, start
+        if end - start < min_len:
+            end = start + min_len
+            if duration > 0 and end > duration:
+                end = duration
+                start = max(0.0, end - min_len)
+        seg = self._get_active_segment()
+        if seg is not None:
+            seg["start"] = start
+            seg["end"] = end
+
+    @property
+    def loop_start(self):
+        seg = self._get_active_segment()
+        if seg is None:
+            return None
+        return seg.get("start")
+
+    @loop_start.setter
+    def loop_start(self, value):
+        if value is None:
+            seg = self._get_active_segment()
+            if seg is not None:
+                seg["start"] = None
+            return
+        seg = self._get_active_segment()
+        if seg is None:
+            start = max(0.0, float(value))
+            self.segments.append({"start": start, "end": start})
+            self.active_segment_index = len(self.segments) - 1
+            return
+        end_val = seg.get("end")
+        if end_val is None:
+            end_val = float(value)
+        self._set_active_segment_bounds(float(value), float(end_val))
+
+    @property
+    def loop_end(self):
+        seg = self._get_active_segment()
+        if seg is None:
+            return None
+        return seg.get("end")
+
+    @loop_end.setter
+    def loop_end(self, value):
+        if value is None:
+            seg = self._get_active_segment()
+            if seg is not None:
+                seg["end"] = None
+            return
+        seg = self._get_active_segment()
+        if seg is None:
+            end = max(0.0, float(value))
+            self.segments.append({"start": 0.0, "end": end})
+            self.active_segment_index = len(self.segments) - 1
+            return
+        start_val = seg.get("start")
+        if start_val is None:
+            start_val = float(value)
+        self._set_active_segment_bounds(float(start_val), float(value))
 
     def toggle_all_markers(self):
         any_off = any(not var.get() for var in self.marker_vars.values())
@@ -618,8 +634,29 @@ class TimelineBarWidget(ctk.CTkFrame):
         clicked_time = self.get_time_at_x(event.x)
         duration = self._get_current_duration()
         active_player = getattr(self.controller, "current_video_window", None)
+        seg_hit = self._get_segment_hover_at(event.x, event.y)
 
         menu = tk.Menu(self, tearoff=0, bg="#2b2b2b", fg="white", activebackground="#444")
+        if seg_hit is not None:
+            seg_idx = int(seg_hit["index"])
+
+            def _delete_segment(idx=seg_idx):
+                if not (0 <= idx < len(self.segments)):
+                    return
+                del self.segments[idx]
+                if not self.segments:
+                    self.active_segment_index = None
+                elif self.active_segment_index is None:
+                    self.active_segment_index = 0
+                elif self.active_segment_index == idx:
+                    self.active_segment_index = min(idx, len(self.segments) - 1)
+                elif self.active_segment_index > idx:
+                    self.active_segment_index -= 1
+                self.save_segments_for_path(self.video_path)
+                self.redraw_timeline()
+
+            menu.add_command(label=f"🗑 Delete Cut {seg_idx + 1}", command=_delete_segment)
+            menu.add_separator()
 
         # --- PLAYBACK ---
         menu.add_command(label=f"Play from here ({self.format_time(clicked_time)})",
@@ -709,7 +746,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         if loop_s is not None and loop_e is not None:
             menu.add_separator()
             menu.add_command(
-                label=f"🎬 Export Selection ({self.format_time(loop_s)} - {self.format_time(loop_e)})", 
+                label=f"🎬 Export Current Cut ({self.format_time(loop_s)} - {self.format_time(loop_e)})",
                 command=lambda s=loop_s, e=loop_e: self.open_export_dialog(self.video_path, s, e)
             )
 
@@ -858,9 +895,10 @@ class TimelineBarWidget(ctk.CTkFrame):
         """
         duration = self.timeline_manager.get_video_duration(self.video_path)
         if duration is not None:
-            self.loop_end = duration
+            self._cached_duration_value = duration
         else:
-            self.loop_end = 1  # Default loop end if duration is not available.
+            self._cached_duration_value = 1  # Default duration if duration is not available.
+        self._cached_duration_path = self.video_path
 
         # ---  INFO TOOLBAR ( GRID) ---
         # corner_radius=0 a padx=0 to nalepí úplně do stran
@@ -975,8 +1013,8 @@ class TimelineBarWidget(ctk.CTkFrame):
             filename = os.path.basename(self.video_path)
             ext = os.path.splitext(filename)[1].upper().replace(".", "")
             
-            # Duration fallback (since loop_end starts as duration)
-            dur = getattr(self, 'loop_end', 0)
+            # Duration fallback independent of segment selection
+            dur = self._get_current_duration() or 0
             
             cur_time_str = self.format_time(self.current_time) if self.current_time else "00:00:00.000"
             dur_str = self.format_time(dur) if dur > 1 else "00:00:00.000"
@@ -991,25 +1029,28 @@ class TimelineBarWidget(ctk.CTkFrame):
             active_player = getattr(self.controller, "current_video_window", None) or getattr(self.controller, "active_player", None)
             loop_active = getattr(active_player, "loop_active", False) if active_player else False
             
-            if self.loop_start is not None and self.loop_end is not None:
-                sel_len = max(0, self.loop_end - self.loop_start)
-                # Neukazovat selekci, pokud je přes celé video (není udělaný reálný výběr)
-                if sel_len < dur - 0.5:
-                    start_str = self.format_time(self.loop_start).split('.')[0]
-                    end_str = self.format_time(self.loop_end).split('.')[0]
-                    length_secs = int(round(sel_len))
-                    
-                    state_str = "ON" if loop_active else "OFF"
-                    color = "lime" if loop_active else "#FFA500"  # Zelená pokud běží, oranžová pokud je to jen výběr
-                    
-                    self.selection_label.configure(
-                        text=f"Loop {state_str}  |  Range: {start_str} - {end_str}  |  Length: {length_secs}s",
-                        text_color=color
-                    )
-                else:
-                    self.selection_label.configure(text="")
+            active_seg = self._get_active_segment()
+            if active_seg and active_seg.get("start") is not None and active_seg.get("end") is not None:
+                seg_start = float(active_seg["start"])
+                seg_end = float(active_seg["end"])
+                sel_len = max(0, seg_end - seg_start)
+                start_str = self.format_time(seg_start).split('.')[0]
+                end_str = self.format_time(seg_end).split('.')[0]
+                length_secs = int(round(sel_len))
+                state_str = "ON" if loop_active else "OFF"
+                color = "lime" if loop_active else "#FFA500"
+                seg_idx = (self.active_segment_index or 0) + 1
+                seg_count = len(self.segments)
+                self.selection_label.configure(
+                    text=f"Loop {state_str}  |  Segment {seg_idx}/{seg_count}  |  Range: {start_str} - {end_str}  |  Length: {length_secs}s",
+                    text_color=color,
+                )
             else:
-                self.selection_label.configure(text="")       
+                seg_count = len(self.segments)
+                if seg_count:
+                    self.selection_label.configure(text=f"No segment selected  |  Segments: {seg_count}", text_color="#aaaaaa")
+                else:
+                    self.selection_label.configure(text="No segment selected", text_color="#aaaaaa")
             
     def update_info_toolbarOld(self):
         """
@@ -1085,6 +1126,8 @@ class TimelineBarWidget(ctk.CTkFrame):
                 loop_start=loop_start,
                 loop_end=loop_end,
                 controller=self.controller,
+                segments=self.segments,
+                active_segment_index=self.active_segment_index,
             )
 
   
@@ -1095,14 +1138,8 @@ class TimelineBarWidget(ctk.CTkFrame):
         """
         Displays the popup menu for conversion, gathering active loop data from the player.
         """
-        active_player = getattr(self.controller, "current_video_window", None)
-        loop_start = getattr(active_player, "loop_start", None) if active_player else None
-        loop_end = getattr(active_player, "loop_end", None) if active_player else None
-        loop_active = getattr(active_player, "loop_active", False) if active_player else False
-
-        # Pass loop bounds only when the loop is actually active; otherwise export the whole video.
-        export_loop_start = loop_start if loop_active else None
-        export_loop_end = loop_end if loop_active else None
+        export_loop_start = self.loop_start
+        export_loop_end = self.loop_end
 
         menu = create_menu(self, self)
         menu.add_command(label="Open Export Dialog",
@@ -1275,6 +1312,8 @@ class TimelineBarWidget(ctk.CTkFrame):
 
         mode = settings.get("mode", "custom")
         target_ext = settings["ext"]
+        export_mode = settings.get("export_mode", "active")
+        segments = settings.get("segments", []) or []
 
         # Proactive compatibility warning for known-fragile lossless targets.
         # We only ask when the user picked "Same as source" (i.e. target_ext == src_ext);
@@ -1320,6 +1359,16 @@ class TimelineBarWidget(ctk.CTkFrame):
         if not save_path:
             return
 
+        if export_mode == "all_separate":
+            root, ext = os.path.splitext(save_path)
+            if not ext:
+                ext = target_ext
+            segment_count = len([s for s in segments if s.get("end", 0) > s.get("start", 0)])
+            if segment_count <= 0:
+                messagebox.showerror("No cuts", "There are no valid cuts to export.")
+                return
+            save_path = [f"{root}_cut_{i + 1}{ext}" for i in range(segment_count)]
+
         video_name = os.path.basename(input_path)
         t = threading.Thread(
             target=self._convert_worker,
@@ -1335,17 +1384,107 @@ class TimelineBarWidget(ctk.CTkFrame):
             if status_bar:
                 self.after(0, lambda m=msg: status_bar.set_action_message(m))
 
-        if settings.get("mode") == "original":
-            self._convert_worker_lossless(input_path, save_path, settings, video_name, set_status)
-            return
+        export_mode = settings.get("export_mode", "active")
+        segments = []
+        for s in (settings.get("segments") or []):
+            try:
+                ss = float(s.get("start"))
+                ee = float(s.get("end"))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if ee > ss:
+                segments.append({"start": ss, "end": ee})
 
+        try:
+            if settings.get("mode") == "original":
+                if export_mode == "active":
+                    self._convert_worker_lossless(input_path, save_path, settings, video_name, set_status, show_done=False)
+                    self.after(0, lambda p=save_path: messagebox.showinfo("Done", f"Video saved to:\n{p}"))
+                elif export_mode == "all_separate":
+                    paths = save_path if isinstance(save_path, list) else []
+                    for i, (seg, out_path) in enumerate(zip(segments, paths), start=1):
+                        seg_settings = dict(settings)
+                        seg_settings["start_time"] = float(seg["start"])
+                        seg_settings["end_time"] = float(seg["end"])
+                        set_status(f"Exporting cut {i}/{len(segments)} (lossless)...")
+                        self._convert_worker_lossless(
+                            input_path,
+                            out_path,
+                            seg_settings,
+                            video_name,
+                            set_status,
+                            show_done=False,
+                        )
+                    self.after(
+                        0,
+                        lambda d=os.path.dirname(paths[0]) if paths else "": messagebox.showinfo(
+                            "Done",
+                            f"All cuts exported.\nFolder:\n{d}",
+                        ),
+                    )
+                elif export_mode == "all_merged":
+                    self._convert_worker_lossless_merged(input_path, save_path, settings, video_name, set_status, segments)
+                else:
+                    raise ValueError(f"Unknown export mode: {export_mode}")
+            else:
+                if export_mode == "active":
+                    self._convert_worker_custom_segments(
+                        input_path,
+                        save_path,
+                        settings,
+                        video_name,
+                        set_status,
+                        [{"start": settings.get("start_time"), "end": settings.get("end_time")}],
+                    )
+                    self.after(0, lambda p=save_path: messagebox.showinfo("Done", f"Video saved to:\n{p}"))
+                elif export_mode == "all_separate":
+                    paths = save_path if isinstance(save_path, list) else []
+                    for i, (seg, out_path) in enumerate(zip(segments, paths), start=1):
+                        set_status(f"Exporting cut {i}/{len(segments)}...")
+                        self._convert_worker_custom_segments(
+                            input_path,
+                            out_path,
+                            settings,
+                            video_name,
+                            set_status,
+                            [seg],
+                        )
+                    self.after(
+                        0,
+                        lambda d=os.path.dirname(paths[0]) if paths else "": messagebox.showinfo(
+                            "Done",
+                            f"All cuts exported.\nFolder:\n{d}",
+                        ),
+                    )
+                elif export_mode == "all_merged":
+                    self._convert_worker_custom_segments(
+                        input_path,
+                        save_path,
+                        settings,
+                        video_name,
+                        set_status,
+                        segments,
+                    )
+                    self.after(0, lambda p=save_path: messagebox.showinfo("Done", f"Merged video saved to:\n{p}"))
+                else:
+                    raise ValueError(f"Unknown export mode: {export_mode}")
+
+            set_status(f"Export complete: {video_name}")
+            if status_bar:
+                self.after(5000, status_bar.clear_action_message)
+
+        except Exception as e:
+            logging.error(f"[Export] Error during export: {e}")
+            set_status(f"Export failed: {e}")
+            self.after(0, lambda err=str(e): messagebox.showerror("Export Error", err))
+
+    def _convert_worker_custom_segments(self, input_path, save_path, settings, video_name, set_status, segments):
         cap = None
         out = None
         try:
             cap = cv2.VideoCapture(input_path)
             if not cap.isOpened():
-                self.after(0, lambda: messagebox.showerror("Error", "Cannot open video file."))
-                return
+                raise RuntimeError("Cannot open video file.")
 
             fourcc_map = {
                 ".mp4": cv2.VideoWriter_fourcc(*"mp4v"),
@@ -1354,58 +1493,60 @@ class TimelineBarWidget(ctk.CTkFrame):
                 ".mkv": cv2.VideoWriter_fourcc(*"mp4v"),
                 ".webm": cv2.VideoWriter_fourcc(*"VP80"),
             }
-            target_ext = settings["ext"]
+            target_ext = (os.path.splitext(save_path)[1] or settings["ext"]).lower()
             fourcc = fourcc_map.get(target_ext, cv2.VideoWriter_fourcc(*"mp4v"))
             out = cv2.VideoWriter(save_path, fourcc, settings["fps"], (settings["width"], settings["height"]))
+            if not out.isOpened():
+                raise RuntimeError("Cannot open output writer.")
 
-            start_time = settings.get("start_time")
-            end_time   = settings.get("end_time")
-            start_ms   = (start_time * 1000) if start_time is not None else 0
-            total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-            fps_src      = cap.get(cv2.CAP_PROP_FPS) or 25
-            end_ms = (end_time * 1000) if end_time is not None else (total_frames / fps_src * 1000)
-            total_ms = max(end_ms - start_ms, 1)
+            fps_src = cap.get(cv2.CAP_PROP_FPS) or 25.0
+            total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+            full_duration = (total_frames / fps_src) if fps_src > 0 else 0
+            clean_segments = []
+            for seg in segments:
+                s = seg.get("start")
+                e = seg.get("end")
+                s = 0.0 if s is None else float(s)
+                e = full_duration if e is None else float(e)
+                if e > s:
+                    clean_segments.append({"start": s, "end": e})
+            if not clean_segments:
+                clean_segments = [{"start": 0.0, "end": full_duration if full_duration > 0 else 0.0}]
 
-            if start_time is not None:
-                cap.set(cv2.CAP_PROP_POS_MSEC, start_ms)
-
-            set_status(f"Exporting video: {video_name}  0%")
+            total_ms = sum(max(0.0, seg["end"] - seg["start"]) for seg in clean_segments) * 1000.0
+            total_ms = max(total_ms, 1.0)
+            processed_ms = 0.0
             last_pct = -1
 
-            while True:
-                current_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
-                if end_time is not None and current_msec > end_ms:
-                    break
-
-                ret, frame = cap.read()
-                if not ret:
-                    break
-
-                resized = cv2.resize(frame, (settings["width"], settings["height"]))
-                out.write(resized)
-
-                pct = int((current_msec - start_ms) / total_ms * 100)
-                pct = max(0, min(100, pct))
-                if pct != last_pct:
-                    last_pct = pct
-                    set_status(f"Exporting video: {video_name}  {pct}%")
-
-            set_status(f"Export complete: {video_name}")
-            self.after(0, lambda: messagebox.showinfo("Done", f"Video saved to:\n{save_path}"))
-            if status_bar:
-                self.after(5000, status_bar.clear_action_message)
-
-        except Exception as e:
-            logging.error(f"[Export] Error during export: {e}")
-            set_status(f"Export failed: {e}")
-            self.after(0, lambda err=str(e): messagebox.showerror("Export Error", err))
+            for i, seg in enumerate(clean_segments, start=1):
+                start_ms = seg["start"] * 1000.0
+                end_ms = seg["end"] * 1000.0
+                cap.set(cv2.CAP_PROP_POS_MSEC, start_ms)
+                while True:
+                    current_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
+                    if current_msec > end_ms:
+                        break
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    resized = cv2.resize(frame, (settings["width"], settings["height"]))
+                    out.write(resized)
+                    pct = int(((processed_ms + max(0.0, current_msec - start_ms)) / total_ms) * 100)
+                    pct = max(0, min(100, pct))
+                    if pct != last_pct:
+                        last_pct = pct
+                        if len(clean_segments) > 1:
+                            set_status(f"Exporting {video_name} (cut {i}/{len(clean_segments)})  {pct}%")
+                        else:
+                            set_status(f"Exporting video: {video_name}  {pct}%")
+                processed_ms += max(0.0, end_ms - start_ms)
         finally:
             if cap is not None:
                 cap.release()
             if out is not None:
                 out.release()
 
-    def _convert_worker_lossless(self, input_path, save_path, settings, video_name, set_status):
+    def _convert_worker_lossless(self, input_path, save_path, settings, video_name, set_status, show_done=True):
         """
         Lossless cut via FFmpeg stream copy (LosslessCut-style "keyframe cut").
         No re-encoding: bitrate, resolution, fps and codec are preserved.
@@ -1610,7 +1751,8 @@ class TimelineBarWidget(ctk.CTkFrame):
                 return
 
             set_status(f"Export complete: {video_name}")
-            self.after(0, lambda: messagebox.showinfo("Done", f"Video saved to:\n{save_path}"))
+            if show_done:
+                self.after(0, lambda: messagebox.showinfo("Done", f"Video saved to:\n{save_path}"))
             if status_bar:
                 self.after(5000, status_bar.clear_action_message)
 
@@ -1627,6 +1769,78 @@ class TimelineBarWidget(ctk.CTkFrame):
             if stderr_thread is not None and stderr_thread.is_alive():
                 stderr_thread.join(timeout=2)
 
+    def _convert_worker_lossless_merged(self, input_path, save_path, settings, video_name, set_status, segments):
+        temp_dir = tempfile.mkdtemp(prefix="vlc_player_merge_")
+        temp_paths = []
+        concat_path = os.path.join(temp_dir, "concat.txt")
+        try:
+            for i, seg in enumerate(segments, start=1):
+                seg_path = os.path.join(temp_dir, f"temp_part{i}.mkv")
+                seg_settings = dict(settings)
+                seg_settings["start_time"] = float(seg["start"])
+                seg_settings["end_time"] = float(seg["end"])
+                set_status(f"Preparing merged cut {i}/{len(segments)}...")
+                self._convert_worker_lossless(
+                    input_path,
+                    seg_path,
+                    seg_settings,
+                    video_name,
+                    set_status,
+                    show_done=False,
+                )
+                temp_paths.append(seg_path)
+
+            with open(concat_path, "w", encoding="utf-8") as f:
+                for p in temp_paths:
+                    escaped = p.replace("\\", "/").replace("'", "'\\''")
+                    f.write(f"file '{escaped}'\n")
+
+            ffmpeg_bin = get_ffmpeg_path()
+            cmd = [
+                ffmpeg_bin,
+                "-hide_banner",
+                "-loglevel",
+                "warning",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                concat_path,
+                "-c",
+                "copy",
+                save_path,
+            ]
+            set_status("Merging cuts into single output...")
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                startupinfo=_SUBPROCESS_STARTUPINFO,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(proc.stderr.strip() or "FFmpeg concat failed.")
+            self.after(0, lambda p=save_path: messagebox.showinfo("Done", f"Merged video saved to:\n{p}"))
+        finally:
+            for p in temp_paths:
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except OSError:
+                    pass
+            try:
+                if os.path.exists(concat_path):
+                    os.remove(concat_path)
+            except OSError:
+                pass
+            try:
+                if os.path.isdir(temp_dir):
+                    os.rmdir(temp_dir)
+            except OSError:
+                pass
+
 
     def set_num_thumbs(self, num):
         self.load_thumbnails(num_thumbs=num)
@@ -1635,10 +1849,13 @@ class TimelineBarWidget(ctk.CTkFrame):
     # --- NEW THREAD-SAFE THUMBNAIL LOADING ---
     def load_thumbnails(self, video_path=None, num_thumbs=None):
         if video_path is not None and video_path != self.video_path:
+            self.save_segments_for_path(self.video_path)
             self.video_path = video_path  # nejdřív nastavíme nové video_path...
             self.clear_selection()        # ...pak clear_selection() dotáže duration správného videa
+            self.load_segments_for_path(self.video_path)
         elif video_path is not None:
             self.video_path = video_path
+            self.load_segments_for_path(self.video_path)
         if num_thumbs is not None:
             self.num_thumbs = num_thumbs
 
@@ -1828,10 +2045,10 @@ class TimelineBarWidget(ctk.CTkFrame):
             active_player.loop_start = None  # Schválně None
             active_player.loop_end = None    # Schválně None
         
-        # Uložíme si to jen lokálně na osu pro modrou selekci
+        # Create a new active segment at clicked time.
         self.loop_mode = False
-        self.loop_start = clicked_time
-        self.loop_end = clicked_time
+        self.segments.append({"start": clicked_time, "end": clicked_time})
+        self.active_segment_index = len(self.segments) - 1
 
         self.loop_drag = "select"
         self.canvas.config(cursor="sb_h_double_arrow")
@@ -1850,44 +2067,29 @@ class TimelineBarWidget(ctk.CTkFrame):
         x = event.x
         active_player = getattr(self.controller, "current_video_window", None) or getattr(self.controller, "active_player", None)
 
-        # 1. Priorita: Zachycení playheadu (červeného kurzoru) pro tažení
-        margin_drag_playhead = 10
-        px_playhead = self.time_to_x(self.current_time)
-        if abs(x - px_playhead) < margin_drag_playhead:
-            logging.info("[DEBUG] Zachycen DRAG PLAYHEADU (priorita).")
-            self.loop_drag = None
-            self.on_timeline_click(event)
-            return
-
-        # 2. Logika pro Loop (smyčky) a Selekci - start, end nebo posun
-        # --- OPRAVA: Načteme časy buď ze zelené smyčky, nebo z naší modré pasivní selekce
-        ls = getattr(self, "loop_start", None)
-        le = getattr(self, "loop_end", None)
-        
-        if active_player and getattr(active_player, "loop_active", False):
-            # Pokud běží zelená smyčka, mají přednost časy z přehrávače
-            ls = getattr(active_player, "loop_start", None)
-            le = getattr(active_player, "loop_end", None)
-
-        if ls is not None and le is not None:
+        # 1. Segment drag/selection has priority over playhead.
+        active_seg = self._get_active_segment()
+        if active_seg and active_seg.get("start") is not None and active_seg.get("end") is not None:
+            ls = float(active_seg["start"])
+            le = float(active_seg["end"])
             margin_drag = 16
             px_s = self.time_to_x(ls)
             px_e = self.time_to_x(le)
 
             if abs(x - px_s) < margin_drag:
-                logging.info("[DEBUG] Zachycen DRAG START okraje smyčky/selekce.")
+                logging.info("[DEBUG] Active segment START drag.")
                 self.loop_drag = "start"
                 self.canvas.config(cursor="sb_h_double_arrow")
                 return
 
             if abs(x - px_e) < margin_drag:
-                logging.info("[DEBUG] Zachycen DRAG END okraje smyčky/selekce.")
+                logging.info("[DEBUG] Active segment END drag.")
                 self.loop_drag = "end"
                 self.canvas.config(cursor="sb_h_double_arrow")
                 return
-            
+
             if px_s < x < px_e:
-                logging.info("[DEBUG] Zachycen DRAG MOVE celé smyčky/selekce.")
+                logging.info("[DEBUG] Active segment MOVE drag.")
                 self.loop_drag = "move"
                 x0, x1 = self.get_timeline_bounds()
                 duration = self._get_current_duration() or 60
@@ -1895,6 +2097,37 @@ class TimelineBarWidget(ctk.CTkFrame):
                 self.drag_offset_time = clicked_time - ls
                 self.canvas.config(cursor="fleur")
                 return
+
+        # If inactive segment was clicked, activate and allow immediate move-drag.
+        for i in range(len(self.segments) - 1, -1, -1):
+            if i == self.active_segment_index:
+                continue
+            seg = self.segments[i]
+            s = seg.get("start")
+            e = seg.get("end")
+            if s is None or e is None:
+                continue
+            x_s = self.time_to_x(float(s))
+            x_e = self.time_to_x(float(e))
+            if min(x_s, x_e) <= x <= max(x_s, x_e):
+                self.active_segment_index = i
+                self.loop_drag = "move"
+                x0, x1 = self.get_timeline_bounds()
+                duration = self._get_current_duration() or 60
+                clicked_time = self.x_to_rel(x, x0, x1) * duration
+                self.drag_offset_time = clicked_time - float(s)
+                self.canvas.config(cursor="fleur")
+                self.redraw_timeline()
+                return
+
+        # 2. Fallback: playhead seek when no segment was hit.
+        margin_drag_playhead = 10
+        px_playhead = self.time_to_x(self.current_time)
+        if abs(x - px_playhead) < margin_drag_playhead:
+            logging.info("[DEBUG] Zachycen DRAG PLAYHEADU.")
+            self.loop_drag = None
+            self.on_timeline_click(event)
+            return
 
         # 3. Kliknutí na marker (bookmark) - Skok na přesnou pozici
         # Hledáme objekty v těsné blízkosti kliknutí (rozsah 2px)
@@ -2013,47 +2246,108 @@ class TimelineBarWidget(ctk.CTkFrame):
 
         active_player = getattr(self.controller, "current_video_window", None) or getattr(self.controller, "active_player", None)
         is_repeating = bool(active_player and getattr(active_player, "loop_active", False))
+        strip_h = 20
+        y_strip_top = y_bar_top - strip_h
+        self._segment_strip_top = y_strip_top
+        self._segment_strip_bottom = y_bar_top
 
-        # Always prefer loop bounds from active player when loop is enabled.
-        if is_repeating:
-            start_time = getattr(active_player, "loop_start", None)
-            end_time = getattr(active_player, "loop_end", None)
+        if not hasattr(self, "_active_selection_images_tk"):
+            self._active_selection_images_tk = []
+        self._active_selection_images_tk.clear()
+
+        # Draw inactive segments first (muted rectangles, no drag borders).
+        for i, seg in enumerate(self.segments):
+            if i == self.active_segment_index:
+                continue
+            start_time = seg.get("start")
+            end_time = seg.get("end")
             if start_time is None or end_time is None:
-                start_time = getattr(self, "loop_start", None)
-                end_time = getattr(self, "loop_end", None)
-        else:
-            start_time = getattr(self, "loop_start", None)
-            end_time = getattr(self, "loop_end", None)
+                continue
+            x_s = self.time_to_x(float(start_time))
+            x_e = self.time_to_x(float(end_time))
+            left, right = min(x_s, x_e), max(x_s, x_e)
+            if right - left <= 0:
+                continue
+            self.canvas.create_rectangle(
+                left,
+                y_strip_top,
+                right,
+                y_bar_top,
+                fill="#444455",
+                outline="",
+                tags="segment_inactive",
+            )
+            seg_len = max(0.0, float(end_time) - float(start_time))
+            seg_w = right - left
+            x_center = left + (seg_w / 2.0)
+            if seg_w < 40:
+                label = f"C{i + 1}"
+            else:
+                label = f"Cut {i + 1} ({seg_len:.1f}s)"
+            canvas_w = max(1, self.canvas.winfo_width())
+            x_center = min(max(x_center, 20), canvas_w - 20)
+            self.canvas.create_text(
+                x_center,
+                y_strip_top - 8,
+                text=label,
+                fill="#97a6bf",
+                font=("Segoe UI", 9, "bold"),
+                anchor="s",
+                tags="segment_label",
+            )
 
-        # --- SELECTION STRIP (Updated height to 20) ---
+        # Active segment keeps existing loop visuals.
+        active_seg = self._get_active_segment()
+        start_time = active_seg.get("start") if active_seg else None
+        end_time = active_seg.get("end") if active_seg else None
+
+        if is_repeating and start_time is not None and end_time is not None:
+            player_s = getattr(active_player, "loop_start", None) if active_player else None
+            player_e = getattr(active_player, "loop_end", None) if active_player else None
+            if player_s is not None and player_e is not None:
+                start_time = player_s
+                end_time = player_e
+                self._set_active_segment_bounds(start_time, end_time)
+
         if start_time is not None and end_time is not None:
-            x_s = self.time_to_x(start_time)
-            x_e = self.time_to_x(end_time)
-            
-            strip_h = 20  # Updated per user request
-            y_strip_top = y_bar_top - strip_h
-            
+            x_s = self.time_to_x(float(start_time))
+            x_e = self.time_to_x(float(end_time))
+            left, right = min(x_s, x_e), max(x_s, x_e)
+
             try:
-                rect_w = int(x_e - x_s)
+                rect_w = int(right - left)
                 if rect_w > 0:
-                    alpha = 160 
+                    alpha = 160
                     r, g, b = (255, 165, 0) if is_repeating else (0, 191, 255)
-                    
-                    pixel_img = Image.new('RGBA', (1, 1), (r, g, b, alpha))
+                    pixel_img = Image.new("RGBA", (1, 1), (r, g, b, alpha))
                     final_overlay_img = pixel_img.resize((rect_w, strip_h), Image.NEAREST)
-                    
-                    if not hasattr(self, "_active_selection_images_tk"):
-                        self._active_selection_images_tk = []
-                    
                     p_img = ImageTk.PhotoImage(final_overlay_img)
                     self._active_selection_images_tk.append(p_img)
-                    self.canvas.create_image(x_s, y_strip_top, image=p_img, anchor="nw", tags="loop_rect_alpha")
-            except Exception as e:
-                self.canvas.create_rectangle(x_s, y_strip_top, x_e, y_bar_top, fill="#444", tags="loop_rect")
+                    self.canvas.create_image(left, y_strip_top, image=p_img, anchor="nw", tags="loop_rect_alpha")
+            except Exception:
+                self.canvas.create_rectangle(left, y_strip_top, right, y_bar_top, fill="#444", tags="loop_rect")
 
             border_col = "#FFA500" if is_repeating else "#00bfff"
-            self.canvas.create_line(x_s, y_strip_top, x_s, y_bar_top, fill=border_col, width=2, tags="loop_bar")
-            self.canvas.create_line(x_e, y_strip_top, x_e, y_bar_top, fill=border_col, width=2, tags="loop_bar")
+            self.canvas.create_line(left, y_strip_top, left, y_bar_top, fill=border_col, width=2, tags="loop_bar")
+            self.canvas.create_line(right, y_strip_top, right, y_bar_top, fill=border_col, width=2, tags="loop_bar")
+            seg_len = max(0.0, float(end_time) - float(start_time))
+            seg_w = right - left
+            x_center = left + (seg_w / 2.0)
+            if seg_w < 40:
+                active_label = f"C{(self.active_segment_index or 0) + 1}"
+            else:
+                active_label = f"Cut {(self.active_segment_index or 0) + 1} ({seg_len:.1f}s)"
+            canvas_w = max(1, self.canvas.winfo_width())
+            x_center = min(max(x_center, 20), canvas_w - 20)
+            self.canvas.create_text(
+                x_center,
+                y_strip_top - 8,
+                text=active_label,
+                fill="#d7ecff" if not is_repeating else "#ffd39b",
+                font=("Segoe UI", 9, "bold"),
+                anchor="s",
+                tags="segment_label",
+            )
 
         # --- YELLOW PLAYHEAD (Extended to bottom) ---
         if hasattr(self, "current_time") and duration > 0:
@@ -2174,6 +2468,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.canvas.tag_raise("loop_rect")        # Solidní barva selekce (fallback)
         self.canvas.tag_raise("loop_rect_alpha")  # Naše nová průhledná vrstva selekce
         self.canvas.tag_raise("loop_bar")         # Zelené/Zlaté/Modré okraje
+        self.canvas.tag_raise("segment_label")    # Labels above segments
         self.canvas.tag_raise("marker")           # Záložky
         self.canvas.tag_raise("time_cursor")      # Červený Playhead
         self.update_info_toolbar()
@@ -2313,6 +2608,84 @@ class TimelineBarWidget(ctk.CTkFrame):
                 except Exception as e:
                     logging.error(f"Error loading bookmarks: {e}")
             return []
+
+    def _segments_file_for_path(self, video_path):
+        if not video_path:
+            return None
+        return os.path.splitext(video_path)[0] + "_segments.json"
+
+    def save_segments_for_path(self, video_path):
+        segments_file = self._segments_file_for_path(video_path)
+        if not segments_file:
+            return
+        try:
+            payload_segments = []
+            for seg in self.segments:
+                start = seg.get("start")
+                end = seg.get("end")
+                if start is None or end is None:
+                    continue
+                payload_segments.append({"start": float(start), "end": float(end)})
+            payload = {
+                "version": 1,
+                "active_segment_index": self.active_segment_index,
+                "segments": payload_segments,
+            }
+            with open(segments_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logging.error(f"[Timeline] Failed to save segments: {e}")
+
+    def load_segments_for_path(self, video_path):
+        segments_file = self._segments_file_for_path(video_path)
+        if not segments_file or not os.path.exists(segments_file):
+            self.segments = []
+            self.active_segment_index = None
+            return
+        try:
+            with open(segments_file, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            raw_segments = payload.get("segments", []) if isinstance(payload, dict) else []
+            duration = self.timeline_manager.get_video_duration(video_path) or 0.0
+            cleaned = []
+            for seg in raw_segments:
+                if not isinstance(seg, dict):
+                    continue
+                start = seg.get("start")
+                end = seg.get("end")
+                if start is None or end is None:
+                    continue
+                try:
+                    start = float(start)
+                    end = float(end)
+                except (TypeError, ValueError):
+                    continue
+                if duration > 0:
+                    start = max(0.0, min(start, duration))
+                    end = max(0.0, min(end, duration))
+                else:
+                    start = max(0.0, start)
+                    end = max(0.0, end)
+                if end < start:
+                    start, end = end, start
+                if end - start < 0.1:
+                    end = start + 0.1
+                    if duration > 0 and end > duration:
+                        end = duration
+                        start = max(0.0, end - 0.1)
+                cleaned.append({"start": start, "end": end})
+            self.segments = cleaned
+            idx = payload.get("active_segment_index") if isinstance(payload, dict) else None
+            if isinstance(idx, int) and 0 <= idx < len(self.segments):
+                self.active_segment_index = idx
+            elif self.segments:
+                self.active_segment_index = 0
+            else:
+                self.active_segment_index = None
+        except Exception as e:
+            logging.error(f"[Timeline] Failed to load segments: {e}")
+            self.segments = []
+            self.active_segment_index = None
         
     def set_video_window(self, video_window):
         self.video_window = video_window
@@ -2320,19 +2693,23 @@ class TimelineBarWidget(ctk.CTkFrame):
     def clear_selection(self):
         """Vymaže vizuální selekci z timeline (volá se při přepnutí videa)."""
         self.loop_mode = False
-        self.loop_start = None
+        self.segments = []
+        self.active_segment_index = None
         self.loop_drag = None
         new_duration = self.timeline_manager.get_video_duration(self.video_path) or 1
-        self.loop_end = new_duration
         self._cached_duration_value = new_duration
         self._cached_duration_path = self.video_path
         if hasattr(self, "loop_button"):
             self.loop_button.config(text="🔁 Loop: off")
 
     def reload_all_markers_and_redraw(self, video_path=None):
+        old_path = self.video_path
         if video_path is None:
             video_path = self.video_path
+        if video_path != old_path:
+            self.save_segments_for_path(old_path)
         self.video_path = video_path
+        self.load_segments_for_path(video_path)
         self.update_bookmarks()
         self.update_thumbnails()
         self.update_subtitles()
@@ -2649,42 +3026,46 @@ class TimelineBarWidget(ctk.CTkFrame):
         active_player = getattr(self.controller, "current_video_window", None) or getattr(self.controller, "active_player", None)
         is_active = active_player and getattr(active_player, "loop_active", False)
 
+        active_seg = self._get_active_segment()
+
         if self.loop_drag == "select":
+            if active_seg is None:
+                self.on_timeline_click(event)
+                return
             new_start = min(self._selection_anchor, new_time)
             new_end = max(self._selection_anchor, new_time)
-            if new_end - new_start < 0.1: new_end = new_start + 0.1
-
-            self.loop_start = new_start
-            self.loop_end = new_end
+            self._set_active_segment_bounds(new_start, new_end)
             if is_active:
-                active_player.loop_start = new_start
-                active_player.loop_end = new_end
+                active_player.loop_start = self.loop_start
+                active_player.loop_end = self.loop_end
             self.redraw_timeline()
             return
 
-        if not active_player:
-            self.on_timeline_click(event)
-            return
-
         if self.loop_drag == "start":
+            if active_seg is None or self.loop_end is None:
+                return
             new_start = min(new_time, self.loop_end - 0.1)
-            self.loop_start = new_start
+            self._set_active_segment_bounds(new_start, self.loop_end)
             if is_active:
                 if getattr(active_player, "loop_end", None) is None: active_player.loop_end = self.loop_end
-                active_player.set_loop_start_from_timeline(new_start)
+                active_player.set_loop_start_from_timeline(self.loop_start)
             self.redraw_timeline()
             return
 
         elif self.loop_drag == "end":
+            if active_seg is None or self.loop_start is None:
+                return
             new_end = max(new_time, self.loop_start + 0.1)
-            self.loop_end = new_end
+            self._set_active_segment_bounds(self.loop_start, new_end)
             if is_active:
                 if getattr(active_player, "loop_start", None) is None: active_player.loop_start = self.loop_start
-                active_player.set_loop_end_from_timeline(new_end)
+                active_player.set_loop_end_from_timeline(self.loop_end)
             self.redraw_timeline()
             return
 
         elif self.loop_drag == "move":
+            if active_seg is None or self.loop_start is None or self.loop_end is None:
+                return
             loop_duration = self.loop_end - self.loop_start
             new_start = raw_time - self.drag_offset_time
             new_end = new_start + loop_duration
@@ -2696,14 +3077,13 @@ class TimelineBarWidget(ctk.CTkFrame):
                 new_end = duration
                 new_start = duration - loop_duration
 
-            self.loop_start = new_start
-            self.loop_end = new_end
+            self._set_active_segment_bounds(new_start, new_end)
 
             if is_active:
                 if getattr(active_player, "loop_start", None) is None: active_player.loop_start = self.loop_start
                 if getattr(active_player, "loop_end", None) is None: active_player.loop_end = self.loop_end
-                active_player.set_loop_start_from_timeline(new_start)
-                active_player.set_loop_end_from_timeline(new_end)
+                active_player.set_loop_start_from_timeline(self.loop_start)
+                active_player.set_loop_end_from_timeline(self.loop_end)
             self.redraw_timeline()
             return
 
@@ -2712,11 +3092,26 @@ class TimelineBarWidget(ctk.CTkFrame):
       
 
     def on_canvas_release(self, event):
+        if self.loop_drag == "select":
+            seg = self._get_active_segment()
+            if seg and seg.get("start") is not None and seg.get("end") is not None:
+                seg_len = float(seg["end"]) - float(seg["start"])
+                if seg_len < 0.1:
+                    duration = self._get_current_duration() or 0.0
+                    default_len = 1.0
+                    new_start = float(seg["start"])
+                    new_end = new_start + default_len
+                    if duration > 0 and new_end > duration:
+                        new_end = duration
+                        new_start = max(0.0, new_end - default_len)
+                    self._set_active_segment_bounds(new_start, new_end)
+                    self.redraw_timeline()
         if self.loop_drag:
             active_player = getattr(self.controller, "current_video_window", None)
             if active_player and hasattr(active_player, "update_loop_bar_display"):
                 active_player.update_loop_bar_display()
                 logging.info("[DEBUG] Loop bar ve video přehrávači byl aktualizován.")
+            self.save_segments_for_path(self.video_path)
         self.loop_drag = None
         self.canvas.config(cursor="")
 
@@ -2737,6 +3132,7 @@ class TimelineBarWidget(ctk.CTkFrame):
             self.on_seek(timestamp)
             
     def on_close(self):
+        self.save_segments_for_path(self.video_path)
         if hasattr(self.parent, "timeline_window"):
             self.parent.timeline_window = None
         self.destroy()
@@ -2757,10 +3153,39 @@ class TimelineBarWidget(ctk.CTkFrame):
                 self.show_marker_tooltip(event.x, event.y, found_marker)
                 self.canvas.config(cursor="hand2")
             else:
-                self.hide_marker_tooltip()
-                # Vrátíme kurzor do původního stavu (pokud zrovna netaháme smyčku)
-                if not self.loop_drag:
-                    self.canvas.config(cursor="")
+                seg_hit = self._get_segment_hover_at(event.x, event.y)
+                if seg_hit is not None:
+                    self.show_segment_tooltip(event.x, event.y, seg_hit)
+                    self.canvas.config(cursor="hand2")
+                else:
+                    self.hide_marker_tooltip()
+                    # Vrátíme kurzor do původního stavu (pokud zrovna netaháme smyčku)
+                    if not self.loop_drag:
+                        self.canvas.config(cursor="")
+
+    def _get_segment_hover_at(self, x, y):
+        strip_top = getattr(self, "_segment_strip_top", None)
+        strip_bottom = getattr(self, "_segment_strip_bottom", None)
+        if strip_top is None or strip_bottom is None:
+            return None
+        if not (strip_top <= y <= strip_bottom):
+            return None
+        for i in range(len(self.segments) - 1, -1, -1):
+            seg = self.segments[i]
+            start_time = seg.get("start")
+            end_time = seg.get("end")
+            if start_time is None or end_time is None:
+                continue
+            x_s = self.time_to_x(float(start_time))
+            x_e = self.time_to_x(float(end_time))
+            left, right = min(x_s, x_e), max(x_s, x_e)
+            if left <= x <= right:
+                return {
+                    "index": i,
+                    "start": float(start_time),
+                    "end": float(end_time),
+                }
+        return None
 
     def show_marker_tooltip(self, x, y, marker):
         """Displays a neat tooltip on the canvas with full text."""
@@ -2777,6 +3202,40 @@ class TimelineBarWidget(ctk.CTkFrame):
         if bbox:
             bg_id = self.canvas.create_rectangle(bbox[0]-5, bbox[1]-2, bbox[2]+5, bbox[3]+2, 
                                                  fill="#333", outline="#FFA500", tags="marker_tooltip")
+            self.canvas.tag_lower(bg_id, txt_id)
+
+    def show_segment_tooltip(self, x, y, seg_hit):
+        self.canvas.delete("marker_tooltip")
+        idx = int(seg_hit["index"])
+        start = float(seg_hit["start"])
+        end = float(seg_hit["end"])
+        dur = max(0.0, end - start)
+        full_text = (
+            f"Cut {idx + 1}\n"
+            f"Start: {self.format_time(start)}\n"
+            f"End: {self.format_time(end)}\n"
+            f"Duration: {dur:.1f}s"
+        )
+        txt_id = self.canvas.create_text(
+            x + 15,
+            y - 15,
+            text=full_text,
+            fill="white",
+            anchor="sw",
+            font=("Segoe UI", 10, "bold"),
+            tags="marker_tooltip",
+        )
+        bbox = self.canvas.bbox(txt_id)
+        if bbox:
+            bg_id = self.canvas.create_rectangle(
+                bbox[0] - 5,
+                bbox[1] - 2,
+                bbox[2] + 5,
+                bbox[3] + 2,
+                fill="#333",
+                outline="#00bfff",
+                tags="marker_tooltip",
+            )
             self.canvas.tag_lower(bg_id, txt_id)
 
     def hide_marker_tooltip(self):
