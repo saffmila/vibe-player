@@ -119,11 +119,11 @@ class VideoExportDialog(ctk.CTkToplevel):
             export_scope_frame = ctk.CTkFrame(self)
             export_scope_frame.pack(pady=2, padx=10, fill="x")
             active_label = (
-                f"Export Active Cut only ({active_seg_len:.1f}s)"
+                f"Export Active Loop / Cut only ({active_seg_len:.1f}s)"
                 if active_seg
-                else "Export Active Cut only (no active cut)"
+                else "Export Active Loop / Cut only (no active loop / cut)"
             )
-            all_label = f"Export All Cuts (as separate files) ({seg_count} cuts)"
+            all_label = f"Export All Loops / Cuts (as separate files) ({seg_count} loops / cuts)"
             self.active_cut_radio = ctk.CTkRadioButton(
                 export_scope_frame,
                 text=active_label,
@@ -133,14 +133,14 @@ class VideoExportDialog(ctk.CTkToplevel):
             self.active_cut_radio.pack(anchor="w", padx=10, pady=(6, 2))
             self.all_cuts_separate_radio = ctk.CTkRadioButton(
                 export_scope_frame,
-                text=f"Export All Cuts (as separate files) ({seg_count} cuts)",
+                text=f"Export All Loops / Cuts (as separate files) ({seg_count} loops / cuts)",
                 variable=self.export_mode_var,
                 value="all_separate",
             )
             self.all_cuts_separate_radio.pack(anchor="w", padx=10, pady=(2, 2))
             self.all_cuts_merged_radio = ctk.CTkRadioButton(
                 export_scope_frame,
-                text=f"Export All Cuts (Merged into a single video) ({seg_count} cuts)",
+                text=f"Export All Loops / Cuts (Merged into a single video) ({seg_count} loops / cuts)",
                 variable=self.export_mode_var,
                 value="all_merged",
             )
@@ -158,12 +158,12 @@ class VideoExportDialog(ctk.CTkToplevel):
             # --- Export mode tabs ---
             self.tabs = ctk.CTkTabview(self)
             self.tabs.pack(pady=(8, 4), padx=10, fill="x", expand=True)
-            lossless_tab = self.tabs.add("Lossless Cut")
+            lossless_tab = self.tabs.add("Lossless Loop / Cut")
             custom_tab = self.tabs.add("Custom (Re-encode)")
 
             self.lossless_hint = ctk.CTkLabel(
                 lossless_tab,
-                text="Cuts on nearest keyframe (LosslessCut-style). MKV is the safest container.",
+                text="Loop / Cut points snap to nearest keyframe (LosslessCut-style). MKV is the safest container.",
                 text_color="#888888",
                 font=("", 10),
                 justify="left",
@@ -200,7 +200,7 @@ class VideoExportDialog(ctk.CTkToplevel):
 
             ctk.CTkCheckBox(custom_tab, text="Include audio (not supported yet)", variable=self.sound_var, state="disabled").pack(pady=(0, 8))
 
-            self.tabs.set("Lossless Cut")
+            self.tabs.set("Lossless Loop / Cut")
             self._update_export_duration_label()
 
             # Keep close/destroy handlers only.
@@ -356,8 +356,8 @@ class VideoExportDialog(ctk.CTkToplevel):
                 if e > s:
                     serializable_segments.append({"start": s, "end": e})
 
-            selected_tab = self.tabs.get() if hasattr(self, "tabs") else "Lossless Cut"
-            is_lossless = selected_tab == "Lossless Cut"
+            selected_tab = self.tabs.get() if hasattr(self, "tabs") else "Lossless Loop / Cut"
+            is_lossless = selected_tab == "Lossless Loop / Cut"
 
             if is_lossless:
                 # Lossless mode: stream copy + keyframe cut. Container choice drives compatibility.
@@ -667,10 +667,10 @@ class TimelineBarWidget(ctk.CTkFrame):
                 self._log_segments_state(f"delete completed idx={idx}")
 
             menu.add_command(
-                label=f"▶ Play Active Cut {seg_idx + 1}",
+                label=f"▶ Play Active Loop / Cut {seg_idx + 1}",
                 command=lambda i=seg_idx: self._activate_and_preview_segment(i),
             )
-            menu.add_command(label=f"🗑 Delete Cut {seg_idx + 1}", command=_delete_segment)
+            menu.add_command(label=f"🗑 Delete Loop / Cut {seg_idx + 1}", command=_delete_segment)
             menu.add_separator()
 
         # --- PLAYBACK ---
@@ -761,7 +761,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         if loop_s is not None and loop_e is not None:
             menu.add_separator()
             menu.add_command(
-                label=f"🎬 Export Current Cut ({self.format_time(loop_s)} - {self.format_time(loop_e)})",
+                label=f"🎬 Export Current Loop / Cut ({self.format_time(loop_s)} - {self.format_time(loop_e)})",
                 command=lambda s=loop_s, e=loop_e: self.open_export_dialog(self.video_path, s, e)
             )
 
@@ -2126,6 +2126,8 @@ class TimelineBarWidget(ctk.CTkFrame):
                 self.drag_offset_time = clicked_time - float(s)
                 self.canvas.config(cursor="fleur")
                 self.redraw_timeline()
+                # Ensure player loop bar updates even on simple segment re-selection.
+                self._sync_active_segment_to_player()
                 self._log_segments_state(f"primary_click activate idx={i} x={x}")
                 return
 
@@ -2244,6 +2246,34 @@ class TimelineBarWidget(ctk.CTkFrame):
             self.loop_button.config(text="🔁 Loop: ON")
         self.redraw_timeline()
         self._log_segments_state(f"activate_preview idx={idx} start={start:.3f} end={end:.3f}")
+
+    def _sync_active_segment_to_player(self):
+        """Synchronize current active segment bounds into player loop visuals."""
+        seg = self._get_active_segment()
+        if not isinstance(seg, dict):
+            return
+        start = seg.get("start")
+        end = seg.get("end")
+        if start is None or end is None:
+            return
+        try:
+            start = float(start)
+            end = float(end)
+        except (TypeError, ValueError):
+            return
+        if end <= start:
+            return
+        active_player = getattr(self.controller, "current_video_window", None) or getattr(self.controller, "active_player", None)
+        if active_player is None:
+            return
+        try:
+            active_player.loop_start = start
+            active_player.loop_end = end
+            active_player.loop_active = True
+            if hasattr(active_player, "update_loop_bar_display"):
+                active_player.update_loop_bar_display()
+        except Exception:
+            return
 
     
 
@@ -2379,7 +2409,7 @@ class TimelineBarWidget(ctk.CTkFrame):
             if seg_w < 40:
                 label = f"C{i + 1}"
             else:
-                label = f"Cut {i + 1} ({seg_len:.1f}s)"
+                label = f"Loop/Cut {i + 1} ({seg_len:.1f}s)"
             canvas_w = max(1, self.canvas.winfo_width())
             x_center = min(max(x_center, 20), canvas_w - 20)
             self.canvas.create_text(
@@ -2433,7 +2463,7 @@ class TimelineBarWidget(ctk.CTkFrame):
             if seg_w < 40:
                 active_label = f"C{(self.active_segment_index or 0) + 1}"
             else:
-                active_label = f"Cut {(self.active_segment_index or 0) + 1} ({seg_len:.1f}s)"
+                active_label = f"Loop/Cut {(self.active_segment_index or 0) + 1} ({seg_len:.1f}s)"
             canvas_w = max(1, self.canvas.winfo_width())
             x_center = min(max(x_center, 20), canvas_w - 20)
             self.canvas.create_text(
@@ -3325,7 +3355,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         end = float(seg_hit["end"])
         dur = max(0.0, end - start)
         full_text = (
-            f"Cut {idx + 1}\n"
+            f"Loop/Cut {idx + 1}\n"
             f"Start: {self.format_time(start)}\n"
             f"End: {self.format_time(end)}\n"
             f"Duration: {dur:.1f}s"

@@ -812,23 +812,56 @@ class VideoPlayer:
 
     def draw_loop_bar(self):
         self.loop_bar_canvas.delete("all")
-
-        # Kresli pouze pokud je smyčka aktivní a má platné hranice
-        if not self.loop_active or self.loop_start is None or self.loop_end is None:
+        if not self.player:
+            return
+        if not self.loop_active:
+            # Keep player overlay clean when loop mode is turned off.
             return
 
-        duration = self.player.get_length()
-        if duration <= 0:
+        duration_ms = self.player.get_length()
+        if duration_ms <= 0:
             return
 
-        canvas_width = self.loop_bar_canvas.winfo_width()
-        x1 = int(self.loop_start / (duration / 1000.0) * canvas_width)
-        x2 = int(self.loop_end / (duration / 1000.0) * canvas_width)
-        
-        if x1 >= x2:
-            return
+        duration_s = duration_ms / 1000.0
+        canvas_width = max(1, self.loop_bar_canvas.winfo_width())
+        timeline = getattr(self, "timeline_widget", None)
 
-        self.loop_bar_canvas.create_line(x1, 2, x2, 2, fill="#1ee810", width=5)
+        # Draw all saved segments first as subtle inactive guides.
+        if timeline and hasattr(timeline, "segments"):
+            for seg in timeline.segments:
+                if not isinstance(seg, dict):
+                    continue
+                start = seg.get("start")
+                end = seg.get("end")
+                if start is None or end is None:
+                    continue
+                try:
+                    seg_start = max(0.0, min(float(start), duration_s))
+                    seg_end = max(0.0, min(float(end), duration_s))
+                except (TypeError, ValueError):
+                    continue
+                left = min(seg_start, seg_end)
+                right = max(seg_start, seg_end)
+                if right <= left:
+                    continue
+                x1 = int((left / duration_s) * canvas_width)
+                x2 = int((right / duration_s) * canvas_width)
+                if x2 <= x1:
+                    continue
+                self.loop_bar_canvas.create_line(x1, 2, x2, 2, fill="#444455", width=2)
+
+        # Keep the currently active loop visually dominant in orange.
+        if self.loop_start is None or self.loop_end is None:
+            return
+        left = min(float(self.loop_start), float(self.loop_end))
+        right = max(float(self.loop_start), float(self.loop_end))
+        if right <= left:
+            return
+        x1 = int((max(0.0, min(left, duration_s)) / duration_s) * canvas_width)
+        x2 = int((max(0.0, min(right, duration_s)) / duration_s) * canvas_width)
+        if x2 <= x1:
+            return
+        self.loop_bar_canvas.create_line(x1, 2, x2, 2, fill="#FFA500", width=5)
 
 
 
@@ -838,26 +871,103 @@ class VideoPlayer:
     def set_loop_start(self, event=None):
         if not self.player:
             return
-        self.loop_start = self.player.get_time() / 1000.0
+        new_start = self.player.get_time() / 1000.0
+        self._ensure_active_segment_for_shortcut(new_start, boundary="start")
+        self.loop_start = new_start
+        timeline = getattr(self, "timeline_widget", None)
+        if timeline:
+            # Keep timeline segment model in sync with player shortcut updates.
+            timeline.loop_start = new_start
         self.loop_active = True
         logging.info(f"[🔁] Loop START nastaven: {self.loop_start:.2f}s. Smyčka je aktivní.")
+        self._show_loop_cut_osd("Loop / Cut Start set")
         self.update_loop_bar_display() # <-- ZMĚNA
 
         # PŘIDAT: Informuj timeline, aby se překreslila
-        if self.timeline_widget:
-            self.timeline_widget.redraw_timeline()
+        if timeline:
+            if hasattr(timeline, "save_segments_for_path"):
+                timeline.save_segments_for_path(getattr(timeline, "video_path", None))
+            timeline.redraw_timeline()
 
     def set_loop_end(self, event=None):
         if not self.player:
             return
-        self.loop_end = self.player.get_time() / 1000.0
+        new_end = self.player.get_time() / 1000.0
+        self._ensure_active_segment_for_shortcut(new_end, boundary="end")
+        self.loop_end = new_end
+        timeline = getattr(self, "timeline_widget", None)
+        if timeline:
+            # Keep timeline segment model in sync with player shortcut updates.
+            timeline.loop_end = new_end
         self.loop_active = True
         logging.info(f"[🔁] Loop END nastaven: {self.loop_end:.2f}s. Smyčka je aktivní.")
+        self._show_loop_cut_osd("Loop / Cut End set")
         self.update_loop_bar_display() # <-- ZMĚNA
       
         # PŘIDAT: Informuj timeline, aby se překreslila
-        if self.timeline_widget:
-            self.timeline_widget.redraw_timeline()
+        if timeline:
+            if hasattr(timeline, "save_segments_for_path"):
+                timeline.save_segments_for_path(getattr(timeline, "video_path", None))
+            timeline.redraw_timeline()
+
+    def _ensure_active_segment_for_shortcut(self, new_time, boundary="start", far_threshold=2.0):
+        timeline = getattr(self, "timeline_widget", None)
+        if not timeline or not hasattr(timeline, "segments"):
+            return
+        active_idx = getattr(timeline, "active_segment_index", None)
+        has_active = isinstance(active_idx, int) and 0 <= active_idx < len(timeline.segments)
+        create_new = not has_active
+
+        # Keep the existing active segment unless the shortcut target is clearly far away.
+        # Also keep the same segment when user is defining the opposite boundary right after.
+        if has_active:
+            seg = timeline.segments[active_idx]
+            if isinstance(seg, dict):
+                start = seg.get("start")
+                end = seg.get("end")
+                if start is not None and end is not None:
+                    try:
+                        left = min(float(start), float(end))
+                        right = max(float(start), float(end))
+                        # If segment is still near-zero, user is most likely finishing
+                        # the second boundary of the same Loop / Cut via shortcuts.
+                        if (right - left) <= 0.15:
+                            create_new = False
+                            left = right = min(float(start), float(end))
+                        if boundary == "end" and self.loop_start is not None:
+                            left = min(left, float(self.loop_start))
+                            right = max(right, float(self.loop_start))
+                        elif boundary == "start" and self.loop_end is not None:
+                            left = min(left, float(self.loop_end))
+                            right = max(right, float(self.loop_end))
+                        if create_new:
+                            create_new = (new_time < (left - far_threshold)) or (new_time > (right + far_threshold))
+                    except (TypeError, ValueError):
+                        create_new = True
+                else:
+                    create_new = True
+            else:
+                create_new = True
+
+        if create_new:
+            start = max(0.0, float(new_time))
+            timeline.segments.append({"start": start, "end": start})
+            timeline.active_segment_index = len(timeline.segments) - 1
+            if hasattr(timeline, "_log_segments_state"):
+                timeline._log_segments_state(f"shortcut created at {start:.3f}s")
+
+    def _show_loop_cut_osd(self, text: str):
+        if not self.player:
+            return
+        try:
+            _Enable = 0
+            _Text = 1
+            _Timeout = 7
+            self.player.video_set_marquee_int(_Enable, 1)
+            self.player.video_set_marquee_string(_Text, text)
+            self.player.video_set_marquee_int(_Timeout, 1500)
+        except Exception as e:
+            logging.info(f"[LoopCutOSD] Failed to show OSD: {e}")
 
 
 
@@ -870,6 +980,11 @@ class VideoPlayer:
         self.loop_active = not _prev_loop
         logging.info(f"[VideoPlayer] Loop is now: {'ACTIVE' if self.loop_active else 'INACTIVE'}")
 
+        # When turning loop ON, prefer the active timeline segment as source of truth.
+        # This keeps playback loop behavior aligned with current segment selection.
+        if self.loop_active:
+            self._sync_loop_bounds_from_timeline_active_segment()
+
         # If loop was just activated, seek to the start.
         if self.loop_active and self.loop_start is not None:
             if hasattr(self, "player") and self.player:
@@ -879,6 +994,42 @@ class VideoPlayer:
         
         # --- THIS IS THE KEY LINE ---
         # Always update the visual loop bar display, regardless of state change.
+        self.update_loop_bar_display()
+
+    def _sync_loop_bounds_from_timeline_active_segment(self):
+        timeline = getattr(self, "timeline_widget", None)
+        if not timeline or not hasattr(timeline, "segments"):
+            return
+        idx = getattr(timeline, "active_segment_index", None)
+        if not isinstance(idx, int) or not (0 <= idx < len(timeline.segments)):
+            return
+        seg = timeline.segments[idx]
+        if not isinstance(seg, dict):
+            return
+        start = seg.get("start")
+        end = seg.get("end")
+        if start is None or end is None:
+            return
+        try:
+            start = float(start)
+            end = float(end)
+        except (TypeError, ValueError):
+            return
+        if end <= start:
+            return
+        self.loop_start = start
+        self.loop_end = end
+
+    def _refresh_loop_state_after_video_switch(self, keep_enabled=False):
+        # Clear stale visuals first; new bounds are applied below if available.
+        self.loop_start = None
+        self.loop_end = None
+        self.loop_active = bool(keep_enabled)
+        if keep_enabled:
+            self._sync_loop_bounds_from_timeline_active_segment()
+            if self.loop_start is None or self.loop_end is None:
+                # No valid segment in the new video -> disable loop cleanly.
+                self.loop_active = False
         self.update_loop_bar_display()
 
 
@@ -2860,15 +3011,14 @@ class VideoPlayer:
                     text="" if self.stop_button_icon else "stop"
                 )
             
-            # 5. Resetujeme loop stav přehrávače - selekce patřila ke starému videu
-            self.loop_active = False
-            self.loop_start = None
-            self.loop_end = None
+            # 5. Keep previous loop toggle state and rebind it to the new video's active segment.
+            was_loop_active = bool(getattr(self, "loop_active", False))
 
             # 6. Aktualizujeme timeline pro nové video
             if self.timeline_widget:
                 self.timeline_widget.clear_selection()
                 self.timeline_widget.reload_all_markers_and_redraw(path)
+            self._refresh_loop_state_after_video_switch(keep_enabled=was_loop_active)
 
             # 6. --- NOVÉ: SYNCHRONIZACE PLAYLISTU ---
             # Pokud je playlist aktivní, najdeme index aktuálního videa a zvýrazníme ho
@@ -2923,8 +3073,10 @@ class VideoPlayer:
             )
         
         # 5. Aktualizujeme timeline pro nové video
+        was_loop_active = bool(getattr(self, "loop_active", False))
         if self.timeline_widget:
             self.timeline_widget.reload_all_markers_and_redraw(path)
+        self._refresh_loop_state_after_video_switch(keep_enabled=was_loop_active)
 
 
 
