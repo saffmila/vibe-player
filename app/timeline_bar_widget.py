@@ -1075,13 +1075,18 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.grid_columnconfigure(1, weight=1)  # Keep center area empty and expandable.
 
         self.right_controls_frame = tk.Frame(self, bg="#333333")
-        self.right_controls_frame.grid(row=2, column=2, pady=(1, 1), padx=(6, 4), sticky="e")
+        # Slightly tighter left inset so SNAP reads as its own control cluster.
+        self.right_controls_frame.grid(row=2, column=2, pady=(1, 1), padx=(2, 4), sticky="e")
 
-        self.snap_btn = tk.Button(self.right_controls_frame, text="📐 SNAP: none", command=self.toggle_snap_type, **btn_style)
-        self.snap_btn.pack(side="left")
+        self.snap_btn = tk.Button(self.right_controls_frame, text="📐 SNAP ▼: none", command=self.show_snap_menu, **btn_style)
+        self.snap_btn.pack(side="left", padx=(0, 2))
+        self.snap_btn.bind("<Button-3>", self.show_snap_menu)
+
+        self.snap_magnet_separator = tk.Frame(self.right_controls_frame, bg="#888888", width=1)
+        self.snap_magnet_separator.pack(side="left", fill="y", pady=3, padx=(4, 4))
 
         self.magnet_btn = tk.Button(self.right_controls_frame, text="🧲 MAGNET: off", command=self.toggle_magnet, **btn_style)
-        self.magnet_btn.pack(side="left", padx=(1, 0))
+        self.magnet_btn.pack(side="left", padx=(2, 0))
 
         self.right_pair_separator = tk.Frame(self.right_controls_frame, bg="#666666", width=1)
         self.right_pair_separator.pack(side="left", fill="y", pady=3, padx=(8, 6))
@@ -2245,11 +2250,38 @@ class TimelineBarWidget(ctk.CTkFrame):
             self.on_seek(target)
         self.set_current_time(target)
                     
+    def set_snap_type(self, snap_type):
+        if snap_type not in self.snap_types:
+            return
+        self.snap_type = snap_type
+        self.snap_btn.config(text=f"📐 SNAP ▼: {self.snap_type}")
+
+    def show_snap_menu(self, event=None):
+        menu = tk.Menu(self, tearoff=0, bg="#2b2b2b", fg="white", activebackground="#444")
+        snap_var = tk.StringVar(value=self.snap_type)
+        for snap in self.snap_types:
+            menu.add_radiobutton(
+                label=snap.title(),
+                value=snap,
+                variable=snap_var,
+                command=lambda s=snap: self.set_snap_type(s),
+            )
+
+        try:
+            if event is not None:
+                x, y = event.x_root, event.y_root
+            else:
+                x = self.snap_btn.winfo_rootx()
+                y = self.snap_btn.winfo_rooty() + self.snap_btn.winfo_height()
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
+
     def toggle_snap_type(self):
+        # Kept for backward compatibility if called elsewhere.
         idx = self.snap_types.index(self.snap_type)
         idx = (idx + 1) % len(self.snap_types)
-        self.snap_type = self.snap_types[idx]
-        self.snap_btn.config(text=f"SNAP: {self.snap_type}")
+        self.set_snap_type(self.snap_types[idx])
 
     def toggle_magnet(self):
         self.magnet_mode = not self.magnet_mode
