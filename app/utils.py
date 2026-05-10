@@ -183,6 +183,8 @@ def create_menu(app: Any, parent: Any) -> Menu:
         activeborderwidth=0,
         borderwidth=0,
         font=("Helvetica", 12),
+        # Checkmarks / radio dots stay visible on dark menu backgrounds (Windows Tk).
+        selectcolor="#d0d0d0",
     )
 
     def wrap_method(original_method: Any) -> Any:

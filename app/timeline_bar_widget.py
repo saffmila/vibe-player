@@ -19,7 +19,7 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 import cv2
-from PIL import Image, ImageDraw, ImageFont, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 
 from file_operations import (
     create_video_thumbnail,
@@ -439,6 +439,22 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.video_path = video_path
         self.markers = []
         self.marker_types_visible = {"thumbnail": True, "subtitle": True, "tag": True, "bookmark": True}
+        # Staggered bookmark labels: cycle through N horizontal rows so titles do not overlap.
+        self.bookmark_label_rows = 3
+        self.bookmark_row_height = 24
+        # Vertical timeline layout (see _compute_timeline_y_layout).
+        self.timeline_canvas_top_pad = 24
+        # Loop/Cut strip height (see ``y_loop_top`` / ``y_loop_bottom`` vs ``thumb_y_top``).
+        self.loop_cut_lane_height = 15
+        # Space between bookmark tab tips and where the ruler stack begins (layout only).
+        self.bookmark_to_axis_gap = 10
+        # Ruler: ticks grow upward from ``thumb_y_top`` (base_y); major/minor heights in px.
+        self.time_axis_major_tick_height = 30
+        self.time_axis_minor_tick_height = 22
+        # Time labels: anchor ``s`` at ``thumb_y_top -`` this offset.
+        self.time_axis_label_offset_above_thumb_top = 32
+        # Staggered bookmark row colors (text + tab + stem tint).
+        self.bookmark_colors = ["#FFFFB3", "#FFD700", "#FFA500"]
         self.zoom_factor = 1.0
         self.min_zoom = 0.2
         self.max_zoom = 5.0
@@ -467,18 +483,18 @@ class TimelineBarWidget(ctk.CTkFrame):
 
         # Playback / snapping state (must exist before create_widgets — toolbar reads these).
         self.current_time = 0
-        self.snap_types = ["none", "tick", "thumb", "cut"]
+        self.snap_types = ["none", "tick", "thumb", "cut", "bookmark"]
         self.snap_type = "none"
         self.magnet_mode = False
         
         self.thumb_images = [] # This will now store PhotoImage objects.
         # self.THUMB_W, self.THUMB_H = 190, 130
 
+        # Must exist before create_widgets — load_thumbnails() ends with redraw_timeline().
+        self.marker_canvas_ids = {}
+
         self.create_widgets()
         self.toggle_all_label = tk.StringVar(value="Show No Markers")
-        self.rotated_text_refs = []
-
-        self.marker_canvas_ids = {}
         self.start_periodic_update()
         self._process_thumb_queue() # Start the queue checker loop
 
@@ -596,6 +612,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         self._set_active_segment_bounds(float(start_val), float(value))
 
     def toggle_all_markers(self):
+        self.update_bookmarks()
         any_off = any(not var.get() for var in self.marker_vars.values())
         for key, var in self.marker_vars.items():
             var.set(any_off)
@@ -675,12 +692,27 @@ class TimelineBarWidget(ctk.CTkFrame):
 
     def show_context_menu(self, event):
         """Displays the right-click context menu on the timeline."""
-        clicked_time = self.get_time_at_x(event.x)
+        cx, cy = self._canvas_pointer_xy(event)
+        clicked_time = self.get_time_at_x(cx)
         duration = self._get_current_duration()
         active_player = getattr(self.controller, "current_video_window", None)
-        seg_hit = self._get_segment_hover_at(event.x, event.y)
+        seg_hit = self._get_segment_hover_at(cx, cy)
+        marker_under_cursor = None
+        nearby_items = self.canvas.find_overlapping(cx - 2, cy - 2, cx + 2, cy + 2)
+        for item_id in reversed(nearby_items):
+            marker = getattr(self, "marker_canvas_ids", {}).get(item_id)
+            if marker and marker.get("type") == "bookmark":
+                marker_under_cursor = marker
+                break
 
-        menu = tk.Menu(self, tearoff=0, bg="#2b2b2b", fg="white", activebackground="#444")
+        menu = tk.Menu(
+            self,
+            tearoff=0,
+            bg="#2b2b2b",
+            fg="white",
+            activebackground="#444",
+            selectcolor="#d0d0d0",
+        )
         if seg_hit is not None:
             seg_idx = int(seg_hit["index"])
             if 0 <= seg_idx < len(self.segments):
@@ -829,11 +861,14 @@ class TimelineBarWidget(ctk.CTkFrame):
         menu.add_command(label="Skip to Next Cut (Ctrl+Right)", command=self.skip_to_next_cut)
         menu.add_separator()
         menu.add_command(label="Add Bookmark", command=lambda: self.add_bookmark_at(clicked_time))
-        
-        closest_marker = self.get_closest_marker(clicked_time, threshold=2.0)
-        if closest_marker and closest_marker["type"] == "bookmark":
-            menu.add_command(label=f"Remove Bookmark: {closest_marker['label']}", 
-                             command=lambda: self.remove_bookmark_at(closest_marker))
+        if marker_under_cursor:
+            menu.add_command(
+                label=f"Remove Bookmark: {marker_under_cursor['label']}",
+                command=lambda m=marker_under_cursor: self.remove_bookmark_at(m),
+            )
+        has_bookmarks = any(m.get("type") == "bookmark" for m in getattr(self, "markers", []))
+        if has_bookmarks:
+            menu.add_command(label="Remove All Bookmarks", command=self.remove_all_bookmarks)
         
         menu.add_separator()
         menu.add_command(label="Copy Timestamp", 
@@ -846,7 +881,9 @@ class TimelineBarWidget(ctk.CTkFrame):
     def add_bookmark_at(self, timestamp):
             """Adds bookmark even if the player window is closed."""
             # 🟢 Zjistíme, jestli máme přehrávač
-            active_player = getattr(self.controller, "current_video_window", None)
+            active_player = getattr(self.controller, "current_video_window", None) or getattr(
+                self.controller, "active_player", None
+            )
             default_name = f"Marker {len(self.markers) + 1}"
 
             def on_confirm(name):
@@ -895,7 +932,9 @@ class TimelineBarWidget(ctk.CTkFrame):
 
     def remove_bookmark_at(self, marker_to_remove):
             """Removes a specific bookmark even if player is closed."""
-            active_player = getattr(self.controller, "current_video_window", None)
+            active_player = getattr(self.controller, "current_video_window", None) or getattr(
+                self.controller, "active_player", None
+            )
             timestamp = marker_to_remove["timestamp"]
 
             if active_player:
@@ -906,6 +945,26 @@ class TimelineBarWidget(ctk.CTkFrame):
                 current_bookmarks = self.load_bookmarks_for_path(self.video_path)
                 current_bookmarks = [b for b in current_bookmarks if b["time"] != timestamp]
                 self.save_bookmarks_standalone(self.video_path, current_bookmarks)
+
+            self.update_bookmarks()
+            self.redraw_timeline()
+
+    def remove_all_bookmarks(self):
+            """Removes all bookmarks for the current video."""
+            if not self.video_path:
+                return
+            if not messagebox.askyesno("Remove all bookmarks", "Delete all bookmarks for this video?"):
+                return
+
+            active_player = getattr(self.controller, "current_video_window", None) or getattr(
+                self.controller, "active_player", None
+            )
+            if active_player and hasattr(active_player, "bookmarks"):
+                active_player.bookmarks = []
+                if hasattr(active_player, "save_bookmarks"):
+                    active_player.save_bookmarks()
+            else:
+                self.save_bookmarks_standalone(self.video_path, [])
 
             self.update_bookmarks()
             self.redraw_timeline()
@@ -993,10 +1052,39 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.selection_label = ctk.CTkLabel(self.toolbar_frame, text="", anchor="e", font=toolbar_font, text_color="#FFA500")
         self.selection_label.pack(side="right", padx=10, pady=(0, 2))
 
-        # Create the main canvas for drawing the timeline (Posunuto do row=1)
-        self.canvas = tk.Canvas(self, width=900, height=280, bg="#222", highlightthickness=0)
-        self.canvas.grid(row=1, column=0, columnspan=5, sticky="nsew")
-        
+        # Timeline canvas + vertical scroll when staggered bookmarks exceed viewport height.
+        self.canvas_frame = tk.Frame(self, bg="#222222")
+        self.canvas_frame.grid(row=1, column=0, columnspan=5, sticky="nsew")
+        self.canvas_frame.grid_columnconfigure(0, weight=1)
+        self.canvas_frame.grid_rowconfigure(0, weight=1)
+        self.canvas_frame.grid_columnconfigure(1, minsize=16, weight=0)
+
+        self.canvas = tk.Canvas(
+            self.canvas_frame,
+            width=900,
+            height=280,
+            bg="#222",
+            highlightthickness=0,
+        )
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.canvas.configure(yscrollincrement=24)
+
+        # Canvas must exist before Scrollbar(command=canvas.yview).
+        self._timeline_vscrollbar = tk.Scrollbar(
+            self.canvas_frame,
+            orient=tk.VERTICAL,
+            command=self.canvas.yview,
+            width=14,
+            bg="#242424",
+            troughcolor="#1a1a1a",
+            activebackground="#3d5a80",
+            highlightthickness=0,
+            bd=0,
+            elementborderwidth=0,
+        )
+        self._timeline_vscrollbar.grid(row=0, column=1, sticky="ns")
+        self.canvas.configure(yscrollcommand=self._timeline_vscrollbar.set)
+
         # Bind mouse events for interaction.
         self.canvas.bind("<B1-Motion>", self.on_canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_canvas_release)
@@ -1016,6 +1104,8 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.canvas.bind("m", self._magnet_keyboard_toggle)
         self.canvas.bind("M", self._magnet_keyboard_toggle)
         self.canvas.bind("<Enter>", lambda e: self.canvas.focus_set())
+        self.canvas.bind("<MouseWheel>", self._on_timeline_mousewheel, add="+")
+        self.canvas_frame.bind("<MouseWheel>", self._on_timeline_mousewheel, add="+")
 
         # Define button styling.
         btn_style = {
@@ -1103,7 +1193,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.snap_btn = tk.Button(self.right_controls_frame, text="📐 none", command=self.show_snap_menu, **snap_btn_style)
         self.snap_btn.pack(side="left", padx=(0, 2))
         self.snap_btn.bind("<Button-3>", self.show_snap_menu)
-        Tooltip(self.snap_btn, "Cycle Snap Mode (none/tick/thumb/cut)")
+        Tooltip(self.snap_btn, "Cycle Snap Mode (none/tick/thumb/cut/bookmark)")
 
         magnet_btn_style = dict(btn_style)
         magnet_btn_style["width"] = 4
@@ -1239,33 +1329,6 @@ class TimelineBarWidget(ctk.CTkFrame):
             self.selection_label.configure(text="")        
             
             
-    def create_rotated_text_image(self, text, font_size=12, color="#FFA500"):
-        try:
-            font = ImageFont.truetype("arial.ttf", font_size)
-        except IOError:
-            font = ImageFont.load_default()
-
-        dummy_img = Image.new("RGBA", (1, 1))
-        draw = ImageDraw.Draw(dummy_img)
-
-        try:
-            bbox = draw.textbbox((0, 0), text, font=font)
-            text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        except AttributeError:
-            text_width, text_height = font.getsize(text)
-
-        padding = 10
-        canvas_width = text_width + padding * 2
-        canvas_height = text_height + padding * 2
-
-        img = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
-        draw.text((padding, padding), text, font=font, fill=color)
-
-        rotated = img.rotate(90, expand=True)
-        return ImageTk.PhotoImage(rotated)
-
-
     def open_export_dialog(self, video_path, loop_start=None, loop_end=None):
             def run_export(path, settings):
                 self.convert_video_format(path, settings)
@@ -1398,11 +1461,11 @@ class TimelineBarWidget(ctk.CTkFrame):
 
 
     def on_pan_start(self, event):
-        self._pan_start_x = event.x
+        self._pan_start_x = self._canvas_pointer_x(event)
         self._pan_start_offset = self.pan_offset
 
     def on_pan_drag(self, event):
-        dx = event.x - self._pan_start_x
+        dx = self._canvas_pointer_x(event) - self._pan_start_x
         rel_dx = dx / self.canvas.winfo_width()
         self.pan_offset = self._pan_start_offset + rel_dx / self.zoom_factor
         self.pan_offset = max(-0.5 * (self.zoom_factor - 1), min(0.5 * (self.zoom_factor - 1), self.pan_offset))
@@ -1992,6 +2055,15 @@ class TimelineBarWidget(ctk.CTkFrame):
         elif video_path is not None:
             self.video_path = video_path
             self.load_segments_for_path(self.video_path)
+
+        # Grid selection (no main player) only hit this path — segments loaded above but
+        # bookmarks/subtitles/DB thumbnail marker were only refreshed from open_player's
+        # reload_all_markers_and_redraw; keep markers in sync whenever the timeline video changes.
+        if video_path is not None and self.video_path and os.path.isfile(self.video_path):
+            self.update_bookmarks()
+            self.update_thumbnails()
+            self.update_subtitles()
+
         if num_thumbs is not None:
             self.num_thumbs = num_thumbs
 
@@ -2106,6 +2178,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.redraw_timeline()
 
     def toggle_marker_type(self, marker_type):
+        self.update_bookmarks()
         current = self.marker_types_visible.get(marker_type, True)
         self.marker_types_visible[marker_type] = not current
         self.redraw_timeline() 
@@ -2287,7 +2360,14 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.snap_btn.config(text=f"📐 {self.snap_type}")
 
     def show_snap_menu(self, event=None):
-        menu = tk.Menu(self, tearoff=0, bg="#2b2b2b", fg="white", activebackground="#444")
+        menu = tk.Menu(
+            self,
+            tearoff=0,
+            bg="#2b2b2b",
+            fg="white",
+            activebackground="#444",
+            selectcolor="#d0d0d0",
+        )
         snap_var = tk.StringVar(value=self.snap_type)
         for snap in self.snap_types:
             menu.add_radiobutton(
@@ -2361,6 +2441,79 @@ class TimelineBarWidget(ctk.CTkFrame):
         logging.info(f"Canvas resized: {event.width}x{event.height}")
         self.redraw_timeline()
 
+    def _compute_timeline_y_layout(self):
+        """
+        Vertical zones (top → bottom, Y increases downward):
+
+        1) Bookmarks.
+        2) Time-axis ticks + labels (ticks bottom on ``thumb_y_top`` = ``base_y``).
+        3) Loop/Cut lane floating above thumbs: top ``base_y - 18``, bottom ``base_y - 4``.
+        4) Thumbnails from ``base_y`` to ``y_bar_bot``.
+        """
+        top_pad = float(self.timeline_canvas_top_pad)
+        n_rows = max(1, int(self.bookmark_label_rows))
+        rh = float(self.bookmark_row_height)
+        bookmark_band = (n_rows * rh) + 28.0
+        marker_height = 18.0
+        y_marker_top = top_pad + bookmark_band + 10.0
+        y_marker_bot = y_marker_top + marker_height
+
+        g_ba = float(self.bookmark_to_axis_gap)
+        y_bar_top = y_marker_bot + g_ba
+
+        major = float(self.time_axis_major_tick_height)
+        # Major tick top = base_y - major; keep it below bookmarks with margin.
+        base_y = y_marker_bot + g_ba + major + 8.0
+
+        y_loop_top = base_y - 18.0
+        y_loop_bottom = base_y - 4.0
+        thumb_y_top = base_y
+
+        padding_y = 12.0
+        y_bar_bot = thumb_y_top + float(self.THUMB_H) + padding_y
+        content_h = y_bar_bot + 8.0
+        return {
+            "y_marker_top": y_marker_top,
+            "y_marker_bot": y_marker_bot,
+            "y_loop_top": y_loop_top,
+            "y_loop_bottom": y_loop_bottom,
+            "y_bar_top": y_bar_top,
+            "thumb_y_top": thumb_y_top,
+            "y_bar_bot": y_bar_bot,
+            "content_height": content_h,
+        }
+
+    def _update_timeline_vscrollbar_visibility(self):
+        """Show the vertical scrollbar only when content is taller than the viewport."""
+        sb = getattr(self, "_timeline_vscrollbar", None)
+        if sb is None:
+            return
+        try:
+            self.canvas.update_idletasks()
+            ch = float(getattr(self, "_timeline_content_height", 0) or 0)
+            vh = max(1, int(self.canvas.winfo_height()))
+            if ch <= vh + 1:
+                sb.grid_remove()
+                self.canvas.yview_moveto(0)
+            else:
+                sb.grid(row=0, column=1, sticky="ns")
+        except tk.TclError:
+            pass
+
+    def _on_timeline_mousewheel(self, event):
+        ch = float(getattr(self, "_timeline_content_height", 0) or 0)
+        vh = max(1, int(self.canvas.winfo_height()))
+        if ch <= vh + 1:
+            return
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def _canvas_pointer_x(self, event):
+        """X in canvas coordinates (accounts for vertical scroll)."""
+        return self.canvas.canvasx(event.x)
+
+    def _canvas_pointer_xy(self, event):
+        return self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+
 
     def on_space_press(self, event):
             """Toggles play/pause: prioritizing standalone player, then embedded preview."""
@@ -2395,8 +2548,9 @@ class TimelineBarWidget(ctk.CTkFrame):
         duration = self._get_current_duration()
         if duration <= 0: return
 
-        raw_time = self.get_time_at_x(event.x)
-        clicked_time = self.apply_snap_and_magnet(event.x, raw_time, duration)
+        cx = self._canvas_pointer_x(event)
+        raw_time = self.get_time_at_x(cx)
+        clicked_time = self.apply_snap_and_magnet(cx, raw_time, duration)
 
         self._selection_anchor = clicked_time
         
@@ -2426,12 +2580,13 @@ class TimelineBarWidget(ctk.CTkFrame):
         Prioritizes playhead drag, then loop/selection edges, then bookmarks, then seek.
         """
         self.canvas.focus_set()
-        x = event.x
+        x, y = self._canvas_pointer_xy(event)
         active_player = getattr(self.controller, "current_video_window", None) or getattr(self.controller, "active_player", None)
+        in_segment_strip_y = self._is_in_segment_strip_y(y)
 
-        # 1. Segment drag/selection has priority over playhead.
+        # 1. Segment drag/selection has priority over playhead, but only inside segment lane Y-range.
         active_seg = self._get_active_segment()
-        if active_seg and active_seg.get("start") is not None and active_seg.get("end") is not None:
+        if in_segment_strip_y and active_seg and active_seg.get("start") is not None and active_seg.get("end") is not None:
             ls = float(active_seg["start"])
             le = float(active_seg["end"])
             margin_drag = 16
@@ -2461,30 +2616,31 @@ class TimelineBarWidget(ctk.CTkFrame):
                 return
 
         # If inactive segment was clicked, activate and allow immediate move-drag.
-        for i in range(len(self.segments) - 1, -1, -1):
-            if i == self.active_segment_index:
-                continue
-            seg = self.segments[i]
-            s = seg.get("start")
-            e = seg.get("end")
-            if s is None or e is None:
-                continue
-            x_s = self.time_to_x(float(s))
-            x_e = self.time_to_x(float(e))
-            if min(x_s, x_e) <= x <= max(x_s, x_e):
-                self.active_segment_index = i
-                self.loop_drag = "move_pending"
-                self._drag_pending_start_x = x
-                x0, x1 = self.get_timeline_bounds()
-                duration = self._get_current_duration() or 60
-                clicked_time = self.x_to_rel(x, x0, x1) * duration
-                self.drag_offset_time = clicked_time - float(s)
-                self.canvas.config(cursor="fleur")
-                self.redraw_timeline()
-                # Ensure player loop bar updates even on simple segment re-selection.
-                self._sync_active_segment_to_player()
-                self._log_segments_state(f"primary_click activate idx={i} x={x}")
-                return
+        if in_segment_strip_y:
+            for i in range(len(self.segments) - 1, -1, -1):
+                if i == self.active_segment_index:
+                    continue
+                seg = self.segments[i]
+                s = seg.get("start")
+                e = seg.get("end")
+                if s is None or e is None:
+                    continue
+                x_s = self.time_to_x(float(s))
+                x_e = self.time_to_x(float(e))
+                if min(x_s, x_e) <= x <= max(x_s, x_e):
+                    self.active_segment_index = i
+                    self.loop_drag = "move_pending"
+                    self._drag_pending_start_x = x
+                    x0, x1 = self.get_timeline_bounds()
+                    duration = self._get_current_duration() or 60
+                    clicked_time = self.x_to_rel(x, x0, x1) * duration
+                    self.drag_offset_time = clicked_time - float(s)
+                    self.canvas.config(cursor="fleur")
+                    self.redraw_timeline()
+                    # Ensure player loop bar updates even on simple segment re-selection.
+                    self._sync_active_segment_to_player()
+                    self._log_segments_state(f"primary_click activate idx={i} x={x}")
+                    return
 
         # 2. Fallback: playhead seek when no segment was hit.
         margin_drag_playhead = 10
@@ -2497,7 +2653,8 @@ class TimelineBarWidget(ctk.CTkFrame):
 
         # 3. Kliknutí na marker (bookmark) - Skok na přesnou pozici
         # Hledáme objekty v těsné blízkosti kliknutí (rozsah 2px)
-        overlapping = self.canvas.find_overlapping(event.x-2, event.y-2, event.x+2, event.y+2)
+        cx, cy = self._canvas_pointer_xy(event)
+        overlapping = self.canvas.find_overlapping(cx - 2, cy - 2, cx + 2, cy + 2)
         for item_id in overlapping:
             marker = getattr(self, "marker_canvas_ids", {}).get(item_id)
             if marker:
@@ -2517,7 +2674,8 @@ class TimelineBarWidget(ctk.CTkFrame):
 
     def on_canvas_double_click(self, event):
         """Double-click a segment to preview it as active loop."""
-        seg_hit = self._get_segment_hover_at(event.x, event.y)
+        cx, cy = self._canvas_pointer_xy(event)
+        seg_hit = self._get_segment_hover_at(cx, cy)
         if seg_hit is None:
             # UX fallback: double-click outside segments seeks and starts playback.
             self.on_timeline_click(event)
@@ -2717,22 +2875,19 @@ class TimelineBarWidget(ctk.CTkFrame):
 
   
   
-    def draw_overlays(self, x0, x1, y_bar_top, y_bar_bot, duration, num_main):
+    def draw_overlays(self, x0, x1, y_loop_top, y_loop_bottom, y_bar_top, y_bar_bot, duration, num_main):
         """
-        Draws markers, playhead, and a thin selection/loop bar ABOVE the thumbnails.
-        The playhead line now extends to the very bottom of the canvas.
+        Loop/Cut segments (drawn after time-axis ticks so they overlap tick lower segments),
+        segment labels, and playhead. Ticks/labels are drawn in ``draw_time_axis_ticks`` after
+        thumbnails. ``y_bar_top`` is kept for callers. Bookmarks are separate.
         """
-        # Markery jen vykreslíme z již načteného self.markers - NERELOADUJEME z disku/DB
-        # (reload_all_markers_and_redraw se volá explicitně při přepnutí videa nebo přidání záložky)
-        if hasattr(self, "markers") and self.markers:
-            self.draw_markers_above_thumbs(x0, x1, y_bar_top, duration)
-
         active_player = getattr(self.controller, "current_video_window", None) or getattr(self.controller, "active_player", None)
         is_repeating = bool(active_player and getattr(active_player, "loop_active", False))
-        strip_h = 20
-        y_strip_top = y_bar_top - strip_h
+        strip_h = max(1, int(round(float(y_loop_bottom) - float(y_loop_top))))
+        y_strip_top = float(y_loop_top)
+        y_strip_bottom = float(y_loop_bottom)
         self._segment_strip_top = y_strip_top
-        self._segment_strip_bottom = y_bar_top
+        self._segment_strip_bottom = y_strip_bottom
 
         if not hasattr(self, "_active_selection_images_tk"):
             self._active_selection_images_tk = []
@@ -2755,7 +2910,7 @@ class TimelineBarWidget(ctk.CTkFrame):
                 left,
                 y_strip_top,
                 right,
-                y_bar_top,
+                y_strip_bottom,
                 fill="#444455",
                 outline="",
                 tags="segment_inactive",
@@ -2769,13 +2924,14 @@ class TimelineBarWidget(ctk.CTkFrame):
                 label = f"Loop/Cut {i + 1} ({seg_len:.1f}s)"
             canvas_w = max(1, self.canvas.winfo_width())
             x_center = min(max(x_center, 20), canvas_w - 20)
+            y_lbl = (y_strip_top + y_strip_bottom) / 2.0
             self.canvas.create_text(
                 x_center,
-                y_strip_top - 8,
+                y_lbl,
                 text=label,
                 fill="#97a6bf",
                 font=("Segoe UI", 9, "bold"),
-                anchor="s",
+                anchor="center",
                 tags="segment_label",
             )
 
@@ -2809,11 +2965,17 @@ class TimelineBarWidget(ctk.CTkFrame):
                     self._active_selection_images_tk.append(p_img)
                     self.canvas.create_image(left, y_strip_top, image=p_img, anchor="nw", tags="loop_rect_alpha")
             except Exception:
-                self.canvas.create_rectangle(left, y_strip_top, right, y_bar_top, fill="#444", tags="loop_rect")
+                self.canvas.create_rectangle(
+                    left, y_strip_top, right, y_strip_bottom, fill="#444", tags="loop_rect",
+                )
 
             border_col = "#FFA500" if is_repeating else "#00bfff"
-            self.canvas.create_line(left, y_strip_top, left, y_bar_top, fill=border_col, width=2, tags="loop_bar")
-            self.canvas.create_line(right, y_strip_top, right, y_bar_top, fill=border_col, width=2, tags="loop_bar")
+            self.canvas.create_line(
+                left, y_strip_top, left, y_strip_bottom, fill=border_col, width=2, tags="loop_bar",
+            )
+            self.canvas.create_line(
+                right, y_strip_top, right, y_strip_bottom, fill=border_col, width=2, tags="loop_bar",
+            )
             seg_len = max(0.0, float(end_time) - float(start_time))
             seg_w = right - left
             x_center = left + (seg_w / 2.0)
@@ -2823,75 +2985,88 @@ class TimelineBarWidget(ctk.CTkFrame):
                 active_label = f"Loop/Cut {(self.active_segment_index or 0) + 1} ({seg_len:.1f}s)"
             canvas_w = max(1, self.canvas.winfo_width())
             x_center = min(max(x_center, 20), canvas_w - 20)
+            y_lbl = (y_strip_top + y_strip_bottom) / 2.0
             self.canvas.create_text(
                 x_center,
-                y_strip_top - 8,
+                y_lbl,
                 text=active_label,
                 fill="#d7ecff" if not is_repeating else "#ffd39b",
                 font=("Segoe UI", 9, "bold"),
-                anchor="s",
+                anchor="center",
                 tags="segment_label",
             )
 
         # --- YELLOW PLAYHEAD (Extended to bottom) ---
         if hasattr(self, "current_time") and duration > 0:
             cx = self.time_to_x(self.current_time)
-            cursor_yellow = "#FFD700"
-            
-            # Use real canvas height to ensure the line is never cut off
-            canvas_h = self.canvas.winfo_height()
-            
-            # Vertical line from top area to the very bottom
-            self.canvas.create_line(cx, y_bar_top - 40, cx, canvas_h, fill=cursor_yellow, width=2, tags="time_cursor")
-            
-            # Stylish playhead handle (flag) at the top
+            cursor_color = "#27C5F5"
+
+            y_playhead_top = max(2.0, float(self.timeline_canvas_top_pad) * 0.5)
+
+            self.canvas.create_line(cx, y_playhead_top, cx, y_bar_bot, fill=cursor_color, width=2, tags="time_cursor")
+
             self.canvas.create_polygon([
-                cx - 8, y_bar_top - 42, cx + 8, y_bar_top - 42, 
-                cx + 8, y_bar_top - 30, cx, y_bar_top - 22, cx - 8, y_bar_top - 30
-            ], fill=cursor_yellow, outline="black", width=1, tags="time_cursor")
+                cx - 8, y_playhead_top - 10, cx + 8, y_playhead_top - 10,
+                cx + 8, y_playhead_top + 2, cx, y_playhead_top + 10, cx - 8, y_playhead_top + 2,
+            ], fill=cursor_color, outline="black", width=1, tags="time_cursor")
         
    
                 
                 
-    def draw_grid_and_axis(self, x0, x1, y_bar_top, y_bar_bot, duration, num_main):
-        """
-        Draws the track background from edge to edge (horizontally) and down to the bottom (vertically).
-        Renders taller ticks and time labels in the upper marker area.
-        """
-        # Get canvas dimensions for full-screen stretching
-        canvas_w = self.canvas.winfo_width()
-        canvas_h = self.canvas.winfo_height() 
-        
-        # Modern subtle dark grey
-        track_bg_color = "#1e1e21" 
-        
-        # Background: From x=0 to width, and from y_bar_top to the very bottom
-        self.canvas.create_rectangle(0, y_bar_top, canvas_w, canvas_h, 
-                                     fill=track_bg_color, outline="", tags="bg")
+    def draw_timeline_background(self, x0, x1, y_bar_bot):
+        """Full-width background for the scrollable timeline height."""
+        canvas_w = max(1, self.canvas.winfo_width())
+        content_h = float(getattr(self, "_timeline_content_height", y_bar_bot) or y_bar_bot)
+        self.canvas.create_rectangle(
+            0, 0, canvas_w, content_h,
+            fill="#1e1e21", outline="", tags="bg",
+        )
 
+    def draw_time_axis_ticks(self, x0, x1, base_y, duration, num_main):
+        """
+        Ruler ticks: bottom on ``base_y`` (thumbnail row top). Major ``base_y-30``…``base_y``,
+        minor ``base_y-22``…``base_y``. Time text anchor ``s`` near ``base_y-32``.
+        Call after thumbnails so ticks meet the filmstrip; Loop/Cut is drawn later in overlays.
+        """
         if num_main <= 1:
             return
 
-        major_tick_len = 40 
-        minor_tick_len = 20
-        
+        tick_y_bottom = float(base_y)
+        major_h = float(getattr(self, "time_axis_major_tick_height", 30))
+        minor_h = float(getattr(self, "time_axis_minor_tick_height", 22))
+        label_off = float(getattr(self, "time_axis_label_offset_above_thumb_top", 32))
+        label_y = tick_y_bottom - label_off
+        # Keep label above major tick tops with a sliver of air.
+        label_y = min(label_y, tick_y_bottom - major_h - 2)
+
         for i in range(num_main):
             rel = i / (num_main - 1)
             center_rel = 0.5
             scaled_rel = (rel - center_rel) * self.zoom_factor + center_rel + self.pan_offset
             x_tick = x0 + scaled_rel * (x1 - x0)
-            
-            # Major ticks: Thicker and taller
-            self.canvas.create_line(x_tick, y_bar_top, x_tick, y_bar_top - major_tick_len, 
-                                    fill="#555555", width=2, tags="grid")
-            
-            # Time labels above ticks
+
+            self.canvas.create_line(
+                x_tick,
+                tick_y_bottom - major_h,
+                x_tick,
+                tick_y_bottom,
+                fill="#555555",
+                width=2,
+                tags="grid",
+            )
+
             timestamp = duration * i / (num_main - 1)
             label = self.format_time(int(timestamp))
-            self.canvas.create_text(x_tick, y_bar_top - major_tick_len - 12, text=label, 
-                                    fill="#999999", font=("Segoe UI", 9, "bold"), tags="grid")
+            self.canvas.create_text(
+                x_tick,
+                label_y,
+                text=label,
+                fill="#999999",
+                font=("Segoe UI", 9, "bold"),
+                anchor="s",
+                tags="grid",
+            )
 
-        # Minor ticks (subdivisions)
         num_subdivs = 10
         for i in range(num_main - 1):
             rel_start = i / (num_main - 1)
@@ -2901,12 +3076,19 @@ class TimelineBarWidget(ctk.CTkFrame):
             scaled_end = (rel_end - center_rel) * self.zoom_factor + center_rel + self.pan_offset
             x_start = x0 + scaled_start * (x1 - x0)
             x_end = x0 + scaled_end * (x1 - x0)
-            
+
             for s in range(1, num_subdivs):
                 sub_rel = s / num_subdivs
                 xx = x_start + (x_end - x_start) * sub_rel
-                self.canvas.create_line(xx, y_bar_top, xx, y_bar_top - minor_tick_len, 
-                                        fill="#3d3d42", width=1, tags="grid")
+                self.canvas.create_line(
+                    xx,
+                    tick_y_bottom - minor_h,
+                    xx,
+                    tick_y_bottom,
+                    fill="#3d3d42",
+                    width=1,
+                    tags="grid",
+                )
                 
    
         
@@ -2914,7 +3096,6 @@ class TimelineBarWidget(ctk.CTkFrame):
 
     def redraw_timeline(self, only_thumbs=False):
         """Redraws timeline with correct duration, dynamically scaling track background."""
-        self.rotated_text_refs = [] # 🟢 Vyčistit staré obrázky z paměti
         w = self.canvas.winfo_width()
         x0, x1 = self.get_timeline_bounds()
         
@@ -2924,42 +3105,71 @@ class TimelineBarWidget(ctk.CTkFrame):
             duration = self.timeline_manager.get_video_duration(self.video_path) or 1
 
         num_main = self.num_thumbs
-        
-        # --- VIZUÁLNÍ OPRAVA: Padding osy ---
-        thumb_y_top = 90               # Fyzický start samotných obrázků
-        padding_y = 12                 # Přesah osy (v pixelech) nad a pod náhledy
-        
-        # Osa teď bude o "padding_y" vyšší nahoře i dole
-        y_bar_top = thumb_y_top - padding_y
-        y_bar_bot = thumb_y_top + self.THUMB_H + padding_y
+
+        layout = self._compute_timeline_y_layout()
+        self._timeline_layout = layout
+        self._timeline_content_height = layout["content_height"]
+
+        y_marker_top = layout["y_marker_top"]
+        y_marker_bot = layout["y_marker_bot"]
+        y_loop_top = layout["y_loop_top"]
+        y_loop_bottom = layout["y_loop_bottom"]
+        y_bar_top = layout["y_bar_top"]
+        thumb_y_top = layout["thumb_y_top"]
+        y_bar_bot = layout["y_bar_bot"]
 
         if not only_thumbs:
             self.canvas.delete("all")
-            self.draw_grid_and_axis(x0, x1, y_bar_top, y_bar_bot, duration, num_main)
-            self.draw_overlays(x0, x1, y_bar_top, y_bar_bot, duration, num_main)
+            self.draw_timeline_background(x0, x1, y_bar_bot)
         else:
-            # Smažeme náhledy I markery, aby se markery nakreslily nad nové náhledy
             self.canvas.delete("thumb")
             self.canvas.delete("marker")
-            # 🟢 Vždy překreslíme markery, i když se jen mění náhledy
-            self.draw_markers_above_thumbs(x0, x1, y_bar_top, duration)
+            self.canvas.delete("bookmark_stem")
 
-        # --- DŮLEŽITÉ: Náhledům předáme jejich původní souřadnici (thumb_y_top) ---
         self.thumb_centers = self.draw_thumbnails(x0, x1, thumb_y_top, self.THUMB_H, num_main)
-        
-        # --- Z-INDEX MAGIE ---
-        # Ačkoli jsme náhledy nakreslili jako poslední, teď vytáhneme overlays úplně nahoru:
-        self.canvas.tag_raise("loop_rect")        # Solidní barva selekce (fallback)
-        self.canvas.tag_raise("loop_rect_alpha")  # Naše nová průhledná vrstva selekce
-        self.canvas.tag_raise("loop_bar")         # Zelené/Zlaté/Modré okraje
-        self.canvas.tag_raise("segment_label")    # Labels above segments
-        self.canvas.tag_raise("marker")           # Záložky
-        self.canvas.tag_raise("time_cursor")      # Červený Playhead
+
+        if not only_thumbs:
+            self.draw_time_axis_ticks(x0, x1, thumb_y_top, duration, num_main)
+            self.draw_markers_above_thumbs(
+                x0, x1, y_marker_top, y_marker_bot, duration, phase="stems",
+            )
+            self.draw_overlays(
+                x0, x1, y_loop_top, y_loop_bottom, y_bar_top, y_bar_bot, duration, num_main,
+            )
+            self.draw_markers_above_thumbs(
+                x0, x1, y_marker_top, y_marker_bot, duration, phase="shapes",
+            )
+        else:
+            self.draw_markers_above_thumbs(
+                x0, x1, y_marker_top, y_marker_bot, duration, phase="stems",
+            )
+            self.draw_markers_above_thumbs(
+                x0, x1, y_marker_top, y_marker_bot, duration, phase="shapes",
+            )
+
+        self.canvas.tag_raise("loop_rect")
+        self.canvas.tag_raise("loop_rect_alpha")
+        self.canvas.tag_raise("loop_bar")
+        self.canvas.tag_raise("segment_label")
+        self.canvas.tag_raise("marker")
+        self.canvas.tag_raise("time_cursor")
+
+        # Bookmark stems pass behind tick labels and tick marks.
+        try:
+            gitems = self.canvas.find_withtag("grid")
+            if gitems:
+                self.canvas.tag_lower("bookmark_stem", gitems[0])
+        except tk.TclError:
+            pass
+
+        vw = max(1, int(self.canvas.winfo_width()))
+        self.canvas.configure(scrollregion=(0, 0, vw, float(self._timeline_content_height)))
+        self.after_idle(self._update_timeline_vscrollbar_visibility)
+
         self.update_info_toolbar()
 
     def redraw_timelineOld(self, only_thumbs=False):
         """Redraws timeline with correct duration and layering."""
-        self.rotated_text_refs = [] # 🟢 Vyčistit staré obrázky z paměti
         w = self.canvas.winfo_width()
         x0, x1 = self.get_timeline_bounds()
         
@@ -2969,33 +3179,54 @@ class TimelineBarWidget(ctk.CTkFrame):
             duration = self.timeline_manager.get_video_duration(self.video_path) or 1
 
         num_main = self.num_thumbs
-        y_bar_top = 90
-        y_bar_bot = y_bar_top + self.THUMB_H
+        layout = self._compute_timeline_y_layout()
+        y_marker_top = layout["y_marker_top"]
+        y_marker_bot = layout["y_marker_bot"]
+        y_loop_top = layout["y_loop_top"]
+        y_loop_bottom = layout["y_loop_bottom"]
+        y_bar_top = layout["y_bar_top"]
+        thumb_y_top = layout["thumb_y_top"]
+        y_bar_bot = layout["y_bar_bot"]
+        self._timeline_layout = layout
+        self._timeline_content_height = layout["content_height"]
 
         if not only_thumbs:
             self.canvas.delete("all")
-            self.draw_grid_and_axis(x0, x1, y_bar_top, y_bar_bot, duration, num_main)
-            self.draw_overlays(x0, x1, y_bar_top, y_bar_bot, duration, num_main)
+            self.draw_timeline_background(x0, x1, y_bar_bot)
+            self.thumb_centers = self.draw_thumbnails(x0, x1, thumb_y_top, self.THUMB_H, num_main)
+            self.draw_time_axis_ticks(x0, x1, thumb_y_top, duration, num_main)
+            self.draw_markers_above_thumbs(
+                x0, x1, y_marker_top, y_marker_bot, duration, phase="stems",
+            )
+            self.draw_overlays(
+                x0, x1, y_loop_top, y_loop_bottom, y_bar_top, y_bar_bot, duration, num_main,
+            )
+            self.draw_markers_above_thumbs(
+                x0, x1, y_marker_top, y_marker_bot, duration, phase="shapes",
+            )
         else:
-            # Smažeme náhledy I markery, aby se markery nakreslily nad nové náhledy
             self.canvas.delete("thumb")
             self.canvas.delete("marker")
-            # 🟢 Vždy překreslíme markery, i když se jen mění náhledy
-            self.draw_markers_above_thumbs(x0, x1, y_bar_top, duration)
+            self.canvas.delete("bookmark_stem")
+            self.thumb_centers = self.draw_thumbnails(x0, x1, thumb_y_top, self.THUMB_H, num_main)
+            self.draw_markers_above_thumbs(
+                x0, x1, y_marker_top, y_marker_bot, duration, phase="stems",
+            )
+            self.draw_markers_above_thumbs(
+                x0, x1, y_marker_top, y_marker_bot, duration, phase="shapes",
+            )
 
-            
-        # Náhledy se kreslí vždycky
-        self.thumb_centers = self.draw_thumbnails(x0, x1, y_bar_top, self.THUMB_H, num_main)
+        vw = max(1, int(self.canvas.winfo_width()))
+        self.canvas.configure(scrollregion=(0, 0, vw, float(self._timeline_content_height)))
+        self.after_idle(self._update_timeline_vscrollbar_visibility)
         
         # --- Z-INDEX MAGIE ---
-        # Ačkoli jsme náhledy nakreslili jako poslední, teď vytáhneme overlays úplně nahoru:
-        self.canvas.tag_raise("loop_rect")        # Solidní barva selekce (fallback)
-        self.canvas.tag_raise("loop_rect_alpha")  # Naše nová průhledná vrstva selekce
-        self.canvas.tag_raise("loop_bar")         # Zelené/Zlaté/Modré okraje
-        self.canvas.tag_raise("marker")           # Záložky
-        self.canvas.tag_raise("time_cursor")      # Červený Playhead
-        
-   
+        self.canvas.tag_raise("loop_rect")
+        self.canvas.tag_raise("loop_rect_alpha")
+        self.canvas.tag_raise("loop_bar")
+        self.canvas.tag_raise("segment_label")
+        self.canvas.tag_raise("marker")
+        self.canvas.tag_raise("time_cursor")
 
 
 
@@ -3048,6 +3279,20 @@ class TimelineBarWidget(ctk.CTkFrame):
                     for t in (seg.get("start"), seg.get("end")):
                         if t is not None:
                             snap_points.append(float(t))
+            elif self.snap_type == "bookmark":
+                # Snap only to bookmark markers.
+                for m in getattr(self, "markers", []):
+                    if m.get("type") != "bookmark":
+                        continue
+                    if not self.marker_types_visible.get("bookmark", True):
+                        continue
+                    t = m.get("timestamp")
+                    if t is None:
+                        continue
+                    try:
+                        snap_points.append(float(t))
+                    except (TypeError, ValueError):
+                        continue
 
             # Pojistka pro jistotu, odfiltrujeme případné nesmysly
             snap_points = [p for p in snap_points if p is not None]
@@ -3099,6 +3344,32 @@ class TimelineBarWidget(ctk.CTkFrame):
                         return data if isinstance(data, list) else []
                 except Exception as e:
                     logging.error(f"Error loading bookmarks: {e}")
+            return []
+
+    def _timeline_norm_path(self, path):
+        if not path:
+            return ""
+        try:
+            return os.path.normcase(os.path.normpath(os.path.abspath(path)))
+        except (OSError, ValueError, TypeError):
+            try:
+                return os.path.normcase(os.path.normpath(str(path)))
+            except Exception:
+                return ""
+
+    def _load_legacy_player_bookmarks_json(self, video_path):
+        """Same path as VideoPlayer: ``bookmarks/<basename>.json`` (cwd-relative)."""
+        if not video_path:
+            return []
+        legacy = os.path.join("bookmarks", os.path.basename(video_path) + ".json")
+        if not os.path.isfile(legacy):
+            return []
+        try:
+            with open(legacy, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logging.info("[Timeline] Legacy bookmarks file unreadable %s: %s", legacy, e)
             return []
 
     def _segments_file_for_path(self, video_path):
@@ -3253,55 +3524,81 @@ class TimelineBarWidget(ctk.CTkFrame):
             logging.info(f"[ERROR] Failed to load subtitle markers: {e}")
 
     def update_bookmarks(self):
-            """Reloads bookmarks from player or JSON file into the widget's memory."""
-            if not self.video_path or not os.path.exists(self.video_path):
-                return
+        """Reload bookmarks from player memory, sidecar JSON, and app ``bookmarks/`` folder."""
+        if not self.video_path or not os.path.exists(self.video_path):
+            return
 
-            # 🟢 VYČISTIT STARÉ MARKERY (Důležité!)
-            self.markers = [m for m in self.markers if m.get("type") != "bookmark"]
-            
-            # 🟢 Načtení dat
-            active_player = getattr(self.controller, "current_video_window", None)
-            if active_player and active_player.video_path == self.video_path:
-                # Bereme z běžícího přehrávače
-                bookmarks_data = getattr(active_player, "bookmarks", [])
-            else:
-                # Bereme přímo z JSONu na disku
-                bookmarks_data = self.load_bookmarks_for_path(self.video_path)
+        self.markers = [m for m in self.markers if m.get("type") != "bookmark"]
 
-            # 🟢 Převod na markery pro vykreslení
-            for b in bookmarks_data:
-                # Podpora pro různé názvy klíčů (time vs timestamp)
+        merged_raw = []
+        seen = set()
+
+        def add_raw_list(raw):
+            for b in raw or []:
+                if not isinstance(b, dict):
+                    continue
                 t = b.get("time") if b.get("time") is not None else b.get("timestamp")
-                n = b.get("name") if b.get("name") is not None else b.get("label", "Marker")
-                
-                if t is not None:
-                    self.markers.append({
-                        "type": "bookmark",
-                        "timestamp": float(t),
-                        "label": str(n),
-                        "color": "#FFA500" # Oranžová pro bookmarks
-                    })
+                if t is None:
+                    continue
+                try:
+                    tf = float(t)
+                except (TypeError, ValueError):
+                    continue
+                name = str(b.get("name") if b.get("name") is not None else b.get("label", ""))
+                key = (round(tf, 2), name.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged_raw.append(b)
+
+        want = self._timeline_norm_path(self.video_path)
+        player = getattr(self.controller, "current_video_window", None) or getattr(
+            self.controller, "active_player", None
+        )
+        if player and want and self._timeline_norm_path(getattr(player, "video_path", None) or "") == want:
+            add_raw_list(getattr(player, "bookmarks", []))
+
+        add_raw_list(self.load_bookmarks_for_path(self.video_path))
+        add_raw_list(self._load_legacy_player_bookmarks_json(self.video_path))
+
+        for b in merged_raw:
+            t = b.get("time") if b.get("time") is not None else b.get("timestamp")
+            n = b.get("name") if b.get("name") is not None else b.get("label", "Marker")
+            if t is not None:
+                self.markers.append({
+                    "type": "bookmark",
+                    "timestamp": float(t),
+                    "label": str(n),
+                    "color": "#FFA500",
+                })
+
+        n_bm = len([m for m in self.markers if m.get("type") == "bookmark"])
+        logging.info("[Timeline] Loaded %d bookmarks (merged sources).", n_bm)
             
-            logging.info(f"[Timeline] Loaded {len([m for m in self.markers if m['type']=='bookmark'])} bookmarks.")
             
-            
-    def draw_markers_above_thumbs(self, x0, x1, y_bar_top, duration):
-            """Draws markers with shortened vertical labels and populates lookup map."""
+    def draw_markers_above_thumbs(self, x0, x1, y_marker_top, y_marker_bot, duration, phase="both"):
+            """
+            Draw bookmark/other markers. ``phase``:
+            - ``stems`` — dashed guides only (under loop/cut layer);
+            - ``shapes`` — tabs + text only;
+            - ``both`` — single-pass draw (unused in main redraw; kept for compatibility).
+            """
             if not duration or duration <= 0:
                 return
 
-            self.marker_canvas_ids.clear()
-            # rotated_text_refs se čistí v redraw_timeline
-            
-            marker_height = 18
-            y_marker_bot = y_bar_top - 5 
-            y_marker_top = y_marker_bot - marker_height
-            
-            marker_spacing = {} # Pro skládání popisků nad sebe při kolizi X
+            if phase in ("shapes", "both"):
+                self.marker_canvas_ids.clear()
+
+            y_marker_top = float(y_marker_top)
+            y_marker_bot = float(y_marker_bot)
+
+            # Staggered bookmark labels sit above their tabs; row 0 anchor just above ``y_marker_top``.
+            marker_spacing = {} # Pro skládání popisků nad sebe při kolizi X (ne-bookmark markery)
+
+            bookmark_stagger_index = 0
+            bookmark_colors = getattr(self, "bookmark_colors", ["#FFD700", "#FFA500", "#FF4500"])
 
             for marker in self.markers:
-                # Kontrola viditelnosti z OptionsWidgetu
                 if not self.marker_types_visible.get(marker.get("type"), True):
                     continue
 
@@ -3314,45 +3611,80 @@ class TimelineBarWidget(ctk.CTkFrame):
                     logging.warning(f"[Timeline] Skipping marker with invalid timestamp: {ts!r}")
                     continue
 
-                # Výpočet X pozice (bere v úvahu Zoom a Pan)
                 rel = ts / duration
                 center_rel = 0.5
                 scaled_rel = (rel - center_rel) * self.zoom_factor + center_rel + self.pan_offset
                 x = x0 + scaled_rel * (x1 - x0)
 
-                # Vykreslení jen pokud je v viditelné oblasti
+                is_bookmark = marker.get("type") == "bookmark"
+                if is_bookmark:
+                    n_rows = max(1, int(self.bookmark_label_rows))
+                    level = bookmark_stagger_index % n_rows
+                    bookmark_stagger_index += 1
+                    current_color = bookmark_colors[level % len(bookmark_colors)]
+                else:
+                    level = 0
+                    current_color = None
+
                 if x0 <= x <= x1:
-                    color = marker.get("color", "#FFA500")
-                    
-                    # Logika pro zamezení překrývání popisků (stohování)
-                    x_int = int(x / 10) # Seskupení blízkých markerů
-                    offset = marker_spacing.get(x_int, 0)
-                    marker_spacing[x_int] = offset + 1
-                    y_text_stack = offset * 15 
-                    
-                    # 1. Vykreslení tvaru záložky
-                    rect_id = self.canvas.create_rectangle(x - 6, y_marker_top, x + 6, y_marker_bot - 5, 
+                    bookmark_y_shift = -3.0 if is_bookmark else 0.0
+                    marker_top_y = y_marker_top + bookmark_y_shift
+                    marker_bot_y = y_marker_bot + bookmark_y_shift
+                    if phase in ("both", "stems") and is_bookmark and level > 0:
+                        base_text_y = marker_top_y - 12.0
+                        base_b = base_text_y
+                        text_y_for_stem = base_b - level * float(self.bookmark_row_height)
+                        self.canvas.create_line(
+                            x,
+                            text_y_for_stem,
+                            x,
+                            marker_bot_y,
+                            fill=current_color,
+                            width=1,
+                            dash=(2, 3),
+                            tags="bookmark_stem",
+                        )
+
+                    if phase == "stems":
+                        continue
+
+                    color = current_color if is_bookmark else marker.get("color", "#FFA500")
+
+                    if is_bookmark:
+                        base_text_y = marker_top_y - 12.0
+                        base_b = base_text_y
+                        text_y_pos = base_b - level * float(self.bookmark_row_height)
+                    else:
+                        x_int = int(x / 10)
+                        offset = marker_spacing.get(x_int, 0)
+                        marker_spacing[x_int] = offset + 1
+                        y_text_stack = offset * 15
+                        text_y_pos = y_marker_top - 10 - y_text_stack
+
+                    rect_id = self.canvas.create_rectangle(x - 6, marker_top_y, x + 6, marker_bot_y - 5,
                                                  fill=color, outline="", tags="marker")
-                    arrow_id = self.canvas.create_polygon([x - 6, y_marker_bot - 5, x + 6, y_marker_bot - 5, x, y_marker_bot], 
+                    arrow_id = self.canvas.create_polygon([x - 6, marker_bot_y - 5, x + 6, marker_bot_y - 5, x, marker_bot_y],
                                                fill=color, outline="", tags="marker")
-                    
-                    # 2. Vykreslení zkráceného popisku (max 10 slov)
-                    full_label = marker.get("label", "")
-                    words = str(full_label).split()
-                    short_label = " ".join(words[:10])
-                    if len(words) > 10: short_label += "..."
-                    
-                    # Použijeme tvůj pomocník pro rotaci textu
-                    text_img = self.create_rotated_text_image(short_label, font_size=10, color=color)
-                    self.rotated_text_refs.append(text_img) # Uložení reference proti smazání z paměti
-                    
-                    text_id = self.canvas.create_image(x, y_marker_top - 10 - y_text_stack, 
-                                                       image=text_img, anchor="s", tags="marker")
-                    
-                    # 3. Naplnění mapy pro interakci (aby tooltip věděl, co zobrazit)
+
+                    full_label = str(marker.get("label", ""))
+                    if len(full_label) > 12:
+                        short_label = full_label[:12] + "..."
+                    else:
+                        short_label = full_label
+
+                    text_id = self.canvas.create_text(
+                        x,
+                        text_y_pos,
+                        text=short_label,
+                        fill=color,
+                        font=("Segoe UI", 9, "bold"),
+                        anchor="s",
+                        tags="marker",
+                    )
+
                     self.marker_canvas_ids[rect_id] = marker
                     self.marker_canvas_ids[arrow_id] = marker
-                    self.marker_canvas_ids[text_id] = marker        
+                    self.marker_canvas_ids[text_id] = marker
         
     
     
@@ -3471,10 +3803,11 @@ class TimelineBarWidget(ctk.CTkFrame):
                 return
 
             # 1. Calculate raw time directly from X coordinate
-            raw_time = self.get_time_at_x(event.x)
+            cx = self._canvas_pointer_x(event)
+            raw_time = self.get_time_at_x(cx)
             
             # 2. 🔥 ZDE SE APLIKUJE PŘITAŽLIVOST
-            clicked_time = self.apply_snap_and_magnet(event.x, raw_time, duration)
+            clicked_time = self.apply_snap_and_magnet(cx, raw_time, duration)
             
             if self.on_seek:
                 self.on_seek(clicked_time)
@@ -3512,7 +3845,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         
     def on_canvas_drag(self, event):
         """Handles mouse drag events for timeline playhead, and moving/resizing selections."""
-        x = event.x
+        x = self._canvas_pointer_x(event)
         x0, x1 = self.get_timeline_bounds()
         duration = self._get_current_duration() or 60
         raw_time = self.x_to_rel(x, x0, x1) * duration
@@ -3649,8 +3982,8 @@ class TimelineBarWidget(ctk.CTkFrame):
 
     def on_mouse_move(self, event):
             """Checks if mouse is over a marker and shows the full tooltip."""
-            # Najdeme objekty pod kurzorem (s malou tolerancí 2px)
-            items = self.canvas.find_overlapping(event.x-2, event.y-2, event.x+2, event.y+2)
+            cx, cy = self._canvas_pointer_xy(event)
+            items = self.canvas.find_overlapping(cx - 2, cy - 2, cx + 2, cy + 2)
             
             found_marker = None
             for item_id in items:
@@ -3659,12 +3992,12 @@ class TimelineBarWidget(ctk.CTkFrame):
                     break
             
             if found_marker:
-                self.show_marker_tooltip(event.x, event.y, found_marker)
+                self.show_marker_tooltip(cx, cy, found_marker)
                 self.canvas.config(cursor="hand2")
             else:
-                seg_hit = self._get_segment_hover_at(event.x, event.y)
+                seg_hit = self._get_segment_hover_at(cx, cy)
                 if seg_hit is not None:
-                    self.show_segment_tooltip(event.x, event.y, seg_hit)
+                    self.show_segment_tooltip(cx, cy, seg_hit)
                     self.canvas.config(cursor="hand2")
                 else:
                     self.hide_marker_tooltip()
@@ -3673,11 +4006,7 @@ class TimelineBarWidget(ctk.CTkFrame):
                         self.canvas.config(cursor="")
 
     def _get_segment_hover_at(self, x, y):
-        strip_top = getattr(self, "_segment_strip_top", None)
-        strip_bottom = getattr(self, "_segment_strip_bottom", None)
-        if strip_top is None or strip_bottom is None:
-            return None
-        if not (strip_top <= y <= strip_bottom):
+        if not self._is_in_segment_strip_y(y):
             return None
         for i in range(len(self.segments) - 1, -1, -1):
             seg = self.segments[i]
@@ -3695,6 +4024,13 @@ class TimelineBarWidget(ctk.CTkFrame):
                     "end": float(end_time),
                 }
         return None
+
+    def _is_in_segment_strip_y(self, y):
+        strip_top = getattr(self, "_segment_strip_top", None)
+        strip_bottom = getattr(self, "_segment_strip_bottom", None)
+        if strip_top is None or strip_bottom is None:
+            return False
+        return strip_top <= y <= strip_bottom
 
     def show_marker_tooltip(self, x, y, marker):
         """Displays a neat tooltip on the canvas with full text."""
