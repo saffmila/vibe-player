@@ -464,16 +464,17 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.loop_drag = None
         self.segments = []
         self.active_segment_index = None
+
+        # Playback / snapping state (must exist before create_widgets — toolbar reads these).
+        self.current_time = 0
+        self.snap_types = ["none", "tick", "thumb", "cut"]
+        self.snap_type = "none"
+        self.magnet_mode = False
         
         self.thumb_images = [] # This will now store PhotoImage objects.
         # self.THUMB_W, self.THUMB_H = 190, 130
 
         self.create_widgets()
-       
-        self.current_time = 0
-        self.snap_types = ["none", "tick", "thumb", "cut"]
-        self.snap_type = "none"
-        self.magnet_mode = False
         self.toggle_all_label = tk.StringVar(value="Show No Markers")
         self.rotated_text_refs = []
 
@@ -732,7 +733,8 @@ class TimelineBarWidget(ctk.CTkFrame):
             def cmd_set_loop_start(t=clicked_time):
                 active_player.loop_active = True
                 self.loop_mode = True
-                if hasattr(self, "loop_button"): self.loop_button.config(text="🔁 Loop/Cut: ON")
+                if hasattr(self, "loop_button"):
+                    self._apply_loop_button_style()
                 
                 if getattr(active_player, "loop_end", None) is None:
                     active_player.loop_end = getattr(self, "loop_end", None) or (min(t + 1.0, duration) if duration else t + 1.0)
@@ -745,7 +747,8 @@ class TimelineBarWidget(ctk.CTkFrame):
             def cmd_set_loop_end(t=clicked_time):
                 active_player.loop_active = True
                 self.loop_mode = True
-                if hasattr(self, "loop_button"): self.loop_button.config(text="🔁 Loop/Cut: ON")
+                if hasattr(self, "loop_button"):
+                    self._apply_loop_button_style()
                 
                 if getattr(active_player, "loop_start", None) is None:
                     active_player.loop_start = getattr(self, "loop_start", None) or max(t - 1.0, 0.0)
@@ -760,7 +763,8 @@ class TimelineBarWidget(ctk.CTkFrame):
                 # Vezme naši pasivní modrou selekci a fyzicky ji pošle do přehrávače
                 active_player.loop_active = True
                 self.loop_mode = True
-                if hasattr(self, "loop_button"): self.loop_button.config(text="🔁 Loop/Cut: ON")
+                if hasattr(self, "loop_button"):
+                    self._apply_loop_button_style()
                 active_player.set_loop_start_from_timeline(self.loop_start)
                 active_player.set_loop_end_from_timeline(self.loop_end)
                 self.loop_start = getattr(active_player, "loop_start", self.loop_start)
@@ -772,7 +776,7 @@ class TimelineBarWidget(ctk.CTkFrame):
                 self.loop_start = getattr(active_player, "loop_start", self.loop_start)
                 self.loop_end = getattr(active_player, "loop_end", self.loop_end)
                 if hasattr(self, "loop_button"):
-                    self.loop_button.config(text=f"🔁 Loop/Cut: {'ON' if getattr(active_player, 'loop_active', False) else 'OFF'}")
+                    self._apply_loop_button_style()
                 self.redraw_timeline()
 
             menu.add_command(label="Set LOOP START", command=cmd_set_loop_start)
@@ -1009,6 +1013,8 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.canvas.bind("<Button-3>", self.show_context_menu)
         self.canvas.bind("<Motion>", self.on_mouse_move)
         self.canvas.bind("<space>", self.on_space_press)
+        self.canvas.bind("m", self._magnet_keyboard_toggle)
+        self.canvas.bind("M", self._magnet_keyboard_toggle)
         self.canvas.bind("<Enter>", lambda e: self.canvas.focus_set())
 
         # Define button styling.
@@ -1026,15 +1032,25 @@ class TimelineBarWidget(ctk.CTkFrame):
             "width": 14
         }
 
+        # Shared highlight colors for toolbar toggles (Loop / Cut, Magnet).
+        self._toolbar_toggle_bg_off = btn_style["bg"]
+        self._toolbar_toggle_bg_on = "#1f538d"
+        self._toolbar_toggle_active_off = btn_style["activebackground"]
+        self._toolbar_toggle_active_on = "#2a6bb0"
+
         # Create and pack control buttons (row=2).
         # Loop/Cut group order: toggle | skip prev/next | add/remove segment | { } (edit active bounds only).
         self.loop_controls_frame = tk.Frame(self, bg="#333333")
         self.loop_controls_frame.grid(row=2, column=0, pady=(1, 1), padx=(4, 6), sticky="w")
 
+        loop_btn_style = {k: v for k, v in btn_style.items() if k != "width"}
+        loop_btn_style["padx"] = 8
         self.loop_button = tk.Button(
-            self.loop_controls_frame, text="🔁 Loop/Cut: OFF", command=self.on_loop_button_click, **btn_style
+            self.loop_controls_frame, text="🔁 Loop/Cut", command=self.on_loop_button_click, **loop_btn_style
         )
-        self.loop_button.pack(side="left")
+        self.loop_button.pack(side="left", padx=(0, 2))
+        Tooltip(self.loop_button, "Toggle Loop / Cut")
+        self._apply_loop_button_style()
 
         icon_btn_style = dict(btn_style)
         icon_btn_style["width"] = 3
@@ -1072,34 +1088,48 @@ class TimelineBarWidget(ctk.CTkFrame):
             Tooltip(self.end_cut_button, "Set active end to current time"),
         ]
 
-        self.grid_columnconfigure(1, weight=1)  # Keep center area empty and expandable.
+        # Only the middle column grows; left/right stay content-sized and the right cluster stays east.
+        self.grid_columnconfigure(0, weight=0)
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_columnconfigure(2, weight=0)
 
         self.right_controls_frame = tk.Frame(self, bg="#333333")
-        # Slightly tighter left inset so SNAP reads as its own control cluster.
         self.right_controls_frame.grid(row=2, column=2, pady=(1, 1), padx=(2, 4), sticky="e")
+        self.right_controls_frame.pack_propagate(True)
 
-        self.snap_btn = tk.Button(self.right_controls_frame, text="📐 SNAP ▼: none", command=self.show_snap_menu, **btn_style)
+        # Do not use btn_style width=14 here — it forces a very wide Snap button and a fake gap before Magnet.
+        snap_btn_style = {k: v for k, v in btn_style.items() if k != "width"}
+        snap_btn_style["padx"] = 6
+        self.snap_btn = tk.Button(self.right_controls_frame, text="📐 none", command=self.show_snap_menu, **snap_btn_style)
         self.snap_btn.pack(side="left", padx=(0, 2))
         self.snap_btn.bind("<Button-3>", self.show_snap_menu)
+        Tooltip(self.snap_btn, "Cycle Snap Mode (none/tick/thumb/cut)")
 
-        self.snap_magnet_separator = tk.Frame(self.right_controls_frame, bg="#888888", width=1)
-        self.snap_magnet_separator.pack(side="left", fill="y", pady=3, padx=(4, 4))
+        magnet_btn_style = dict(btn_style)
+        magnet_btn_style["width"] = 4
+        magnet_btn_style["padx"] = 6
+        self.magnet_btn = tk.Button(self.right_controls_frame, text="🧲", command=self.toggle_magnet, **magnet_btn_style)
+        self.magnet_btn.pack(side="left", padx=(0, 2))
+        Tooltip(self.magnet_btn, "Toggle Magnet (M)")
+        self._apply_magnet_button_style()
 
-        self.magnet_btn = tk.Button(self.right_controls_frame, text="🧲 MAGNET: off", command=self.toggle_magnet, **btn_style)
-        self.magnet_btn.pack(side="left", padx=(2, 0))
-
+        # Separator after Snap+Magnet, before Options/Export.
         self.right_pair_separator = tk.Frame(self.right_controls_frame, bg="#666666", width=1)
-        self.right_pair_separator.pack(side="left", fill="y", pady=3, padx=(8, 6))
+        self.right_pair_separator.pack(side="left", fill="y", pady=3, padx=(4, 4))
 
         self.grid_rowconfigure(0, weight=0)     # Toolbar nahoře se NESMÍ natahovat
         self.grid_rowconfigure(1, weight=1)     # Canvas (timeline) uprostřed se MUSÍ natahovat
         self.grid_rowconfigure(2, weight=0)     # Tlačítka dole se NESMÍ natahovat
 
-        self.options_btn = tk.Button(self.right_controls_frame, text="⚙ Options", command=self.show_options_menu, **btn_style)
-        self.options_btn.pack(side="left", padx=(1, 0))
+        options_btn_style = dict(btn_style)
+        options_btn_style["width"] = 4
+        options_btn_style["padx"] = 6
+        self.options_btn = tk.Button(self.right_controls_frame, text="⚙", command=self.show_options_menu, **options_btn_style)
+        self.options_btn.pack(side="left", padx=(0, 2))
+        Tooltip(self.options_btn, "Timeline Options")
 
         self.export_action_separator = tk.Frame(self.right_controls_frame, bg="#444444", width=1)
-        self.export_action_separator.pack(side="left", fill="y", pady=3, padx=(8, 6))
+        self.export_action_separator.pack(side="left", fill="y", pady=3, padx=(4, 4))
 
         self.convert_btn = tk.Button(
             self.right_controls_frame,
@@ -1107,7 +1137,7 @@ class TimelineBarWidget(ctk.CTkFrame):
             command=lambda: self.open_export_dialog(self.video_path, self.loop_start, self.loop_end),
             **btn_style,
         )
-        self.convert_btn.pack(side="left", padx=(1, 0))
+        self.convert_btn.pack(side="left", padx=(0, 0))
         
         self.load_thumbnails()  # Initial load
         self.redraw_timeline()  # Redraw the timeline
@@ -2145,19 +2175,19 @@ class TimelineBarWidget(ctk.CTkFrame):
                 active_player.loop_end = None
                 if hasattr(active_player, "update_loop_bar_display"):
                     active_player.update_loop_bar_display()
-            self.loop_button.config(text="🔁 Loop/Cut: OFF")
+            self._apply_loop_button_style()
         else:
             self._sync_active_segment_to_player()
+            self._apply_loop_button_style()
         self.redraw_timeline()
 
     def on_loop_button_click(self):
         active_player = getattr(self.controller, "current_video_window", None)
         if active_player and hasattr(active_player, "toggle_loop"):
             active_player.toggle_loop()
-            new_loop_state = getattr(active_player, "loop_active", False)
             self.loop_start = getattr(active_player, "loop_start", self.loop_start)
             self.loop_end = getattr(active_player, "loop_end", self.loop_end)
-            self.loop_button.config(text=f"🔁 Loop/Cut: {'ON' if new_loop_state else 'OFF'}")
+            self._apply_loop_button_style()
             self.redraw_timeline()
         else:
             logging.warning("Could not toggle loop: No active player or toggle_loop method found.")
@@ -2205,7 +2235,7 @@ class TimelineBarWidget(ctk.CTkFrame):
             if hasattr(active_player, "update_loop_bar_display"):
                 active_player.update_loop_bar_display()
         self.loop_mode = False
-        self.loop_button.config(text="🔁 Loop/Cut: OFF")
+        self._apply_loop_button_style()
         self.save_segments_for_path(self.video_path)
         self.redraw_timeline()
 
@@ -2254,7 +2284,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         if snap_type not in self.snap_types:
             return
         self.snap_type = snap_type
-        self.snap_btn.config(text=f"📐 SNAP ▼: {self.snap_type}")
+        self.snap_btn.config(text=f"📐 {self.snap_type}")
 
     def show_snap_menu(self, event=None):
         menu = tk.Menu(self, tearoff=0, bg="#2b2b2b", fg="white", activebackground="#444")
@@ -2283,9 +2313,49 @@ class TimelineBarWidget(ctk.CTkFrame):
         idx = (idx + 1) % len(self.snap_types)
         self.set_snap_type(self.snap_types[idx])
 
+    def _apply_loop_button_style(self):
+        """Icon-only Loop / Cut: same blue highlight as Magnet when playback loop is active."""
+        if not getattr(self, "loop_button", None):
+            return
+        if not hasattr(self, "_toolbar_toggle_bg_on"):
+            return
+        active_player = getattr(self.controller, "current_video_window", None) or getattr(
+            self.controller, "active_player", None
+        )
+        loop_on = bool(getattr(active_player, "loop_active", False)) if active_player else False
+        if loop_on:
+            self.loop_button.config(
+                bg=self._toolbar_toggle_bg_on,
+                activebackground=self._toolbar_toggle_active_on,
+            )
+        else:
+            self.loop_button.config(
+                bg=self._toolbar_toggle_bg_off,
+                activebackground=self._toolbar_toggle_active_off,
+            )
+
+    def _apply_magnet_button_style(self):
+        """NLE-style pressed state: highlight background when magnet snapping is enabled."""
+        if not getattr(self, "magnet_btn", None):
+            return
+        if self.magnet_mode:
+            self.magnet_btn.config(
+                bg=self._toolbar_toggle_bg_on,
+                activebackground=self._toolbar_toggle_active_on,
+            )
+        else:
+            self.magnet_btn.config(
+                bg=self._toolbar_toggle_bg_off,
+                activebackground=self._toolbar_toggle_active_off,
+            )
+
+    def _magnet_keyboard_toggle(self, _event=None):
+        self.toggle_magnet()
+        return "break"
+
     def toggle_magnet(self):
         self.magnet_mode = not self.magnet_mode
-        self.magnet_btn.config(text=f"MAGNET: {'on' if self.magnet_mode else 'off'}")
+        self._apply_magnet_button_style()
                          
     def on_canvas_resize(self, event):
         logging.info(f"Canvas resized: {event.width}x{event.height}")
@@ -2346,7 +2416,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.canvas.config(cursor="sb_h_double_arrow")
         
         if hasattr(self, "loop_button"):
-            self.loop_button.config(text="🔁 Loop/Cut: OFF")
+            self._apply_loop_button_style()
         
         self.redraw_timeline()
 
@@ -2528,7 +2598,7 @@ class TimelineBarWidget(ctk.CTkFrame):
                         pass
 
         if hasattr(self, "loop_button"):
-            self.loop_button.config(text="🔁 Loop/Cut: ON")
+            self._apply_loop_button_style()
         self.redraw_timeline()
         self._log_segments_state(f"activate_preview idx={idx} start={start:.3f} end={end:.3f}")
 
@@ -2557,6 +2627,8 @@ class TimelineBarWidget(ctk.CTkFrame):
             active_player.loop_active = True
             if hasattr(active_player, "update_loop_bar_display"):
                 active_player.update_loop_bar_display()
+            if hasattr(self, "loop_button"):
+                self._apply_loop_button_style()
         except Exception:
             return
 
@@ -3122,7 +3194,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         self._cached_duration_value = new_duration
         self._cached_duration_path = self.video_path
         if hasattr(self, "loop_button"):
-            self.loop_button.config(text="🔁 Loop/Cut: OFF")
+            self._apply_loop_button_style()
         self._log_segments_state("clear_selection")
 
     def reload_all_markers_and_redraw(self, video_path=None):
