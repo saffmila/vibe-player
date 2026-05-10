@@ -31,7 +31,7 @@ from bookmark_manager import BookmarkManager
 
 
 class _BookmarkSeekProxy:
-    """Provide a stable ``set_time(seconds)`` API for bookmark manager jumps."""
+    """Provide a stable bookmark-manager API over ``VideoPlayer`` objects."""
 
     def __init__(self, video_player):
         self.video_player = video_player
@@ -51,6 +51,59 @@ class _BookmarkSeekProxy:
         inner_player = getattr(player_obj, "player", None)
         if inner_player is not None and hasattr(inner_player, "set_time"):
             inner_player.set_time(int(max(0.0, float(target_time_seconds)) * 1000))
+
+    def get_current_time(self) -> float:
+        """Return current playback time in seconds."""
+        player_obj = self.video_player
+        if player_obj is None:
+            return 0.0
+
+        if hasattr(player_obj, "get_current_time") and callable(getattr(player_obj, "get_current_time")):
+            try:
+                return float(player_obj.get_current_time())
+            except Exception:
+                return 0.0
+
+        inner_player = getattr(player_obj, "player", None)
+        if inner_player is not None and hasattr(inner_player, "get_time"):
+            try:
+                return max(0.0, float(inner_player.get_time()) / 1000.0)
+            except Exception:
+                return 0.0
+        return 0.0
+
+    def set_bookmarks(self, bookmarks):
+        """
+        Replace bookmarks in the wrapped player and persist them.
+
+        Args:
+            bookmarks: List of ``{"time": float, "label": str}`` dictionaries.
+        """
+        player_obj = self.video_player
+        if player_obj is None:
+            return
+
+        normalized = []
+        for item in bookmarks or []:
+            if not isinstance(item, dict) or "time" not in item:
+                continue
+            try:
+                ts = float(item.get("time", 0.0))
+            except (TypeError, ValueError):
+                continue
+            label = str(item.get("label", "")).strip()
+            normalized.append({"name": label, "time": max(0.0, ts)})
+
+        try:
+            player_obj.bookmarks = normalized
+        except Exception:
+            return
+
+        if hasattr(player_obj, "save_bookmarks") and callable(getattr(player_obj, "save_bookmarks")):
+            try:
+                player_obj.save_bookmarks()
+            except Exception:
+                pass
 
 
 class VtpGridMixin:
