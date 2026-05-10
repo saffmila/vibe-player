@@ -906,6 +906,8 @@ class TimelineBarWidget(ctk.CTkFrame):
                 # V obou případech aktualizujeme Timeline
                 self.update_bookmarks()
                 self.redraw_timeline()
+                if active_player and hasattr(active_player, "update_loop_bar_display"):
+                    active_player.update_loop_bar_display()
                 logging.info(f"Bookmark '{name}' added at {timestamp}s (Player active: {active_player is not None})")
 
             # Spustíme dialog
@@ -948,6 +950,8 @@ class TimelineBarWidget(ctk.CTkFrame):
 
             self.update_bookmarks()
             self.redraw_timeline()
+            if active_player and hasattr(active_player, "update_loop_bar_display"):
+                active_player.update_loop_bar_display()
 
     def remove_all_bookmarks(self):
             """Removes all bookmarks for the current video."""
@@ -968,6 +972,8 @@ class TimelineBarWidget(ctk.CTkFrame):
 
             self.update_bookmarks()
             self.redraw_timeline()
+            if active_player and hasattr(active_player, "update_loop_bar_display"):
+                active_player.update_loop_bar_display()
 
     def seek_and_play(self, timestamp):
             """Seeks to timestamp. Opens player if it's closed."""

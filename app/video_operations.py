@@ -816,9 +816,6 @@ class VideoPlayer:
         self.loop_bar_canvas.delete("all")
         if not self.player:
             return
-        if not self.loop_active:
-            # Keep player overlay clean when loop mode is turned off.
-            return
 
         duration_ms = self.player.get_length()
         if duration_ms <= 0:
@@ -827,6 +824,43 @@ class VideoPlayer:
         duration_s = duration_ms / 1000.0
         canvas_width = max(1, self.loop_bar_canvas.winfo_width())
         timeline = getattr(self, "timeline_widget", None)
+
+        # Draw bookmark ticks even when loop mode is off.
+        # Source of truth can differ (player list vs merged timeline markers), so merge both.
+        bookmark_times = []
+        for b in getattr(self, "bookmarks", []) or []:
+            if not isinstance(b, dict):
+                continue
+            t = b.get("time")
+            if t is None:
+                continue
+            try:
+                bookmark_times.append(float(t))
+            except (TypeError, ValueError):
+                continue
+
+        if timeline and hasattr(timeline, "markers"):
+            for m in getattr(timeline, "markers", []) or []:
+                if not isinstance(m, dict) or m.get("type") != "bookmark":
+                    continue
+                t = m.get("timestamp")
+                if t is None:
+                    continue
+                try:
+                    bookmark_times.append(float(t))
+                except (TypeError, ValueError):
+                    continue
+
+        # Deduplicate near-identical times to avoid overdraw.
+        unique_times = sorted({round(max(0.0, min(t, duration_s)), 3) for t in bookmark_times})
+        for bt in unique_times:
+            x_b = int((bt / duration_s) * canvas_width)
+            # 2px marker for visibility on tiny (height=2) canvas.
+            self.loop_bar_canvas.create_line(x_b, 0, x_b, 2, fill="#FFA500", width=2)
+
+        if not self.loop_active:
+            # Keep loop-specific overlays hidden when loop is off, but keep bookmark ticks.
+            return
 
         # Draw all saved segments first as subtle inactive guides.
         if timeline and hasattr(timeline, "segments"):
@@ -1080,6 +1114,22 @@ class VideoPlayer:
             """
             if hasattr(self, 'loop_bar_canvas') and self.loop_bar_canvas.winfo_exists():
                 self.draw_loop_bar()
+                # On fresh player start VLC can report 0 duration briefly.
+                # Retry a few times so bookmark ticks appear immediately.
+                try:
+                    duration_ms = int(self.player.get_length()) if self.player else 0
+                except Exception:
+                    duration_ms = 0
+                if duration_ms <= 0:
+                    retries = int(getattr(self, "_loop_bar_refresh_retries", 0))
+                    if retries < 8:
+                        self._loop_bar_refresh_retries = retries + 1
+                        try:
+                            self.video_window.after(250, self.update_loop_bar_display)
+                        except Exception:
+                            pass
+                else:
+                    self._loop_bar_refresh_retries = 0
 
 
 
@@ -2913,6 +2963,9 @@ class VideoPlayer:
             )
         self.update_time_slider()
         self.update_timer()
+        self.update_loop_bar_display()
+        self.video_window.after(250, self.update_loop_bar_display)
+        self.video_window.after(900, self.update_loop_bar_display)
 
         self._schedule_decode_placeholder_checks()
 
