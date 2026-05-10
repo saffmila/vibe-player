@@ -27,6 +27,30 @@ from utils import get_video_size
 from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS, preview_skip_subdir
 from virtual_folders import load_virtual_folders
 from hotkeys import DEFAULT_HOTKEYS, menu_accel, rename_accelerators_label
+from bookmark_manager import BookmarkManager
+
+
+class _BookmarkSeekProxy:
+    """Provide a stable ``set_time(seconds)`` API for bookmark manager jumps."""
+
+    def __init__(self, video_player):
+        self.video_player = video_player
+
+    def set_time(self, target_time_seconds: float) -> None:
+        """Seek the wrapped player to a target time in seconds."""
+        player_obj = self.video_player
+        if player_obj is None:
+            return
+
+        # Preferred API (already seconds-based).
+        if hasattr(player_obj, "set_time") and callable(getattr(player_obj, "set_time")):
+            player_obj.set_time(target_time_seconds)
+            return
+
+        # Fallback for ``VideoPlayer`` which exposes ``player.set_time(ms)``.
+        inner_player = getattr(player_obj, "player", None)
+        if inner_player is not None and hasattr(inner_player, "set_time"):
+            inner_player.set_time(int(max(0.0, float(target_time_seconds)) * 1000))
 
 
 class VtpGridMixin:
@@ -4267,6 +4291,46 @@ class VtpGridMixin:
     def Open_playlist (self):
         self._demo_toast("demo_organize")
         self.playlist_manager.show_playlist()
+
+    def show_bookmark_manager(self):
+        """
+        Open the bookmark manager for the currently active video player.
+
+        Bookmarks are read from the active player and projected to:
+        ``{"time": float, "label": str}``.
+        """
+        active_video = getattr(self, "current_video_window", None) or getattr(self, "active_player", None)
+        if active_video is None:
+            messagebox.showinfo("Bookmarks", "Open a video first to use Bookmark Manager.")
+            return
+
+        # Keep manager content in sync with on-disk bookmarks used by timeline.
+        if hasattr(active_video, "load_bookmarks") and callable(getattr(active_video, "load_bookmarks")):
+            try:
+                active_video.load_bookmarks()
+            except Exception as exc:
+                logging.info("[BookmarkManager] Failed to reload bookmarks: %s", exc)
+
+        if not hasattr(self, "bookmark_manager") or self.bookmark_manager is None:
+            self.bookmark_manager = BookmarkManager(self, _BookmarkSeekProxy(active_video))
+        else:
+            self.bookmark_manager.video_player = _BookmarkSeekProxy(active_video)
+
+        bookmark_rows = []
+        for item in getattr(active_video, "bookmarks", []) or []:
+            if not isinstance(item, dict):
+                continue
+            if "time" not in item:
+                continue
+            bookmark_rows.append(
+                {
+                    "time": item.get("time"),
+                    "label": item.get("label") or item.get("name") or "",
+                }
+            )
+
+        self.bookmark_manager.load_bookmarks_for_video(bookmark_rows)
+        self.bookmark_manager.show_manager()
 
 
     def add_selected_to_playlist(self, event=None, new_playlist=False):

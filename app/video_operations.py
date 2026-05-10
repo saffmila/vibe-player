@@ -121,7 +121,7 @@ class VideoPlayer:
         self.listener = None  # Initialize the listener as None
         self.bookmarks = []
         if video_path:
-            self.bookmark_file = f"bookmarks/{os.path.basename(video_path)}.json"
+            self.bookmark_file = self._get_sidecar_bookmark_path(video_path)
             self.load_bookmarks()
         else:
             self.bookmark_file = None
@@ -425,7 +425,7 @@ class VideoPlayer:
             return
         self.video_path = path
         self.video_name = name
-        self.bookmark_file = f"bookmarks/{os.path.basename(path)}.json"
+        self.bookmark_file = self._get_sidecar_bookmark_path(path)
         try:
             self.load_bookmarks()
         except Exception:
@@ -1481,21 +1481,61 @@ class VideoPlayer:
         """
         Save all bookmarks to a JSON file.
         """
-        os.makedirs("bookmarks", exist_ok=True)
+        if not self.bookmark_file:
+            return
+        bookmark_dir = os.path.dirname(self.bookmark_file)
+        if bookmark_dir:
+            os.makedirs(bookmark_dir, exist_ok=True)
         try:
             with open(self.bookmark_file, "w", encoding="utf-8") as f:
                 json.dump(self.bookmarks, f, indent=2)
         except Exception as e:
             logging.info(f"Failed to save bookmarks: {e}")
 
+    def _get_sidecar_bookmark_path(self, video_path: str) -> str:
+        """
+        Return bookmark sidecar path for a given video.
+
+        Example:
+            ``E:/videos/clip.mp4`` -> ``E:/videos/clip_bookmarks.json``
+        """
+        return os.path.splitext(video_path)[0] + "_bookmarks.json"
+
+    def _get_legacy_bookmark_path(self, video_path: str) -> str:
+        """
+        Return the old bookmark path used by earlier versions.
+
+        Legacy format:
+            ``bookmarks/<video_basename>.json``
+        """
+        return os.path.join("bookmarks", f"{os.path.basename(video_path)}.json")
+
     def load_bookmarks(self):
         """
         Load bookmarks from JSON file if available.
+
+        Preference order:
+        1) Sidecar next to video (``<video_stem>_bookmarks.json``)
+        2) Legacy sidecar (``<video>.json``)
+        3) Legacy app-local file (``bookmarks/<basename>.json``)
         """
-        if os.path.exists(self.bookmark_file):
+        self.bookmarks = []
+        if not self.video_path:
+            return
+
+        sidecar_path = self._get_sidecar_bookmark_path(self.video_path)
+        legacy_sidecar_path = f"{self.video_path}.json"
+        legacy_path = self._get_legacy_bookmark_path(self.video_path)
+        source_path = sidecar_path
+        if not os.path.exists(source_path):
+            source_path = legacy_sidecar_path if os.path.exists(legacy_sidecar_path) else legacy_path
+
+        if os.path.exists(source_path):
             try:
-                with open(self.bookmark_file, "r", encoding="utf-8") as f:
+                with open(source_path, "r", encoding="utf-8") as f:
                     self.bookmarks = json.load(f)
+                # Always save back to sidecar path from now on.
+                self.bookmark_file = sidecar_path
             except Exception as e:
                 logging.info(f"Failed to load bookmarks: {e}")
                 self.bookmarks = []

@@ -437,6 +437,7 @@ def build_edit_menu(app):
         _search_opts["accelerator"] = _sacc
     edit_menu.add_command(**_search_opts)
     edit_menu.add_separator()
+    edit_menu.add_command(label="Show Bookmark Manager", command=app.show_bookmark_manager)
     edit_menu.add_command(label="Keyboard Shortcuts", command=app.open_hotkeys_window)
     edit_menu.add_command(label="Optimize database", command=app.optimize_database)
     _pref_opts = {"label": "Preferences", "command": app.open_preferences_window}
