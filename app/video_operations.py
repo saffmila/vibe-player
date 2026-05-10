@@ -310,6 +310,8 @@ class VideoPlayer:
         self.video_window.bind("<Shift-L>", lambda e: self.controller.toggle_loop_shortcut())
         self.video_window.bind("<Alt-Right>", lambda e: self.skip_to_next_bookmark())
         self.video_window.bind("<Alt-Left>", lambda e: self.skip_to_previous_bookmark())
+        self.video_window.bind("<Control-Right>", lambda e: self.skip_to_next_cut())
+        self.video_window.bind("<Control-Left>", lambda e: self.skip_to_previous_cut())
         self.video_window.bind("<Shift-Right>", lambda e: self.long_seek(direction=1))
         self.video_window.bind("<Shift-Left>", lambda e: self.long_seek(direction=-1))
 
@@ -1333,6 +1335,56 @@ class VideoPlayer:
         self.player.set_time(int(prev_time * 1000))
         self.last_position = int(prev_time * 1000)
         logging.info("[Bookmark] Jumped to previous bookmark: %.2fs", prev_time)
+
+    def _get_cut_boundaries(self):
+        timeline = getattr(self, "timeline_widget", None)
+        if not timeline or not hasattr(timeline, "segments"):
+            return []
+        boundaries = {
+            float(t)
+            for seg in timeline.segments
+            if isinstance(seg, dict)
+            for t in (seg.get("start"), seg.get("end"))
+            if t is not None
+        }
+        return sorted(boundaries)
+
+    def skip_to_next_cut(self):
+        if not self.player:
+            return
+        boundaries = self._get_cut_boundaries()
+        if not boundaries:
+            logging.info("[Cut] No Loop / Cut boundaries available.")
+            return
+        current_time = max(0.0, self.player.get_time() / 1000.0)
+        next_time = next((t for t in boundaries if t > current_time + 0.05), None)
+        if next_time is None:
+            logging.info("[Cut] Already at or beyond the last Loop / Cut boundary.")
+            return
+        self.player.set_time(int(next_time * 1000))
+        self.last_position = int(next_time * 1000)
+        if self.timeline_widget:
+            self.timeline_widget.set_current_time(next_time)
+        logging.info("[Cut] Jumped to next Loop / Cut boundary: %.2fs", next_time)
+
+    def skip_to_previous_cut(self):
+        if not self.player:
+            return
+        boundaries = self._get_cut_boundaries()
+        if not boundaries:
+            logging.info("[Cut] No Loop / Cut boundaries available.")
+            return
+        current_time = max(0.0, self.player.get_time() / 1000.0)
+        prev_candidates = [t for t in boundaries if t < current_time - 0.05]
+        prev_time = prev_candidates[-1] if prev_candidates else None
+        if prev_time is None:
+            logging.info("[Cut] Already at or before the first Loop / Cut boundary.")
+            return
+        self.player.set_time(int(prev_time * 1000))
+        self.last_position = int(prev_time * 1000)
+        if self.timeline_widget:
+            self.timeline_widget.set_current_time(prev_time)
+        logging.info("[Cut] Jumped to previous Loop / Cut boundary: %.2fs", prev_time)
 
     def long_seek(self, direction: int, seconds: float = 10.0):
         """Seek by a larger fixed delta. direction: +1 forward, -1 backward."""
