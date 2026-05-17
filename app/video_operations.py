@@ -34,6 +34,7 @@ import logging
 import tkinterdnd2 as dnd
 from vtp_constants import VIDEO_FORMATS
 from vtp_mixin_dnd import VtpDndMixin
+from bookmark_manager import BookmarkManager, DEFAULT_BOOKMARK_COLOR
 
 _audio_devices_cache = None
 
@@ -775,6 +776,116 @@ class VideoPlayer:
                     # vp.clear_loop()
 
 
+    @staticmethod
+    def _bookmark_display_color(value) -> str:
+        return BookmarkManager._normalize_hex_color(value) or DEFAULT_BOOKMARK_COLOR
+
+    def _get_progress_bar_bookmarks(self, duration_s: float) -> list:
+        """Merge player + timeline bookmarks for seek-bar markers (time, name, color)."""
+        if duration_s <= 0:
+            return []
+
+        merged: dict[float, dict] = {}
+
+        def add_entry(raw_time, name, color):
+            try:
+                tf = max(0.0, min(float(raw_time), duration_s))
+            except (TypeError, ValueError):
+                return
+            key = round(tf, 3)
+            name_str = str(name or "").strip() or "Bookmark"
+            norm_color = VideoPlayer._bookmark_display_color(color)
+            prev = merged.get(key)
+            if prev is None:
+                merged[key] = {"time": tf, "name": name_str, "color": norm_color}
+                return
+            if norm_color != DEFAULT_BOOKMARK_COLOR and prev["color"] == DEFAULT_BOOKMARK_COLOR:
+                prev["color"] = norm_color
+            if name_str != "Bookmark" and prev["name"] == "Bookmark":
+                prev["name"] = name_str
+
+        for b in getattr(self, "bookmarks", []) or []:
+            if not isinstance(b, dict):
+                continue
+            t = b.get("time")
+            if t is None:
+                continue
+            name = b.get("name") if b.get("name") is not None else b.get("label", "")
+            add_entry(t, name, b.get("color"))
+
+        timeline = getattr(self, "timeline_widget", None)
+        if timeline and hasattr(timeline, "markers"):
+            for m in getattr(timeline, "markers", []) or []:
+                if not isinstance(m, dict) or m.get("type") != "bookmark":
+                    continue
+                t = m.get("timestamp")
+                if t is None:
+                    continue
+                name = m.get("label") if m.get("label") is not None else m.get("name", "")
+                add_entry(t, name, m.get("color"))
+
+        return sorted(merged.values(), key=lambda e: e["time"])
+
+    def _slider_canvas_local_x(self, event) -> int | None:
+        canvas = getattr(self, "slider_canvas", None)
+        if canvas is None or not canvas.winfo_exists():
+            return None
+        try:
+            w = canvas.winfo_width()
+            if getattr(event, "widget", None) is canvas:
+                local_x = event.x
+            else:
+                local_x = event.x_root - canvas.winfo_rootx()
+        except Exception:
+            return None
+        if w <= 1:
+            return None
+        return int(local_x)
+
+    def _slider_track_geometry(self):
+        """Return (width, left_pad, right_pad, usable) for the seek bar hit area."""
+        canvas = getattr(self, "slider_canvas", None)
+        if canvas is None or not canvas.winfo_exists():
+            return None
+        try:
+            w = canvas.winfo_width()
+            h = canvas.winfo_height()
+        except tk.TclError:
+            return None
+        if w <= 1:
+            return None
+        thumb_r = max(3, (h - 6) // 2)
+        left_pad = thumb_r + 1
+        right_pad = max(left_pad + 1, w - thumb_r - 1)
+        usable = max(1, right_pad - left_pad)
+        return w, left_pad, right_pad, usable
+
+    def _bookmark_at_slider_x(self, local_x: int, hit_px: int = 8):
+        if not getattr(self, "player", None):
+            return None
+        try:
+            duration_ms = int(self.player.get_length() or 0)
+        except Exception:
+            return None
+        if duration_ms <= 0:
+            return None
+        duration_s = duration_ms / 1000.0
+        geom = self._slider_track_geometry()
+        if not geom:
+            return None
+        _w, left_pad, right_pad, usable = geom
+        x = max(left_pad, min(local_x, right_pad))
+        bookmarks = self._get_progress_bar_bookmarks(duration_s)
+        best = None
+        best_dist = float(hit_px) + 1.0
+        for bm in bookmarks:
+            bx = left_pad + (bm["time"] / duration_s) * usable
+            dist = abs(x - bx)
+            if dist <= hit_px and dist < best_dist:
+                best_dist = dist
+                best = bm
+        return best
+
     def draw_loop_bar(self):
         self.loop_bar_canvas.delete("all")
         if not self.player:
@@ -786,40 +897,12 @@ class VideoPlayer:
 
         duration_s = duration_ms / 1000.0
         canvas_width = max(1, self.loop_bar_canvas.winfo_width())
-        timeline = getattr(self, "timeline_widget", None)
 
-        # Draw bookmark ticks even when loop mode is off.
-        # Source of truth can differ (player list vs merged timeline markers), so merge both.
-        bookmark_times = []
-        for b in getattr(self, "bookmarks", []) or []:
-            if not isinstance(b, dict):
-                continue
-            t = b.get("time")
-            if t is None:
-                continue
-            try:
-                bookmark_times.append(float(t))
-            except (TypeError, ValueError):
-                continue
-
-        if timeline and hasattr(timeline, "markers"):
-            for m in getattr(timeline, "markers", []) or []:
-                if not isinstance(m, dict) or m.get("type") != "bookmark":
-                    continue
-                t = m.get("timestamp")
-                if t is None:
-                    continue
-                try:
-                    bookmark_times.append(float(t))
-                except (TypeError, ValueError):
-                    continue
-
-        # Deduplicate near-identical times to avoid overdraw.
-        unique_times = sorted({round(max(0.0, min(t, duration_s)), 3) for t in bookmark_times})
-        for bt in unique_times:
-            x_b = int((bt / duration_s) * canvas_width)
+        # Draw bookmark ticks even when loop mode is off (per-bookmark custom colors).
+        for bm in self._get_progress_bar_bookmarks(duration_s):
+            x_b = int((bm["time"] / duration_s) * canvas_width)
             # 2px marker for visibility on tiny (height=2) canvas.
-            self.loop_bar_canvas.create_line(x_b, 0, x_b, 2, fill="#FFA500", width=2)
+            self.loop_bar_canvas.create_line(x_b, 0, x_b, 2, fill=bm["color"], width=2)
 
         if not self.loop_active:
             # Keep loop-specific overlays hidden when loop is off, but keep bookmark ticks.
@@ -3731,12 +3814,21 @@ class VideoPlayer:
     def update_slider_hover_time_popup(self, event=None):
         if event is None:
             return
-        seconds = self._estimate_slider_hover_seconds(event)
-        if seconds is None:
-            self.hide_slider_hover_time_popup()
-            return
 
-        text = self._format_seconds_to_timestamp(seconds)
+        local_x = self._slider_canvas_local_x(event)
+        hovered_bookmark = self._bookmark_at_slider_x(local_x) if local_x is not None else None
+
+        if hovered_bookmark:
+            text = hovered_bookmark["name"]
+            fg = hovered_bookmark["color"]
+        else:
+            seconds = self._estimate_slider_hover_seconds(event)
+            if seconds is None:
+                self.hide_slider_hover_time_popup()
+                return
+            text = self._format_seconds_to_timestamp(seconds)
+            fg = "#d0d0d0"
+
         if not self.slider_hover_popup or not self.slider_hover_popup.winfo_exists():
             self.slider_hover_popup = tk.Toplevel(self.video_window)
             self.slider_hover_popup.wm_overrideredirect(True)
@@ -3755,7 +3847,7 @@ class VideoPlayer:
                 justify=tk.LEFT,
                 anchor="w",
                 bg="#2b2b2b",
-                fg="#d0d0d0",
+                fg=fg,
                 relief="solid",
                 borderwidth=1,
                 font=("Segoe UI", 9),
@@ -3765,13 +3857,39 @@ class VideoPlayer:
             self.slider_hover_label.pack()
         else:
             if self.slider_hover_label and self.slider_hover_label.winfo_exists():
-                self.slider_hover_label.configure(text=text)
+                self.slider_hover_label.configure(text=text, fg=fg)
 
+        self._position_slider_hover_popup(event)
+
+    def _position_slider_hover_popup(self, event):
+        """Place hover popup above the seek bar so bookmark ticks stay visible."""
+        popup = getattr(self, "slider_hover_popup", None)
+        if not popup or not popup.winfo_exists() or event is None:
+            return
+        gap = 10  # px between popup bottom edge and slider top
         try:
+            popup.update_idletasks()
+            popup_h = max(popup.winfo_reqheight(), popup.winfo_height())
+            popup_w = max(popup.winfo_reqwidth(), popup.winfo_width())
             popup_x = int(event.x_root + 10)
-            popup_y = int(event.y_root - 30)
-            self.slider_hover_popup.geometry(f"+{popup_x}+{popup_y}")
-            self.slider_hover_popup.lift()
+
+            canvas = getattr(self, "slider_canvas", None)
+            if canvas is not None and canvas.winfo_exists():
+                anchor_top = canvas.winfo_rooty()
+            else:
+                anchor_top = int(event.y_root)
+
+            popup_y = int(anchor_top - popup_h - gap)
+
+            # Keep popup inside the player window horizontally.
+            host = getattr(self, "video_window", None)
+            if host is not None and host.winfo_exists():
+                left = host.winfo_rootx() + 4
+                right = host.winfo_rootx() + host.winfo_width() - popup_w - 4
+                popup_x = max(left, min(popup_x, right))
+
+            popup.geometry(f"+{popup_x}+{popup_y}")
+            popup.lift()
         except Exception:
             pass
 
