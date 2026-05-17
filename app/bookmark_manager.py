@@ -8,10 +8,12 @@ time-based bookmarks of the currently loaded video.
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import messagebox, simpledialog
-from typing import Dict, List
+from tkinter import colorchooser, messagebox, simpledialog
+from typing import Dict, List, Optional
 
 import customtkinter as ctk
+
+DEFAULT_BOOKMARK_COLOR = "#FFA500"
 
 
 class BookmarkManager:
@@ -39,6 +41,37 @@ class BookmarkManager:
         self.is_open = False
         self.bookmarks: List[Dict[str, object]] = []
         self._polling_suspended = False
+
+    @staticmethod
+    def _normalize_hex_color(value) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text.startswith("#"):
+            return None
+        hex_part = text[1:]
+        if len(hex_part) == 3:
+            hex_part = "".join(ch * 2 for ch in hex_part)
+        if len(hex_part) != 6:
+            return None
+        try:
+            int(hex_part, 16)
+        except ValueError:
+            return None
+        return f"#{hex_part.upper()}"
+
+    @staticmethod
+    def _blend_hex(bg: str, fg: str, fg_weight: float) -> str:
+        try:
+            br, bg_c, bb = int(bg[1:3], 16), int(bg[3:5], 16), int(bg[5:7], 16)
+            fr, fg_c, fb = int(fg[1:3], 16), int(fg[3:5], 16), int(fg[5:7], 16)
+            w = max(0.0, min(1.0, float(fg_weight)))
+            r = int(br * (1.0 - w) + fr * w)
+            g = int(bg_c * (1.0 - w) + fg_c * w)
+            b = int(bb * (1.0 - w) + fb * w)
+            return f"#{r:02X}{g:02X}{b:02X}"
+        except (TypeError, ValueError):
+            return bg
 
     def show_manager(self):
         """
@@ -99,7 +132,7 @@ class BookmarkManager:
 
         Args:
             bookmarks_data: List of dictionaries in the form:
-                ``{"time": float, "label": str}``
+                ``{"time": float, "label": str, "color": str (optional)}``
         """
         self.bookmarks = []
         for item in bookmarks_data or []:
@@ -107,7 +140,7 @@ class BookmarkManager:
                 continue
 
             bookmark_time = item.get("time")
-            label = item.get("label", "")
+            label = item.get("label", item.get("name", ""))
             if bookmark_time is None:
                 continue
 
@@ -116,12 +149,14 @@ class BookmarkManager:
             except (TypeError, ValueError):
                 continue
 
-            self.bookmarks.append(
-                {
-                    "time": max(0.0, normalized_time),
-                    "label": str(label) if label is not None else "",
-                }
-            )
+            entry = {
+                "time": max(0.0, normalized_time),
+                "label": str(label) if label is not None else "",
+            }
+            color = self._normalize_hex_color(item.get("color"))
+            if color:
+                entry["color"] = color
+            self.bookmarks.append(entry)
 
         self._sort_bookmarks()
         self._populate_bookmark_list()
@@ -158,7 +193,20 @@ class BookmarkManager:
             display_text = f"[{formatted_time}] {label}" if label else f"[{formatted_time}]"
             self.bookmark_listbox.insert(tk.END, display_text)
 
-        self._apply_active_highlight()
+        self._ensure_list_selection()
+        self._apply_list_row_styles()
+
+    def _ensure_list_selection(self):
+        """Select the first visible row when nothing is selected in the listbox."""
+        if not self.bookmark_listbox or not self.visible_indices:
+            return
+        selection = self.bookmark_listbox.curselection()
+        if selection:
+            list_idx = selection[0]
+            if 0 <= list_idx < len(self.visible_indices):
+                return
+        self.bookmark_listbox.selection_set(0)
+        self.bookmark_listbox.activate(0)
 
     def _create_button_panel(self, parent_frame):
         """
@@ -167,7 +215,7 @@ class BookmarkManager:
         self.button_panel = ctk.CTkFrame(parent_frame, fg_color="transparent")
         self.button_panel.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=(0, 6))
         self.button_panel.grid_columnconfigure(0, weight=1)
-        self.button_panel.grid_columnconfigure((1, 2, 3, 4), weight=0)
+        self.button_panel.grid_columnconfigure((1, 2, 3, 4, 5), weight=0)
 
         btn_style = {
             "font": ("Segoe UI", 11),
@@ -176,7 +224,7 @@ class BookmarkManager:
             "text_color": "#dddddd",
             "corner_radius": 4,
             "height": 26,
-            "width": 58,
+            "width": 52,
         }
 
         ctk.CTkButton(
@@ -188,31 +236,38 @@ class BookmarkManager:
 
         ctk.CTkButton(
             self.button_panel,
+            text="Color",
+            command=self.set_selected_bookmark_color,
+            **btn_style,
+        ).grid(row=0, column=1, padx=2, pady=2, sticky="e")
+
+        ctk.CTkButton(
+            self.button_panel,
             text="◀ Prev",
             command=self.skip_to_previous,
             **btn_style,
-        ).grid(row=0, column=1, padx=2, pady=2, sticky="e")
+        ).grid(row=0, column=2, padx=2, pady=2, sticky="e")
 
         ctk.CTkButton(
             self.button_panel,
             text="Next ▶",
             command=self.skip_to_next,
             **btn_style,
-        ).grid(row=0, column=2, padx=2, pady=2, sticky="e")
+        ).grid(row=0, column=3, padx=2, pady=2, sticky="e")
 
         ctk.CTkButton(
             self.button_panel,
             text="✖ Del",
             command=self.delete_selected_bookmark,
             **btn_style,
-        ).grid(row=0, column=3, padx=2, pady=2, sticky="e")
+        ).grid(row=0, column=4, padx=2, pady=2, sticky="e")
 
         ctk.CTkButton(
             self.button_panel,
             text="🗑 Clear",
             command=self.clear_all_bookmarks,
             **btn_style,
-        ).grid(row=0, column=4, padx=2, pady=2, sticky="e")
+        ).grid(row=0, column=5, padx=2, pady=2, sticky="e")
 
     def _on_bookmark_select(self, event=None):
         """
@@ -313,14 +368,10 @@ class BookmarkManager:
 
         if active_idx != self.active_bookmark_index:
             self.active_bookmark_index = active_idx
-            self._apply_active_highlight()
+            self._apply_list_row_styles()
 
-    def _apply_active_highlight(self):
-        """
-        Paint non-selected rows to indicate active playback section.
-
-        This custom background highlight is independent from list selection.
-        """
+    def _apply_list_row_styles(self):
+        """Apply per-bookmark colors and active-playback row highlight."""
         if not self.bookmark_listbox:
             return
 
@@ -330,10 +381,58 @@ class BookmarkManager:
 
         for list_idx, bookmark_idx in enumerate(self.visible_indices):
             if list_idx in selected_set:
-                # Never override selected row colors; keep user's blue selection visible.
                 continue
-            row_bg = active_bg if bookmark_idx == self.active_bookmark_index else default_bg
-            self.bookmark_listbox.itemconfig(list_idx, bg=row_bg, fg="white")
+            bookmark = self.bookmarks[bookmark_idx]
+            is_active = bookmark_idx == self.active_bookmark_index
+            color = self._normalize_hex_color(bookmark.get("color"))
+            if color:
+                mix = 0.42 if is_active else 0.28
+                row_bg = self._blend_hex(default_bg if not is_active else active_bg, color, mix)
+                row_fg = color
+            else:
+                row_bg = active_bg if is_active else default_bg
+                row_fg = "white"
+            self.bookmark_listbox.itemconfig(list_idx, bg=row_bg, fg=row_fg)
+
+    def _selected_bookmark_index(self) -> Optional[int]:
+        if not self.bookmark_listbox:
+            return None
+        selection = self.bookmark_listbox.curselection()
+        if not selection:
+            return None
+        list_index = selection[0]
+        if not (0 <= list_index < len(self.visible_indices)):
+            return None
+        bookmark_index = self.visible_indices[list_index]
+        if not (0 <= bookmark_index < len(self.bookmarks)):
+            return None
+        return bookmark_index
+
+    def set_selected_bookmark_color(self):
+        """Pick a color for the selected bookmark and sync to timeline + JSON."""
+        self._ensure_list_selection()
+        bookmark_index = self._selected_bookmark_index()
+        if bookmark_index is None:
+            messagebox.showinfo("Bookmark Color", "Select a bookmark first.", parent=self.window)
+            return
+
+        bookmark = self.bookmarks[bookmark_index]
+        initial = self._normalize_hex_color(bookmark.get("color")) or DEFAULT_BOOKMARK_COLOR
+        result = colorchooser.askcolor(
+            color=initial,
+            title="Bookmark color",
+            parent=self.window,
+        )
+        if not result or result[1] is None:
+            return
+
+        chosen = self._normalize_hex_color(result[1])
+        if not chosen:
+            return
+
+        bookmark["color"] = chosen
+        self._populate_bookmark_list()
+        self._sync_bookmarks_to_player()
 
     def add_bookmark(self):
         """
