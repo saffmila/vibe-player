@@ -5608,7 +5608,9 @@ class VtpGridMixin:
                 use_gpu_upscale=getattr(self, "gpu_upscale", False)
             )
             self._demo_toast("demo_playback")
-            self.after(1, lambda: self.current_video_window and self.current_video_window.show_and_play())
+            vp = self.current_video_window
+            if vp is not None:
+                self.after(1, vp.show_and_play)
 
             if self.ShowTWidget and hasattr(self, "timeline_widget"):
                 self.current_video_window.timeline_widget = self.timeline_widget

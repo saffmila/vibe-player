@@ -179,6 +179,13 @@ class VideoPlayer:
         self._pynput_bridge_dead = False
         self._pynput_queue: queue.Queue[tuple[str, int, int]] = queue.Queue(maxsize=256)
         self._pynput_pump_job = None
+        self._cached_player_owner_hwnd: int | None = None
+        self._opening_raise_guard = False
+        self._timer_after_id = None
+        self._slider_poll_after_id = None
+        self._opening_raise_after_id = None
+        self._cleaning_up = False
+        self._cleanup_done = False
 
         self.global_listener = mouse.Listener(on_click=self._on_global_click)
         self.global_listener.start()
@@ -365,12 +372,61 @@ class VideoPlayer:
         Zobrazí okno a spustí přehrávání. Volá se až poté, co je __init__ hotový
         a okno je plně připraveno operačním systémem.
         """
-        # Tento kód byl přesunut z konce __init__
+        if not self.embed:
+            self._begin_opening_raise_guard()
+            self.raise_player_window()
+            try:
+                w = self.video_window.winfo_toplevel()
+                w.after(50, self.raise_player_window)
+                w.after(350, self.raise_player_window)
+            except Exception:
+                pass
         if self.video_path:
             if self.auto_play:
                 self.play_video()
             else:
                 self.display_first_frame()
+
+    def _begin_opening_raise_guard(self) -> None:
+        """Ignore transient FocusOut while main app/timeline steals focus during open."""
+        self._opening_raise_guard = True
+        try:
+            self._opening_raise_after_id = self.video_window.after(600, self._end_opening_raise_guard)
+        except Exception:
+            self._opening_raise_guard = False
+            self._opening_raise_after_id = None
+
+    def _end_opening_raise_guard(self) -> None:
+        self._opening_raise_guard = False
+
+    def raise_player_window(self) -> None:
+        """Bring the standalone player above the main app (CTk parent often stays on top)."""
+        if self.embed or getattr(self, "_cleaning_up", False):
+            return
+        try:
+            if not self.video_window.winfo_exists():
+                return
+        except Exception:
+            return
+        top = self.video_window.winfo_toplevel()
+        try:
+            top.deiconify()
+            top.lift()
+            top.attributes("-topmost", True)
+            top.focus_force()
+            top.after(40, lambda: top.attributes("-topmost", False) if top.winfo_exists() else None)
+        except Exception as exc:
+            logging.debug("[Focus] raise_player_window Tk: %s", exc)
+        if sys.platform == "win32":
+            try:
+                hwnd = self._get_player_native_hwnd(log=False, refresh=True)
+                if hwnd:
+                    user32 = ctypes.windll.user32
+                    SW_SHOW = 5
+                    user32.ShowWindow(hwnd, SW_SHOW)
+                    user32.SetForegroundWindow(hwnd)
+            except Exception as exc:
+                logging.debug("[Focus] raise_player_window Win32: %s", exc)
 
     def _setup_video_playback_dnd(self):
         """Drop video files onto the playback area (Explorer or in-app); always COPY semantics."""
@@ -442,6 +498,33 @@ class VideoPlayer:
         except Exception:
             pass
         self.play_video()
+
+    def _cancel_all_scheduled_callbacks(self) -> None:
+        """Cancel Tk after() jobs that touch VLC — otherwise teardown races cause 0xC0000005."""
+        vw = getattr(self, "video_window", None)
+
+        def _cancel_attr(attr: str) -> None:
+            aid = getattr(self, attr, None)
+            setattr(self, attr, None)
+            if not aid or vw is None:
+                return
+            try:
+                if vw.winfo_exists():
+                    vw.after_cancel(aid)
+            except Exception:
+                pass
+
+        for name in (
+            "_pynput_pump_job",
+            "_timer_after_id",
+            "_slider_poll_after_id",
+            "_opening_raise_after_id",
+        ):
+            _cancel_attr(name)
+        try:
+            self._cancel_broken_decode_checks()
+        except Exception:
+            pass
 
     def _cancel_broken_decode_checks(self) -> None:
         for aid in getattr(self, "_broken_check_after_ids", []) or []:
@@ -745,6 +828,8 @@ class VideoPlayer:
 
     def on_focus_out(self, event=None):
         """Když okno ztratí focus, přestane být 'vždy nahoře'."""
+        if getattr(self, "_opening_raise_guard", False):
+            return
         if self.video_window.winfo_exists():
             self.video_window.winfo_toplevel().attributes("-topmost", False)
             logging.info("[Focus] Video player ztratil focus, už není v popředí.")
@@ -1813,22 +1898,32 @@ class VideoPlayer:
             # threading.Thread(target=restart_video).start()
                     
     def update_timer(self):
-        if self.player and self.playing:
-            current_time = int(self.player.get_time() / 1000)  # sekundy, int!
-            total_time = int(self.player.get_length() / 1000)  # sekundy, int!
-            
-            # Format the time as MM:SS
-            current_time_formatted = f"{current_time // 60:02}:{current_time % 60:02}"
-            total_time_formatted = f"{total_time // 60:02}:{total_time % 60:02}"
-            
-            # Update the timer label
-            if hasattr(self, "timer_label") and self.timer_label.winfo_exists():
-                self.timer_label.configure(
+        if getattr(self, "_cleaning_up", False):
+            return
+        try:
+            if not self.video_window.winfo_exists():
+                return
+        except Exception:
+            return
+        if not (self.player and self.playing):
+            self._timer_after_id = None
+            return
+        try:
+            current_time = int(self.player.get_time() / 1000)
+            total_time = int(self.player.get_length() / 1000)
+        except Exception:
+            self._timer_after_id = None
+            return
+        current_time_formatted = f"{current_time // 60:02}:{current_time % 60:02}"
+        total_time_formatted = f"{total_time // 60:02}:{total_time % 60:02}"
+        if hasattr(self, "timer_label") and self.timer_label.winfo_exists():
+            self.timer_label.configure(
                 text=f"{current_time_formatted} / {total_time_formatted}".lower()
             )
-        
-        # Schedule the next update
-        self.video_window.after(1000, self.update_timer)
+        try:
+            self._timer_after_id = self.video_window.after(1000, self.update_timer)
+        except Exception:
+            self._timer_after_id = None
 
     
 
@@ -2223,32 +2318,48 @@ class VideoPlayer:
         except Exception as exc:
             logging.info("[UI] Acrylic deferred apply failed: %s", exc)
 
-    def _get_player_native_hwnd(self) -> int | None:
+    def _get_player_native_hwnd(self, *, log: bool = True, refresh: bool = False) -> int | None:
         """
         HWND for the real Win32 toplevel. pywinstyles uses GetParent(winfo_id()) only;
         CTk sometimes needs GetAncestor(..., GA_ROOT) like the main app titlebar helper.
         """
         if self.embed or sys.platform != "win32":
             return None
+        if getattr(self, "_cleaning_up", False):
+            return None
         try:
-            self.video_window.update_idletasks()
-            self.video_window.update()
+            if not self.video_window.winfo_exists():
+                return None
+        except Exception:
+            return None
+        if not refresh:
+            cached = getattr(self, "_cached_player_owner_hwnd", None)
+            if cached and not self.embed:
+                return cached
+        try:
+            if refresh or log:
+                self.video_window.update_idletasks()
+                self.video_window.update()
             cid = int(self.video_window.winfo_id())
             user32 = ctypes.windll.user32
             GA_ROOT = 2
             parent = int(user32.GetParent(cid) or 0)
             root = int(user32.GetAncestor(cid, GA_ROOT) or 0)
             hwnd = root or parent or cid
-            logging.info(
-                "[UI] Player Win32 HWND: child=0x%x parent=0x%x root=0x%x → using 0x%x",
-                cid,
-                parent,
-                root,
-                hwnd,
-            )
+            if hwnd and not self.embed:
+                self._cached_player_owner_hwnd = hwnd
+            if log:
+                logging.info(
+                    "[UI] Player Win32 HWND: child=0x%x parent=0x%x root=0x%x → using 0x%x",
+                    cid,
+                    parent,
+                    root,
+                    hwnd,
+                )
             return hwnd if hwnd else None
         except Exception as exc:
-            logging.info("[UI] Failed to resolve player HWND: %s", exc)
+            if log:
+                logging.info("[UI] Failed to resolve player HWND: %s", exc)
             return None
 
     def _dwm_force_immersive_dark(self, hwnd: int | None) -> None:
@@ -2278,7 +2389,7 @@ class VideoPlayer:
         if not self.video_window.winfo_exists():
             return
 
-        hwnd = self._get_player_native_hwnd()
+        hwnd = self._get_player_native_hwnd(refresh=True)
         self._dwm_force_immersive_dark(hwnd)
 
         try:
@@ -2562,6 +2673,95 @@ class VideoPlayer:
             if widget is not None and self._point_in_widget(widget, x, y):
                 return True
         return False
+
+    def _get_player_owner_hwnd(self) -> int | None:
+        """Root Win32 HWND for this player (standalone window or embed host toplevel)."""
+        if sys.platform != "win32":
+            return None
+        if getattr(self, "_cleaning_up", False):
+            return None
+        try:
+            if not self.video_window.winfo_exists():
+                return None
+        except Exception:
+            return None
+        if not self.embed:
+            return self._get_player_native_hwnd(log=False)
+        cached = getattr(self, "_cached_player_owner_hwnd", None)
+        if cached:
+            return cached
+        try:
+            top = self.video_window.winfo_toplevel()
+            cid = int(top.winfo_id())
+            user32 = ctypes.windll.user32
+            GA_ROOT = 2
+            hwnd = int(user32.GetAncestor(cid, GA_ROOT) or cid) or None
+            if hwnd:
+                self._cached_player_owner_hwnd = hwnd
+            return hwnd
+        except Exception:
+            return None
+
+    def _hwnd_owned_by_player(self, hwnd: int) -> bool:
+        owner = self._get_player_owner_hwnd()
+        if not owner or not hwnd:
+            return False
+        try:
+            user32 = ctypes.windll.user32
+            GA_ROOT = 2
+            owner_root = int(user32.GetAncestor(owner, GA_ROOT) or owner)
+            cur = int(hwnd)
+            for _ in range(64):
+                if not cur:
+                    break
+                if cur in (owner, owner_root):
+                    return True
+                if int(user32.GetAncestor(cur, GA_ROOT) or 0) == owner_root:
+                    return True
+                cur = int(user32.GetParent(cur) or 0)
+        except Exception:
+            return False
+        return False
+
+    def _screen_click_hits_player_window(self, screen_x: int, screen_y: int) -> bool:
+        """
+        True when this app's window is topmost at (screen_x, screen_y).
+
+        pynput sees every click on screen; Tk geometry alone is not enough when another
+        app covers the player but the click still falls inside its on-screen rectangle.
+        """
+        if getattr(self, "_cleaning_up", False) or getattr(self, "_pynput_bridge_dead", True):
+            return False
+        try:
+            if not self.video_window.winfo_exists():
+                return False
+        except Exception:
+            return False
+        if sys.platform != "win32":
+            try:
+                return self.video_window.focus_displayof() is not None
+            except Exception:
+                return False
+        if not self._get_player_owner_hwnd():
+            return False
+        try:
+            user32 = ctypes.windll.user32
+
+            class _POINT(ctypes.Structure):
+                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+            pt = _POINT(int(screen_x), int(screen_y))
+            hwnd = int(user32.WindowFromPoint(pt) or 0)
+            return self._hwnd_owned_by_player(hwnd)
+        except Exception:
+            return False
+
+    def _drain_pynput_queue(self) -> None:
+        try:
+            while True:
+                self._pynput_queue.get_nowait()
+        except queue.Empty:
+            pass
 
     def _menu_popup_xy(self, x_root: int, y_root: int) -> tuple[int, int]:
         """Keep popup inside the player toplevel (avoids multi-monitor geometry glitches)."""
@@ -2856,9 +3056,17 @@ class VideoPlayer:
             py = int(self.video_window.winfo_pointery())
         except Exception:
             px, py = int(x), int(y)
-        if self._pointer_on_video_surface(px, py):
-            logging.info("[DEBUG] Global mouse click on video at (%s,%s)", px, py)
-            self.toggle_play()
+        if not self._pointer_on_video_surface(px, py):
+            return
+        if not self._screen_click_hits_player_window(px, py):
+            logging.debug(
+                "[pynput] click at (%s,%s) over player rect but another window is on top — ignored",
+                px,
+                py,
+            )
+            return
+        logging.info("[DEBUG] Global mouse click on video at (%s,%s)", px, py)
+        self.toggle_play()
 
     def _global_rmb_show_menu_if_over_video(self) -> None:
         """VLC HWND swallows Tk Button-3 — pynput only signals; use Tk pointer for hit-test."""
@@ -2877,6 +3085,8 @@ class VideoPlayer:
         except Exception:
             return
         if not self._pointer_on_video_surface(x, y):
+            return
+        if not self._screen_click_hits_player_window(x, y):
             return
         self.show_video_menu(x_root=x, y_root=y)
 
@@ -3612,9 +3822,25 @@ class VideoPlayer:
         player = getattr(self, "player", None)
         if not player:
             return
+        self._shutdown_vlc_player(player, detach_hwnd=detach_hwnd)
+
+    def _shutdown_vlc_player(self, player, *, detach_hwnd: bool = True) -> None:
+        """
+        Detach Win32 HWND, stop, and release Media. Safe order for Windows (avoids AV on close).
+        Does not call player.release() — caller does that after the Tk window is gone.
+        """
         if detach_hwnd and os.name == "nt" and hasattr(player, "set_hwnd"):
             try:
                 player.set_hwnd(0)
+            except Exception:
+                pass
+        try:
+            st = player.get_state()
+        except Exception:
+            st = None
+        if st == vlc.State.Paused:
+            try:
+                player.set_pause(0)
             except Exception:
                 pass
         try:
@@ -3623,8 +3849,13 @@ class VideoPlayer:
             pass
         try:
             t0 = time.time()
-            while player.is_playing() and (time.time() - t0) < 0.8:
-                time.sleep(0.04)
+            while (time.time() - t0) < 1.2:
+                try:
+                    if not player.is_playing():
+                        break
+                except Exception:
+                    break
+                time.sleep(0.05)
         except Exception:
             pass
         try:
@@ -3633,7 +3864,7 @@ class VideoPlayer:
                 player.set_media(None)
                 m.release()
         except Exception as e:
-            logging.debug("[VLC] _release_current_media: %s", e)
+            logging.debug("[VLC] _shutdown_vlc_player media: %s", e)
         self._loaded_video_path = None
 
     def release_held_media(self):
@@ -3654,10 +3885,20 @@ class VideoPlayer:
             return
         self._cleanup_done = True
         self._cleaning_up = True
-        logging.info("[Cleanup] Spouštím úklid pro video přehrávač...")
         self._pynput_bridge_dead = True
         self.playing = False
+        self.is_repeating = False
+        self._cached_player_owner_hwnd = None
+        logging.info("[Cleanup] Spouštím úklid pro video přehrávač...")
 
+        try:
+            self._cancel_all_scheduled_callbacks()
+            self._hide_broken_playback_overlay()
+            self.hide_slider_hover_time_popup()
+        except Exception as e:
+            logging.debug("[Cleanup] UI cancel: %s", e)
+
+        self._drain_pynput_queue()
         for attr in ("listener", "global_listener"):
             lst = getattr(self, attr, None)
             setattr(self, attr, None)
@@ -3668,35 +3909,13 @@ class VideoPlayer:
                 except Exception as e:
                     logging.info("[Cleanup] Listener stop (%s): %s", attr, e)
 
-        pj = getattr(self, "_pynput_pump_job", None)
-        if pj is not None:
-            try:
-                if hasattr(self, "video_window") and self.video_window.winfo_exists():
-                    self.video_window.after_cancel(pj)
-            except Exception:
-                pass
-            self._pynput_pump_job = None
-        try:
-            self._cancel_broken_decode_checks()
-            self._hide_broken_playback_overlay()
-            self.hide_slider_hover_time_popup()
-        except Exception:
-            pass
-
         player = getattr(self, "player", None)
-        if player:
+        if player is not None:
             try:
-                self.release_held_media()
+                self._shutdown_vlc_player(player, detach_hwnd=True)
+                logging.info("[Cleanup] VLC playback zastaveno, médium uvolněno.")
             except Exception as e:
-                logging.debug("[Cleanup] release_held_media: %s", e)
-            try:
-                player.release()
-                logging.info("[Cleanup] VLC přehrávač uvolněn.")
-            except Exception as e:
-                logging.info("[Cleanup] Chyba při uvolňování přehrávače: %s", e)
-            finally:
-                self.player = None
-                time.sleep(0.05)
+                logging.debug("[Cleanup] vlc shutdown: %s", e)
 
         video_window = getattr(self, "video_window", None)
         if video_window is not None:
@@ -3708,6 +3927,16 @@ class VideoPlayer:
                 logging.info("[Cleanup] Okno destroy: %s", e)
             self.video_window = None
 
+        if player is not None:
+            try:
+                player.release()
+                logging.info("[Cleanup] VLC přehrávač uvolněn.")
+            except Exception as e:
+                logging.info("[Cleanup] Chyba při uvolňování přehrávače: %s", e)
+            finally:
+                self.player = None
+                time.sleep(0.05)
+
         instance = getattr(self, "instance", None)
         if instance:
             try:
@@ -3717,6 +3946,8 @@ class VideoPlayer:
                 logging.info("[Cleanup] Chyba při uvolňování VLC instance: %s", e)
             finally:
                 self.instance = None
+
+        self._drain_pynput_queue()
 
     def close_video_player(self):
         """Nyní pouze volá robustní cleanup metodu."""
@@ -4134,7 +4365,7 @@ class VideoPlayer:
                 if self._duration_retry_count <= 80:
                     logging.info("Warning: Video duration is zero or not available. Retrying...")
                     logging.info("[DEBUG] update_time_slider: Duration not available.")
-                    self.video_window.after(500, self.update_time_slider)
+                    self._slider_poll_after_id = self.video_window.after(500, self.update_time_slider)
                 else:
                     logging.info("[DEBUG] update_time_slider: duration still 0 — stop retry spam.")
                 return
@@ -4153,7 +4384,10 @@ class VideoPlayer:
                     logging.info(f"[DEBUG] timeline_window update failed: {e}")
                     self.parent.timeline_window = None
 
-        self.video_window.after(300, self.update_time_slider)
+        try:
+            self._slider_poll_after_id = self.video_window.after(300, self.update_time_slider)
+        except Exception:
+            self._slider_poll_after_id = None
 
 
 
