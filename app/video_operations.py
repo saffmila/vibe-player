@@ -337,9 +337,11 @@ class VideoPlayer:
 
         if self.show_video_button_bar:
             self.create_buttons()
+            self._bind_video_context_menu()
 
 
         self.video_window.bind("<Configure>", self.on_resize)
+        self.video_window.bind("<Configure>", self._on_video_window_configure_sync, add="+")
         if not embed:
             self.video_window.protocol("WM_DELETE_WINDOW", self.close_video_player)
 
@@ -521,6 +523,8 @@ class VideoPlayer:
         logging.info("[BrokenOverlay] scheduled probes gen=%s ids=%s", gen, self._broken_check_after_ids)
 
     def _decode_placeholder_probe(self, generation: int, strict: bool = False) -> None:
+        if getattr(self, "_cleaning_up", False):
+            return
         if generation != getattr(self, "_broken_decode_check_gen", 0):
             return
         if getattr(self, "_broken_playback_overlay_active", False):
@@ -730,50 +734,6 @@ class VideoPlayer:
         # return _audio_devices_cache
     
     
-    #  button for start stop video in middle of video window
-        
-    # Pridaj túto novú metódu do triedy VideoPlayer
-    def cleanup(self):
-        """
-        Zastaví všetky bežiace procesy a uvoľní všetky systémové zdroje.
-        """
-        logging.info("[Cleanup] Spúšťam upratovanie pre video prehrávač...")
-        # 1. Zastav prehrávanie a všetky nekonečné slučky (tým, že playing=False)
-        self.playing = False
-        
-        # 2. Zastav globálny listener myši, ak beží
-        if self.listener:
-            self.listener.stop()
-            self.listener = None
-            logging.info("[Cleanup] Listener myši zastavený.")
-
-        # 3. Explicitne uvoľni VLC prehrávač a inštanciu
-        if hasattr(self, 'player') and self.player:
-            try:
-                import time
-                self.player.stop()
-                deadline = time.time() + 0.3
-                while self.player.is_playing() and time.time() < deadline:
-                    time.sleep(0.05)
-                self.player.release()
-                self.player = None
-                logging.info("[Cleanup] VLC prehrávač uvoľnený.")
-            except Exception as e:
-                logging.info(f"[Cleanup] Chyba pri uvoľňovaní prehrávača: {e}")
-
-        if hasattr(self, 'instance') and self.instance:
-            try:
-                self.instance.release()
-                self.instance = None
-                logging.info("[Cleanup] VLC inštancia uvoľnená.")
-            except Exception as e:
-                logging.info(f"[Cleanup] Chyba pri uvoľňovaní VLC inštancie: {e}")
-
-        # 4. Znič okno
-        if hasattr(self, 'video_window') and self.video_window.winfo_exists():
-            self.video_window.destroy()
-            logging.info("[Cleanup] Okno prehrávača zničené.")
-
     def on_focus_in(self, event=None):
         """Když okno získá focus, nastaví se jako 'vždy nahoře'."""
         if self.video_window.winfo_exists():
@@ -2467,10 +2427,75 @@ class VideoPlayer:
             logging.info("[VLC] set_hwnd failed: %s", exc)
            
            
-    def show_video_menu(self):
-        # menu = tk.Menu(self.controls_frame, tearoff=0)
-        # menu = create_menu(self, self.controls_frame)
-        menu = create_menu(self.controller, self.controls_frame)
+    def _bind_video_context_menu(self):
+        """Toolbar: Tk Button-3. Video plane: pynput (VLC HWND eats Tk events)."""
+        if self.embed or not self.show_video_button_bar:
+            return
+
+        def _on_rmb(event):
+            self.show_video_menu(event)
+
+        controls = getattr(self, "controls_frame", None)
+        if controls is not None:
+            self._bind_rmb_recursive(controls, _on_rmb)
+
+    @staticmethod
+    def _bind_rmb_recursive(widget, callback) -> None:
+        try:
+            widget.bind("<Button-3>", callback, add="+")
+        except Exception:
+            pass
+        try:
+            children = widget.winfo_children()
+        except Exception:
+            return
+        for child in children:
+            VideoPlayer._bind_rmb_recursive(child, callback)
+
+    @staticmethod
+    def _point_in_widget(widget, x: int, y: int) -> bool:
+        try:
+            ax = int(widget.winfo_rootx())
+            ay = int(widget.winfo_rooty())
+            w = int(widget.winfo_width())
+            h = int(widget.winfo_height())
+        except Exception:
+            return False
+        if w < 2 or h < 2:
+            return False
+        return ax <= x < ax + w and ay <= y < ay + h
+
+    def _pointer_on_video_surface(self, x: int, y: int) -> bool:
+        """True when (x, y) is on the video stack, not the bottom toolbar."""
+        if not self._point_in_widget(self.video_window, x, y):
+            return False
+        if self.is_cursor_over_toolbar(x, y):
+            return False
+        for widget in (
+            getattr(self, "video_area", None),
+            getattr(self, "_video_stack", None),
+            getattr(self, "video_label", None),
+        ):
+            if widget is not None and self._point_in_widget(widget, x, y):
+                return True
+        return False
+
+    def _menu_popup_xy(self, x_root: int, y_root: int) -> tuple[int, int]:
+        """Keep popup inside the player toplevel (avoids multi-monitor geometry glitches)."""
+        try:
+            wx = int(self.video_window.winfo_rootx())
+            wy = int(self.video_window.winfo_rooty())
+            ww = int(self.video_window.winfo_width())
+            wh = int(self.video_window.winfo_height())
+            margin = 8
+            x_root = max(wx + margin, min(int(x_root), wx + max(margin, ww - margin)))
+            y_root = max(wy + margin, min(int(y_root), wy + max(margin, wh - margin)))
+        except Exception:
+            pass
+        return x_root, y_root
+
+    def show_video_menu(self, event=None, *, x_root=None, y_root=None):
+        menu = create_menu(self.controller, self.video_window)
 
         menu.add_command(label="Toggle Subtitles", command=self.toggle_subtitles)
         menu.add_command(label="Create Thumbnail", command=self.generate_thumbnail)
@@ -2478,6 +2503,17 @@ class VideoPlayer:
         menu.add_command(label="Add Bookmark", command=self.add_bookmark)
         menu.add_command(label="Previous Bookmark", command=self.skip_to_previous_bookmark)
         menu.add_command(label="Next Bookmark", command=self.skip_to_next_bookmark)
+
+        can_bookmark_manager = bool(
+            self.video_path
+            and os.path.isfile(self.video_path)
+            and hasattr(self.controller, "show_bookmark_manager")
+        )
+        menu.add_command(
+            label="Show Bookmark Manager",
+            command=lambda: self.controller.show_bookmark_manager(self.video_path),
+            state="normal" if can_bookmark_manager else "disabled",
+        )
 
         if getattr(self, "use_gpu_upscale", False):
             menu.add_separator()
@@ -2508,10 +2544,21 @@ class VideoPlayer:
         # menu.add_command(label="📁 Add to Playlist", command=...)
         # menu.add_command(label="🔎 Auto Tag Files", command=...)
 
-        # Zobraz menu pod tlačítkem
-        x = self.video_menu_button.winfo_rootx()
-        y = self.video_menu_button.winfo_rooty() + self.video_menu_button.winfo_height()
-        menu.tk_popup(x, y)
+        if x_root is not None and y_root is not None:
+            x, y = int(x_root), int(y_root)
+        elif event is not None:
+            x, y = int(event.x_root), int(event.y_root)
+        else:
+            x = int(self.video_menu_button.winfo_rootx())
+            y = int(self.video_menu_button.winfo_rooty() + self.video_menu_button.winfo_height())
+        x, y = self._menu_popup_xy(x, y)
+        try:
+            menu.tk_popup(x, y)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
 
 
 
@@ -2607,13 +2654,59 @@ class VideoPlayer:
         self.set_playback_speed(steps[new_idx])
         logging.info(f"[Speed] Step {'+' if direction > 0 else ''}{direction} → {steps[new_idx]}x")
 
+    def _on_video_window_configure_sync(self, event=None) -> None:
+        """Keep Tk fullscreen flag, internal state, and toolbar visibility in sync (multi-monitor safe)."""
+        if event is not None and getattr(event, "widget", None) is not self.video_window:
+            return
+        try:
+            if not self.video_window.winfo_exists():
+                return
+        except Exception:
+            return
+        try:
+            fs_attr = bool(self.video_window.attributes("-fullscreen"))
+        except Exception:
+            fs_attr = False
+        if self.is_fullscreen:
+            if not fs_attr:
+                self.is_fullscreen = False
+                if self.listener:
+                    try:
+                        self.listener.stop()
+                    except Exception:
+                        pass
+                    self.listener = None
+                self.show_controls_frame()
+            return
+        if fs_attr:
+            try:
+                self.video_window.attributes("-fullscreen", False)
+            except Exception:
+                pass
+            try:
+                if str(self.video_window.state()) == "zoomed":
+                    self.video_window.state("normal")
+            except Exception:
+                pass
+        if getattr(self, "controls_frame", None) is not None and not self.controls_frame_visible:
+            self.show_controls_frame()
+
+    def _reconcile_window_mode_before_play(self) -> None:
+        """After manual window moves / botched fullscreen exit, clear stuck maximize or -fullscreen."""
+        if self.embed or self.is_fullscreen:
+            return
+        try:
+            if not self.video_window.winfo_exists():
+                return
+        except Exception:
+            return
+        self._on_video_window_configure_sync()
+
     def toggle_fullscreen(self, event=None):
         self.is_fullscreen = not self.is_fullscreen
         if self.is_fullscreen:
             self.previous_geometry = self.video_window.geometry()
-            
-            # Maximize the window before going fullscreen
-            self.video_window.state("zoomed")
+            # Avoid state("zoomed") + -fullscreen together — breaks on multi-monitor Windows.
             self.video_window.attributes("-fullscreen", True)
             self.video_window.attributes('-topmost', False)
             self.video_label.place(relx=0, rely=0, relwidth=1, relheight=1)
@@ -2647,41 +2740,19 @@ class VideoPlayer:
 
 
     def is_cursor_over_toolbar(self, x, y):
-        if hasattr(self, "controls_frame"):
-            try:
-                abs_x = self.controls_frame.winfo_rootx()
-                abs_y = self.controls_frame.winfo_rooty()
-                w = self.controls_frame.winfo_width()
-                h = self.controls_frame.winfo_height()
-                return abs_x <= x <= abs_x + w and abs_y <= y <= abs_y + h
-            except Exception as e:
-                logging.info(f"[DEBUG] Error in controls_frame hitbox: {e}")
+        controls = getattr(self, "controls_frame", None)
+        if controls is not None and self._point_in_widget(controls, x, y):
+            return True
         return False
         
             
     def is_cursor_over_video(self, x, y):
-        # Pro floating player:
-        if hasattr(self, "video_label"):
-            try:
-                abs_x = self.video_label.winfo_rootx()
-                abs_y = self.video_label.winfo_rooty()
-                w = self.video_label.winfo_width()
-                h = self.video_label.winfo_height()
-                if abs_x <= x <= abs_x + w and abs_y <= y <= abs_y + h:
-                    return True
-            except Exception:
-                pass
-        # Pro embedded preview:
-        if hasattr(self, "video_window"):
-            try:
-                abs_x = self.video_window.winfo_rootx()
-                abs_y = self.video_window.winfo_rooty()
-                w = self.video_window.winfo_width()
-                h = self.video_window.winfo_height()
-                if abs_x <= x <= abs_x + w and abs_y <= y <= abs_y + h:
-                    return True
-            except Exception:
-                pass
+        if hasattr(self, "video_label") and self._point_in_widget(self.video_label, x, y):
+            return True
+        if hasattr(self, "video_area") and self._point_in_widget(self.video_area, x, y):
+            return True
+        if hasattr(self, "video_window") and self._point_in_widget(self.video_window, x, y):
+            return True
         return False
                 
             
@@ -2690,19 +2761,46 @@ class VideoPlayer:
 
     def _global_click_toggle_if_over_video(self, x: int, y: int) -> None:
         """Hit-test + play toggle; must run on the Tk main thread only."""
+        if getattr(self, "_cleaning_up", False) or getattr(self, "_pynput_bridge_dead", True):
+            return
         try:
             if not self.video_window.winfo_exists():
                 return
         except Exception:
             return
-        if self.is_cursor_over_video(x, y) and not self.is_cursor_over_toolbar(x, y):
-            logging.info(f"[DEBUG] Global mouse click on video at ({x},{y})")
+        try:
+            px = int(self.video_window.winfo_pointerx())
+            py = int(self.video_window.winfo_pointery())
+        except Exception:
+            px, py = int(x), int(y)
+        if self._pointer_on_video_surface(px, py):
+            logging.info("[DEBUG] Global mouse click on video at (%s,%s)", px, py)
             self.toggle_play()
+
+    def _global_rmb_show_menu_if_over_video(self) -> None:
+        """VLC HWND swallows Tk Button-3 — pynput only signals; use Tk pointer for hit-test."""
+        if getattr(self, "_cleaning_up", False):
+            return
+        if self.embed or not self.show_video_button_bar:
+            return
+        try:
+            if not self.video_window.winfo_exists():
+                return
+        except Exception:
+            return
+        try:
+            x = int(self.video_window.winfo_pointerx())
+            y = int(self.video_window.winfo_pointery())
+        except Exception:
+            return
+        if not self._pointer_on_video_surface(x, y):
+            return
+        self.show_video_menu(x_root=x, y_root=y)
 
     def _pynput_queue_pump(self) -> None:
         """Drain pynput → main thread queue (Tk thread only)."""
         self._pynput_pump_job = None
-        if getattr(self, "_pynput_bridge_dead", True):
+        if getattr(self, "_pynput_bridge_dead", True) or getattr(self, "_cleaning_up", False):
             return
         try:
             if not self.video_window.winfo_exists():
@@ -2717,6 +2815,8 @@ class VideoPlayer:
                     break
                 if kind == "click":
                     self._global_click_toggle_if_over_video(x, y)
+                elif kind == "rmb":
+                    self._global_rmb_show_menu_if_over_video()
                 elif kind == "move":
                     self._check_mouse_position_main(x, y)
         except Exception as e:
@@ -2732,14 +2832,25 @@ class VideoPlayer:
     def _on_global_click(self, x, y, button, pressed):
         from pynput.mouse import Button
         # Worker thread: queue only — no Tk / no .after().
-        if not (pressed and button == Button.left):
+        if not pressed:
+            return
+        if button == Button.left:
+            kind = "click"
+        elif button == Button.right:
+            kind = "rmb"
+        else:
             return
         if getattr(self, "_pynput_bridge_dead", True):
             return
         try:
-            self._pynput_queue.put_nowait(("click", int(x), int(y)))
+            self._pynput_queue.put_nowait((kind, int(x), int(y)))
         except queue.Full:
-            pass
+            if kind == "rmb":
+                try:
+                    self._pynput_queue.get_nowait()
+                    self._pynput_queue.put_nowait((kind, int(x), int(y)))
+                except (queue.Empty, queue.Full):
+                    pass
 
 
 
@@ -2773,16 +2884,28 @@ class VideoPlayer:
         # self.video_label.pack(fill=tk.BOTH, expand=True)
 
     def exit_fullscreen(self, event=None):
-        
-                # Stop the mouse listener when exiting fullscreen
+        # Stop the mouse listener when exiting fullscreen
         if self.listener:
-            self.listener.stop()
+            try:
+                self.listener.stop()
+            except Exception:
+                pass
             self.listener = None
 
         self.is_fullscreen = False
-        self.video_window.attributes("-fullscreen", False)
-        self.video_window.state("normal")  # Reset the window state to normal (unmaximized)
-        self.video_window.geometry(self.previous_geometry)
+        try:
+            self.video_window.attributes("-fullscreen", False)
+        except Exception:
+            pass
+        try:
+            self.video_window.state("normal")
+        except Exception:
+            pass
+        if self.previous_geometry:
+            try:
+                self.video_window.geometry(self.previous_geometry)
+            except Exception:
+                pass
         # Show controls again
         self.show_controls_frame()
         self.video_label.place(relx=0, rely=0, relwidth=1, relheight=1)
@@ -2830,11 +2953,9 @@ class VideoPlayer:
 
     def _check_mouse_position_main(self, x: int, y: int) -> None:
         """Fullscreen autohide toolbar; Tk-only — must run on main thread."""
-        try:
-            screen_height = self.video_window.winfo_screenheight()
-        except Exception:
+        if not self.is_fullscreen:
             return
-        if y >= screen_height - 50:
+        if self.is_cursor_over_toolbar(x, y):
             self.show_controls_frame()
         else:
             self.hide_controls_frame()
@@ -2975,6 +3096,8 @@ class VideoPlayer:
         logging.info(f"[DEBUG] play_video: playing={self.playing}")
         if not self.video_path:
             return
+
+        self._reconcile_window_mode_before_play()
 
         # 1. Lazy VLC init (same path as display_first_frame).
         if not self._ensure_vlc_player():
@@ -3166,73 +3289,116 @@ class VideoPlayer:
 
 
 
+    def _finish_safe_switch_video(self, path, name, was_loop_active: bool) -> None:
+        """Deferred timeline/bookmark sync after VLC has loaded the new file."""
+        self._media_switch_in_progress = False
+        if getattr(self, "_cleaning_up", False):
+            return
+        if self.timeline_widget:
+            try:
+                self.timeline_widget.reload_all_markers_and_redraw(path)
+            except Exception as e:
+                logging.info("[safe_switch] timeline reload: %s", e)
+        self._refresh_loop_state_after_video_switch(keep_enabled=was_loop_active)
+        self._schedule_decode_placeholder_checks()
+        ctrl = self.controller
+        if ctrl and hasattr(ctrl, "refresh_bookmark_manager_if_open"):
+            try:
+                ctrl.refresh_bookmark_manager_if_open(path)
+            except Exception as e:
+                logging.info("[safe_switch] bookmark manager refresh: %s", e)
+
     def safe_switch_video(self, path, name):
-            """
-            Přepne na nové video BEZ nutnosti ničit a znovu vytvářet přehrávač.
-            Toto je stabilní a doporučovaná metoda.
-            Zároveň aktualizuje zvýraznění v playlistu.
-            """
-            logging.info(f"[DEBUG] Switching media to: {name}")
+        """
+        Switch to another file on the existing player (no window teardown).
 
-            if not self.player or not self.instance:
-                logging.info("[ERROR] Player or instance not initialized. Cannot switch video.")
-                return
+        Stops and releases the previous VLC media before loading the next one —
+        ``set_media`` on a still-playing instance often crashes on Windows.
+        """
+        logging.info("[DEBUG] Switching media to: %s", name)
 
-            # 1. Aktualizujeme interní cesty a jméno
+        if not path or not os.path.isfile(path):
+            logging.info("[safe_switch] skipped — path missing: %s", path)
+            return
+        if not self._ensure_vlc_player():
+            logging.info("[ERROR] Player or instance not initialized. Cannot switch video.")
+            return
+
+        ctrl = self.controller
+        bm = getattr(ctrl, "bookmark_manager", None) if ctrl else None
+        if ctrl is not None:
+            ctrl._video_player_switching = True
+        if bm is not None:
+            bm.set_playback_polling_suspended(True)
+
+        was_loop_active = bool(getattr(self, "loop_active", False))
+        self._media_switch_in_progress = True
+        try:
+            self._cancel_broken_decode_checks()
+            self._hide_broken_playback_overlay()
+            self.playing = False
+            self._release_current_media(detach_hwnd=True)
+
             self.video_path = path
             self.video_name = name
             self.last_position = 0
-            self.video_window.title((name or "").lower())
+            self.bookmark_file = self._get_sidecar_bookmark_path(path)
+            self.load_bookmarks()
+            try:
+                self.video_window.title((name or "").lower())
+            except Exception:
+                pass
 
-            # 2. Vytvoříme NOVÉ MÉDIUM, ale POUŽIJEME STÁVAJÍCÍ PŘEHRÁVAČ.
-            new_media = self.instance.media_new(self.video_path)
+            new_media = self.instance.media_new(path)
             self.player.set_media(new_media)
             self._mark_media_loaded()
             if hasattr(self, "video_label") and self.video_label.winfo_exists():
                 self._safe_set_hwnd(self.video_label)
 
-            # 3. Spustíme přehrávání nového média
             self.player.play()
             self.playing = True
-            # Displays HUD
             self.show_hud()
 
-            # 4. Resetujeme UI (časovač a slider)
             if not self.embed and self.show_video_button_bar:
                 self._slider_percent = 0.0
                 self.render_slider(0.0)
                 self.timer_label.configure(text="00:00 / 00:00".lower())
                 self.play_button.configure(
                     image=self.stop_button_icon if self.stop_button_icon else None,
-                    text="" if self.stop_button_icon else "stop"
+                    text="" if self.stop_button_icon else "stop",
                 )
-            
-            # 5. Keep previous loop toggle state and rebind it to the new video's active segment.
-            was_loop_active = bool(getattr(self, "loop_active", False))
 
-            # 6. Aktualizujeme timeline pro nové video
             if self.timeline_widget:
                 self.timeline_widget.clear_selection()
-                self.timeline_widget.reload_all_markers_and_redraw(path)
-            self._refresh_loop_state_after_video_switch(keep_enabled=was_loop_active)
+                try:
+                    self.video_window.after(
+                        100,
+                        lambda p=path, wla=was_loop_active: self._finish_safe_switch_video(p, name, wla),
+                    )
+                except Exception:
+                    self._finish_safe_switch_video(path, name, was_loop_active)
+            else:
+                self._refresh_loop_state_after_video_switch(keep_enabled=was_loop_active)
+                self._schedule_decode_placeholder_checks()
+                self._media_switch_in_progress = False
 
-            # 6. --- NOVÉ: SYNCHRONIZACE PLAYLISTU ---
-            # Pokud je playlist aktivní, najdeme index aktuálního videa a zvýrazníme ho
             if self.playlist_manager and self.playlist_manager.is_playlist_open and self.playlist_manager.playlist:
                 try:
-                    # Najdeme index aktuálního videa v playlistu
                     current_idx = self.playlist_manager.playlist.index(path)
                     self.playlist_manager.current_playing_index = current_idx
-                    
-                    # Zavoláme metodu pro grafickou aktualizaci (tu musíš mít v playlist.py)
                     if hasattr(self.playlist_manager, "update_ui_selection"):
                         self.playlist_manager.update_ui_selection(current_idx)
-                        
                 except ValueError:
-                    logging.info(f"[Playlist Sync] Video {name} není v aktuálním playlistu.")
-                    
-                
-                
+                    logging.info("[Playlist Sync] Video %s není v aktuálním playlistu.", name)
+        except Exception as e:
+            logging.exception("[safe_switch] media switch failed: %s", e)
+            self._media_switch_in_progress = False
+        finally:
+            if bm is not None:
+                bm.set_playback_polling_suspended(False)
+            if ctrl is not None:
+                ctrl._video_player_switching = False
+
     def safe_switch_videoOld(self, path, name):
         """
         Přepne na nové video BEZ nutnosti ničit a znovu vytvářet přehrávač.
@@ -3358,6 +3524,35 @@ class VideoPlayer:
 
     # Uvnitř třídy VideoPlayer
 
+    def _release_current_media(self, *, detach_hwnd: bool = True) -> None:
+        """Stop VLC and release the current Media without destroying the player window."""
+        player = getattr(self, "player", None)
+        if not player:
+            return
+        if detach_hwnd and os.name == "nt" and hasattr(player, "set_hwnd"):
+            try:
+                player.set_hwnd(0)
+            except Exception:
+                pass
+        try:
+            player.stop()
+        except Exception:
+            pass
+        try:
+            t0 = time.time()
+            while player.is_playing() and (time.time() - t0) < 0.8:
+                time.sleep(0.04)
+        except Exception:
+            pass
+        try:
+            m = player.get_media()
+            if m is not None:
+                player.set_media(None)
+                m.release()
+        except Exception as e:
+            logging.debug("[VLC] _release_current_media: %s", e)
+        self._loaded_video_path = None
+
     def release_held_media(self):
         """
         Stop playback and release the VLC Media object so Windows can close the file.
@@ -3365,29 +3560,7 @@ class VideoPlayer:
         """
         if not getattr(self, "player", None):
             return
-        try:
-            if os.name == "nt" and hasattr(self.player, "set_hwnd"):
-                self.player.set_hwnd(0)
-        except Exception:
-            pass
-        self._loaded_video_path = None
-        try:
-            self.player.stop()
-        except Exception:
-            pass
-        try:
-            t0 = time.time()
-            while self.player.is_playing() and (time.time() - t0) < 0.6:
-                time.sleep(0.04)
-        except Exception:
-            pass
-        try:
-            m = self.player.get_media()
-            if m is not None:
-                self.player.set_media(None)
-                m.release()
-        except Exception as e:
-            logging.debug("[Cleanup] release_held_media: %s", e)
+        self._release_current_media(detach_hwnd=True)
 
     def cleanup(self):
         """
@@ -3400,6 +3573,18 @@ class VideoPlayer:
         self._cleaning_up = True
         logging.info("[Cleanup] Spouštím úklid pro video přehrávač...")
         self._pynput_bridge_dead = True
+        self.playing = False
+
+        for attr in ("listener", "global_listener"):
+            lst = getattr(self, attr, None)
+            setattr(self, attr, None)
+            if lst is not None:
+                try:
+                    lst.stop()
+                    logging.info("[Cleanup] Listener myši zastaven (%s).", attr)
+                except Exception as e:
+                    logging.info("[Cleanup] Listener stop (%s): %s", attr, e)
+
         pj = getattr(self, "_pynput_pump_job", None)
         if pj is not None:
             try:
@@ -3411,26 +3596,24 @@ class VideoPlayer:
         try:
             self._cancel_broken_decode_checks()
             self._hide_broken_playback_overlay()
+            self.hide_slider_hover_time_popup()
         except Exception:
             pass
-        self.playing = False  # Zastaví všechny smyčky `update_time_slider`
-        self.hide_slider_hover_time_popup()
-
-        listener = self.global_listener
-        self.global_listener = None
 
         player = getattr(self, "player", None)
         if player:
             try:
-                if os.name == "nt" and hasattr(player, "set_hwnd"):
-                    player.set_hwnd(0)
-            except Exception:
-                pass
+                self.release_held_media()
+            except Exception as e:
+                logging.debug("[Cleanup] release_held_media: %s", e)
             try:
-                player.stop()
-            except Exception:
-                pass
-            time.sleep(0.08)
+                player.release()
+                logging.info("[Cleanup] VLC přehrávač uvolněn.")
+            except Exception as e:
+                logging.info("[Cleanup] Chyba při uvolňování přehrávače: %s", e)
+            finally:
+                self.player = None
+                time.sleep(0.05)
 
         video_window = getattr(self, "video_window", None)
         if video_window is not None:
@@ -3439,42 +3622,18 @@ class VideoPlayer:
                     video_window.destroy()
                     logging.info("[Cleanup] Okno přehrávače zničeno.")
             except Exception as e:
-                logging.info(f"[Cleanup] Okno destroy: {e}")
+                logging.info("[Cleanup] Okno destroy: %s", e)
             self.video_window = None
 
-        if player:
-            self._loaded_video_path = None
+        instance = getattr(self, "instance", None)
+        if instance:
             try:
-                media = player.get_media()
-                if media is not None:
-                    player.set_media(None)
-                    media.release()
-            except Exception as e:
-                logging.debug("[Cleanup] media release: %s", e)
-            try:
-                player.release()
-                logging.info("[Cleanup] VLC přehrávač uvolněn.")
-            except Exception as e:
-                logging.info(f"[Cleanup] Chyba při uvolňování přehrávače: {e}")
-            finally:
-                self.player = None
-                time.sleep(0.15)
-
-        if hasattr(self, 'instance') and self.instance:
-            try:
-                self.instance.release()
+                instance.release()
                 logging.info("[Cleanup] VLC instance uvolněna.")
             except Exception as e:
-                logging.info(f"[Cleanup] Chyba při uvolňování VLC instance: {e}")
+                logging.info("[Cleanup] Chyba při uvolňování VLC instance: %s", e)
             finally:
                 self.instance = None
-
-        if listener:
-            try:
-                listener.stop()
-                logging.info("[Cleanup] Globální listener myši zastaven.")
-            except Exception as e:
-                logging.info(f"[Cleanup] Listener stop: {e}")
 
     def close_video_player(self):
         """Nyní pouze volá robustní cleanup metodu."""
@@ -3830,7 +3989,8 @@ class VideoPlayer:
 
 
     def update_time_slider(self):
-        
+        if getattr(self, "_cleaning_up", False) or getattr(self, "_media_switch_in_progress", False):
+            return
           # POISTKA: Ak okno už neexistuje, okamžite skonči
         if not hasattr(self, 'video_window') or not self.video_window.winfo_exists():
             return

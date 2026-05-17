@@ -118,9 +118,8 @@ class BookmarkManager:
         )
         self.bookmark_listbox.pack(fill=tk.BOTH, expand=True, padx=6, pady=(2, 6))
 
-        # Support both single-click and double-click bookmark jumps.
         self.bookmark_listbox.bind("<<ListboxSelect>>", self._on_bookmark_select)
-        self.bookmark_listbox.bind("<Double-1>", self._on_bookmark_select)
+        self.bookmark_listbox.bind("<Double-1>", self._on_bookmark_double_click)
 
         self._create_button_panel(main_frame)
         self._populate_bookmark_list()
@@ -269,30 +268,46 @@ class BookmarkManager:
             **btn_style,
         ).grid(row=0, column=5, padx=2, pady=2, sticky="e")
 
-    def _on_bookmark_select(self, event=None):
-        """
-        Seek to the selected bookmark's timestamp.
-
-        The selected entry is resolved to the source bookmark index and then
-        sent to the connected video player.
-        """
+    def _selected_bookmark_time(self) -> Optional[float]:
+        """Return the source timestamp (seconds) for the listbox selection, if any."""
         if not self.bookmark_listbox:
-            return
-
+            return None
         selection = self.bookmark_listbox.curselection()
         if not selection:
-            return
-
+            return None
         list_index = selection[0]
         if not (0 <= list_index < len(self.visible_indices)):
-            return
-
+            return None
         bookmark_index = self.visible_indices[list_index]
         target_time = self.bookmarks[bookmark_index].get("time")
         if target_time is None:
-            return
+            return None
+        try:
+            return max(0.0, float(target_time))
+        except (TypeError, ValueError):
+            return None
 
-        self.video_player.set_time(float(target_time))
+    def _on_bookmark_select(self, event=None):
+        """Single-click: seek to the bookmark without changing play/pause."""
+        target_time = self._selected_bookmark_time()
+        if target_time is None:
+            return
+        self.video_player.set_time(target_time)
+
+    def _on_bookmark_double_click(self, event=None):
+        """Double-click: seek and start playback from the bookmark."""
+        target_time = self._selected_bookmark_time()
+        if target_time is None:
+            return
+        if hasattr(self.video_player, "play_from_time"):
+            self.video_player.play_from_time(target_time)
+            return
+        self.video_player.set_time(target_time)
+        for method_name in ("play", "play_video"):
+            play_fn = getattr(self.video_player, method_name, None)
+            if callable(play_fn):
+                play_fn()
+                break
 
     def _on_filter_changed(self, event=None):
         """Refresh visible rows when the filter text changes."""

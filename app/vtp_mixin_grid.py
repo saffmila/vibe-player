@@ -87,19 +87,89 @@ class _BookmarkSeekProxy:
 
     def set_time(self, target_time_seconds: float) -> None:
         """Seek the wrapped player to a target time in seconds."""
+        ctrl = self.controller
+        if ctrl and getattr(ctrl, "_video_player_switching", False):
+            return
         player_obj = self._resolve_player()
         if player_obj is None:
             return
 
+        t = max(0.0, float(target_time_seconds))
+        ms = int(t * 1000)
+
         # Preferred API (already seconds-based).
         if hasattr(player_obj, "set_time") and callable(getattr(player_obj, "set_time")):
-            player_obj.set_time(target_time_seconds)
+            player_obj.set_time(t)
             return
+
+        if hasattr(player_obj, "last_position"):
+            player_obj.last_position = ms
 
         # Fallback for ``VideoPlayer`` which exposes ``player.set_time(ms)``.
         inner_player = getattr(player_obj, "player", None)
         if inner_player is not None and hasattr(inner_player, "set_time"):
-            inner_player.set_time(int(max(0.0, float(target_time_seconds)) * 1000))
+            inner_player.set_time(ms)
+
+        if hasattr(player_obj, "seek_to_time") and callable(getattr(player_obj, "seek_to_time")):
+            try:
+                player_obj.seek_to_time(t)
+                return
+            except Exception:
+                pass
+
+        timeline = getattr(player_obj, "timeline_widget", None)
+        if timeline is not None and hasattr(timeline, "set_current_time"):
+            try:
+                timeline.set_current_time(t)
+            except Exception:
+                pass
+
+    def play(self) -> None:
+        """Resume or start playback on the resolved player."""
+        player_obj = self._resolve_player()
+        if player_obj is None:
+            return
+        if hasattr(player_obj, "play_video") and callable(getattr(player_obj, "play_video")):
+            player_obj.play_video()
+            return
+        inner_player = getattr(player_obj, "player", None)
+        if inner_player is not None and hasattr(inner_player, "play"):
+            try:
+                inner_player.play()
+            except Exception:
+                return
+            try:
+                player_obj.playing = True
+            except Exception:
+                pass
+
+    def play_from_time(self, target_time_seconds: float) -> None:
+        """Seek and play — used by bookmark manager double-click."""
+        ctrl = self.controller
+        if ctrl and getattr(ctrl, "_video_player_switching", False):
+            return
+        t = max(0.0, float(target_time_seconds))
+        player_obj = self._resolve_player()
+        if player_obj is None:
+            ctrl = self.controller
+            path = self.video_path
+            if ctrl and path and os.path.isfile(path):
+                self._pending_play_from_time = t
+                ctrl.open_video_player(path, os.path.basename(path))
+                ctrl.after(450, self._complete_pending_play_from_time)
+            return
+        self.set_time(t)
+        self.play()
+
+    def _complete_pending_play_from_time(self) -> None:
+        t = getattr(self, "_pending_play_from_time", None)
+        if t is None:
+            return
+        self._pending_play_from_time = None
+        if self._resolve_player() is None:
+            return
+        self.set_time(t)
+        self.play()
 
     def get_current_time(self) -> float:
         """Return current playback time in seconds."""
