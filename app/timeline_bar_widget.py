@@ -3593,12 +3593,15 @@ class TimelineBarWidget(ctk.CTkFrame):
             t = b.get("time") if b.get("time") is not None else b.get("timestamp")
             n = b.get("name") if b.get("name") is not None else b.get("label", "Marker")
             if t is not None:
-                self.markers.append({
+                marker = {
                     "type": "bookmark",
                     "timestamp": float(t),
                     "label": str(n),
-                    "color": "#FFA500",
-                })
+                }
+                raw_color = b.get("color")
+                if isinstance(raw_color, str) and raw_color.strip().startswith("#"):
+                    marker["color"] = raw_color.strip()
+                self.markers.append(marker)
 
         n_bm = len([m for m in self.markers if m.get("type") == "bookmark"])
         logging.info("[Timeline] Loaded %d bookmarks (merged sources).", n_bm)
@@ -3649,7 +3652,11 @@ class TimelineBarWidget(ctk.CTkFrame):
                     n_rows = max(1, int(self.bookmark_label_rows))
                     level = bookmark_stagger_index % n_rows
                     bookmark_stagger_index += 1
-                    current_color = bookmark_colors[level % len(bookmark_colors)]
+                    custom_color = marker.get("color")
+                    if isinstance(custom_color, str) and custom_color.strip().startswith("#"):
+                        current_color = custom_color.strip()
+                    else:
+                        current_color = bookmark_colors[level % len(bookmark_colors)]
                 else:
                     level = 0
                     current_color = None

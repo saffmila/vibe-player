@@ -141,7 +141,11 @@ class _BookmarkSeekProxy:
             except (TypeError, ValueError):
                 continue
             label = str(item.get("label", item.get("name", ""))).strip()
-            normalized.append({"name": label, "time": max(0.0, ts)})
+            entry = {"name": label, "time": max(0.0, ts)}
+            color = BookmarkManager._normalize_hex_color(item.get("color"))
+            if color:
+                entry["color"] = color
+            normalized.append(entry)
 
         player_obj = self._resolve_player()
         if player_obj is not None:
@@ -4437,12 +4441,14 @@ class VtpGridMixin:
         for item in raw:
             if not isinstance(item, dict) or "time" not in item:
                 continue
-            rows.append(
-                {
-                    "time": item.get("time"),
-                    "label": item.get("label") or item.get("name") or "",
-                }
-            )
+            row = {
+                "time": item.get("time"),
+                "label": item.get("label") or item.get("name") or "",
+            }
+            color = BookmarkManager._normalize_hex_color(item.get("color"))
+            if color:
+                row["color"] = color
+            rows.append(row)
         return rows
 
     def _apply_bookmark_manager_video(self, video_path):
