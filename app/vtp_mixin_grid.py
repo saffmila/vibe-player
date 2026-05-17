@@ -30,15 +30,64 @@ from hotkeys import DEFAULT_HOTKEYS, menu_accel, rename_accelerators_label
 from bookmark_manager import BookmarkManager
 
 
+def _norm_video_path(path) -> str:
+    if not path:
+        return ""
+    try:
+        return os.path.normcase(os.path.normpath(os.path.abspath(path)))
+    except (OSError, ValueError, TypeError):
+        return os.path.normcase(os.path.normpath(str(path)))
+
+
+def _video_player_is_live(player) -> bool:
+    if player is None:
+        return False
+    if getattr(player, "_cleaning_up", False) or getattr(player, "_cleanup_done", False):
+        return False
+    window = getattr(player, "video_window", None)
+    if window is None:
+        return False
+    try:
+        return bool(window.winfo_exists())
+    except Exception:
+        return False
+
+
 class _BookmarkSeekProxy:
     """Provide a stable bookmark-manager API over ``VideoPlayer`` objects."""
 
-    def __init__(self, video_player):
+    def __init__(self, video_player, video_path=None, controller=None):
         self.video_player = video_player
+        self.video_path = video_path or (
+            getattr(video_player, "video_path", None) if video_player else None
+        )
+        self.controller = controller
+
+    def _resolve_player(self):
+        player_obj = self.video_player
+        want = _norm_video_path(self.video_path)
+        if player_obj and _video_player_is_live(player_obj) and (
+            not want or _norm_video_path(getattr(player_obj, "video_path", None)) == want
+        ):
+            return player_obj
+        ctrl = self.controller
+        if not ctrl or not want:
+            return None
+        for candidate in (
+            getattr(ctrl, "current_video_window", None),
+            getattr(ctrl, "active_player", None),
+        ):
+            if (
+                candidate
+                and _video_player_is_live(candidate)
+                and _norm_video_path(getattr(candidate, "video_path", None)) == want
+            ):
+                return candidate
+        return None
 
     def set_time(self, target_time_seconds: float) -> None:
         """Seek the wrapped player to a target time in seconds."""
-        player_obj = self.video_player
+        player_obj = self._resolve_player()
         if player_obj is None:
             return
 
@@ -54,7 +103,7 @@ class _BookmarkSeekProxy:
 
     def get_current_time(self) -> float:
         """Return current playback time in seconds."""
-        player_obj = self.video_player
+        player_obj = self._resolve_player()
         if player_obj is None:
             return 0.0
 
@@ -91,17 +140,33 @@ class _BookmarkSeekProxy:
                 ts = float(item.get("time", 0.0))
             except (TypeError, ValueError):
                 continue
-            label = str(item.get("label", "")).strip()
+            label = str(item.get("label", item.get("name", ""))).strip()
             normalized.append({"name": label, "time": max(0.0, ts)})
 
-        try:
-            player_obj.bookmarks = normalized
-        except Exception:
-            return
-
-        if hasattr(player_obj, "save_bookmarks") and callable(getattr(player_obj, "save_bookmarks")):
+        player_obj = self._resolve_player()
+        if player_obj is not None:
             try:
-                player_obj.save_bookmarks()
+                player_obj.bookmarks = normalized
+            except Exception:
+                return
+            if hasattr(player_obj, "save_bookmarks") and callable(getattr(player_obj, "save_bookmarks")):
+                try:
+                    player_obj.save_bookmarks()
+                except Exception:
+                    pass
+        elif self.controller and self.video_path:
+            timeline = getattr(self.controller, "timeline_widget", None)
+            if timeline and hasattr(timeline, "save_bookmarks_standalone"):
+                try:
+                    timeline.save_bookmarks_standalone(self.video_path, normalized)
+                except Exception:
+                    return
+
+        timeline = getattr(self.controller, "timeline_widget", None) if self.controller else None
+        if timeline and _norm_video_path(getattr(timeline, "video_path", None)) == _norm_video_path(self.video_path):
+            try:
+                timeline.update_bookmarks()
+                timeline.redraw_timeline()
             except Exception:
                 pass
 
@@ -4345,45 +4410,109 @@ class VtpGridMixin:
         self._demo_toast("demo_organize")
         self.playlist_manager.show_playlist()
 
-    def show_bookmark_manager(self):
-        """
-        Open the bookmark manager for the currently active video player.
-
-        Bookmarks are read from the active player and projected to:
-        ``{"time": float, "label": str}``.
-        """
+    def _bookmark_rows_for_path(self, video_path):
+        """Load bookmark rows for a video from the active player or sidecar JSON."""
+        timeline = getattr(self, "timeline_widget", None)
         active_video = getattr(self, "current_video_window", None) or getattr(self, "active_player", None)
-        if active_video is None:
-            messagebox.showinfo("Bookmarks", "Open a video first to use Bookmark Manager.")
-            return
+        want = _norm_video_path(video_path)
 
-        # Keep manager content in sync with on-disk bookmarks used by timeline.
-        if hasattr(active_video, "load_bookmarks") and callable(getattr(active_video, "load_bookmarks")):
-            try:
-                active_video.load_bookmarks()
-            except Exception as exc:
-                logging.info("[BookmarkManager] Failed to reload bookmarks: %s", exc)
-
-        if not hasattr(self, "bookmark_manager") or self.bookmark_manager is None:
-            self.bookmark_manager = BookmarkManager(self, _BookmarkSeekProxy(active_video))
+        if (
+            active_video
+            and want
+            and _video_player_is_live(active_video)
+            and _norm_video_path(getattr(active_video, "video_path", None)) == want
+        ):
+            if hasattr(active_video, "load_bookmarks") and callable(getattr(active_video, "load_bookmarks")):
+                try:
+                    active_video.load_bookmarks()
+                except Exception as exc:
+                    logging.info("[BookmarkManager] Failed to reload bookmarks: %s", exc)
+            raw = getattr(active_video, "bookmarks", []) or []
+        elif timeline and hasattr(timeline, "load_bookmarks_for_path"):
+            raw = timeline.load_bookmarks_for_path(video_path)
         else:
-            self.bookmark_manager.video_player = _BookmarkSeekProxy(active_video)
+            raw = []
 
-        bookmark_rows = []
-        for item in getattr(active_video, "bookmarks", []) or []:
-            if not isinstance(item, dict):
+        rows = []
+        for item in raw:
+            if not isinstance(item, dict) or "time" not in item:
                 continue
-            if "time" not in item:
-                continue
-            bookmark_rows.append(
+            rows.append(
                 {
                     "time": item.get("time"),
                     "label": item.get("label") or item.get("name") or "",
                 }
             )
+        return rows
 
-        self.bookmark_manager.load_bookmarks_for_video(bookmark_rows)
+    def _apply_bookmark_manager_video(self, video_path):
+        """Point the open bookmark manager at ``video_path`` and reload its list."""
+        bm = getattr(self, "bookmark_manager", None)
+        if not bm or not getattr(bm, "is_open", False):
+            return
+        if not bm.window or not bm.window.winfo_exists():
+            return
+        if not video_path or not os.path.isfile(video_path):
+            return
+
+        active_video = getattr(self, "current_video_window", None) or getattr(self, "active_player", None)
+        want = _norm_video_path(video_path)
+        player_for_proxy = active_video if (
+            _video_player_is_live(active_video)
+            and _norm_video_path(getattr(active_video, "video_path", None)) == want
+        ) else None
+
+        bm.video_player = _BookmarkSeekProxy(player_for_proxy, video_path=video_path, controller=self)
+        bm._managed_video_path = video_path
+        bm.load_bookmarks_for_video(self._bookmark_rows_for_path(video_path))
+        try:
+            bm.window.title(f"Bookmarks — {os.path.basename(video_path)}")
+        except Exception:
+            pass
+
+    def _set_bookmark_manager_polling_suspended(self, suspended: bool) -> None:
+        bm = getattr(self, "bookmark_manager", None)
+        if bm is not None and hasattr(bm, "set_playback_polling_suspended"):
+            bm.set_playback_polling_suspended(suspended)
+
+    def refresh_bookmark_manager_if_open(self, video_path=None):
+        """Reload bookmark manager when timeline or thumb selection changes video."""
+        if getattr(self, "_open_video_job", None) or getattr(self, "_video_player_switching", False):
+            return
+        timeline = getattr(self, "timeline_widget", None)
+        if not video_path and timeline:
+            video_path = getattr(timeline, "video_path", None)
+        if not video_path:
+            return
+        self._apply_bookmark_manager_video(video_path)
+
+    def show_bookmark_manager(self, video_path=None):
+        """
+        Open the bookmark manager for the timeline video or active player.
+
+        Bookmarks are read from the active player (when paths match) or sidecar JSON.
+        """
+        timeline = getattr(self, "timeline_widget", None)
+        if not video_path and timeline:
+            video_path = getattr(timeline, "video_path", None)
+
+        active_video = getattr(self, "current_video_window", None) or getattr(self, "active_player", None)
+        if not video_path and active_video:
+            video_path = getattr(active_video, "video_path", None)
+
+        if not video_path or not os.path.isfile(video_path):
+            messagebox.showinfo("Bookmarks", "Select a video on the timeline first.")
+            return
+
+        proxy = _BookmarkSeekProxy(None, video_path=video_path, controller=self)
+
+        if not hasattr(self, "bookmark_manager") or self.bookmark_manager is None:
+            self.bookmark_manager = BookmarkManager(self, proxy)
+        else:
+            self.bookmark_manager.video_player = proxy
+
         self.bookmark_manager.show_manager()
+        self._apply_bookmark_manager_video(video_path)
 
 
     def add_selected_to_playlist(self, event=None, new_playlist=False):
@@ -5311,70 +5440,121 @@ class VtpGridMixin:
 
 
 
+    def _reset_video_open_state(self):
+        """Clear flags left over from a cancelled or failed player open."""
+        self._video_player_switching = False
+        self._preview_blocked = False
+        self._set_bookmark_manager_polling_suspended(False)
+        self._pending_open_video = None
+
     def open_video_player(self, video_path, video_name):
+        """Queue opening a video so VLC cleanup can finish before the next instance starts."""
+        self._pending_open_video = (video_path, video_name)
+        for attr in ("_open_video_job", "_open_video_create_job"):
+            job = getattr(self, attr, None)
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except (tk.TclError, ValueError):
+                    pass
+                setattr(self, attr, None)
+        self._open_video_job = self.after(50, self._open_video_player_impl)
+
+    def _open_video_player_impl(self):
+        self._open_video_job = None
+        pending = getattr(self, "_pending_open_video", None)
+        if not pending:
+            return
+        video_path, video_name = pending
+
+        self._preview_blocked = True
         can_play, reason = self._can_attempt_video_playback(video_path, for_preview=False)
         if not can_play:
+            self._reset_video_open_state()
             logging.warning("[Playback Blocked] %s | path=%s", reason, video_path)
             if hasattr(self, "status_bar") and self.status_bar:
                 self.status_bar.set_action_message(reason, color="#ff6b6b")
                 self.after(4500, self.status_bar.clear_action_message)
             return
-        
-        if hasattr(self, "info_panel") and hasattr(self.info_panel, "preview_player"):
+
+        self._video_player_switching = True
+        self._set_bookmark_manager_polling_suspended(True)
+
+        if hasattr(self, "_suspend_preview_for_main_player"):
+            self._suspend_preview_for_main_player()
+        elif hasattr(self, "stop_preview"):
+            self.stop_preview()
+
+        old_player = self.current_video_window
+        if old_player is not None:
+            self.current_video_window = None
+            self.active_player = None
             try:
-                pp = self.info_panel.preview_player
-                if pp and getattr(pp, "playing", False):
-                    logging.info("[DEBUG] Preview is playing, will stop it before opening main player.")
-                    pp.stop_video()
-                else:
-                    logging.info("[DEBUG] Preview is not playing, nothing to stop.")
+                old_player.cleanup()
             except Exception as e:
-                logging.warning("Could not stop preview player: %s", e)
+                logging.info("[OpenVideo] Old player cleanup: %s", e)
+            self._pending_open_video = pending
+            self._open_video_create_job = self.after(200, self._create_video_player_window)
+            return
 
-            
-        if self.current_video_window is not None:
-            self.close_video_player()
+        self._create_video_player_window()
 
-        logging.info(f"Opening video player for {video_name} with path {video_path}")  # Debug
+    def _create_video_player_window(self):
+        self._open_video_create_job = None
+        pending = getattr(self, "_pending_open_video", None)
+        if not pending:
+            self._reset_video_open_state()
+            return
+        self._pending_open_video = None
+        video_path, video_name = pending
 
-        self.current_video_index = next(
-            (index for (index, d) in enumerate(self.video_files) if d["path"] == video_path),
-            None
-        )
+        try:
+            self._preview_blocked = True
+            logging.info(f"Opening video player for {video_name} with path {video_path}")  # Debug
 
-        self.current_video_window = VideoPlayer(
-            parent=self,
-            controller=self,
-            video_path=video_path,
-            video_name=video_name,
-            initial_volume=self.current_volume,
-            vlc_video_output=self.video_output_var.get(),
-            vlc_audio_output=self.audio_output_var.get(),
-            vlc_hw_decoding=self.hardware_decoding_var.get(),
-            vlc_audio_device=self.audio_device_var.get(),
-            auto_play=self.auto_play,
-            subtitles_enabled=self.subtitles_enabled,
-            use_gpu_upscale=getattr(self, "gpu_upscale", False)
-            # playlist_manager=self.playlist_manager
-        )
-        self._demo_toast("demo_playback")
-        # Start playback in next Tk tick so window paints first (reduces perceived freezes).
-        self.after(1, lambda: self.current_video_window and self.current_video_window.show_and_play())
-        
-        if self.ShowTWidget and hasattr(self, "timeline_widget"):
-            self.current_video_window.timeline_widget = self.timeline_widget
-        self.active_player = self.current_video_window
-        
-        if self.ShowTWidget and hasattr(self, "timeline_widget"):
-  
-            self.timeline_widget.reload_all_markers_and_redraw(video_path)
+            self.current_video_index = next(
+                (index for (index, d) in enumerate(self.video_files) if d["path"] == video_path),
+                None
+            )
 
-        logging.info("[DEBUG] current_video_window created: %s", self.current_video_window)
+            self.current_video_window = VideoPlayer(
+                parent=self,
+                controller=self,
+                video_path=video_path,
+                video_name=video_name,
+                initial_volume=self.current_volume,
+                vlc_video_output=self.video_output_var.get(),
+                vlc_audio_output=self.audio_output_var.get(),
+                vlc_hw_decoding=self.hardware_decoding_var.get(),
+                vlc_audio_device=self.audio_device_var.get(),
+                auto_play=self.auto_play,
+                subtitles_enabled=self.subtitles_enabled,
+                use_gpu_upscale=getattr(self, "gpu_upscale", False)
+            )
+            self._demo_toast("demo_playback")
+            self.after(1, lambda: self.current_video_window and self.current_video_window.show_and_play())
 
-        # Ensure the fullscreen state is consistent
-        if self.is_fullscreen:
-            logging.info("Applying fullscreen state to the new video window.")  # Debug
-            self.current_video_window.toggle_fullscreen()
+            if self.ShowTWidget and hasattr(self, "timeline_widget"):
+                self.current_video_window.timeline_widget = self.timeline_widget
+            self.active_player = self.current_video_window
+
+            if self.ShowTWidget and hasattr(self, "timeline_widget"):
+                self.timeline_widget.reload_all_markers_and_redraw(video_path)
+
+            logging.info("[DEBUG] current_video_window created: %s", self.current_video_window)
+
+            if self.is_fullscreen:
+                logging.info("Applying fullscreen state to the new video window.")  # Debug
+                self.current_video_window.toggle_fullscreen()
+        except Exception as e:
+            logging.exception("[OpenVideo] Failed to create player window: %s", e)
+            self._reset_video_open_state()
+            return
+        finally:
+            self._video_player_switching = False
+            self._set_bookmark_manager_polling_suspended(False)
+
+        self.refresh_bookmark_manager_if_open(video_path)
         
 
 
@@ -5446,11 +5626,15 @@ class VtpGridMixin:
 
 
 
-    def close_video_player(self):
-        if self.current_video_window is not None:
-            self.current_video_window.close_video_player()
+    def close_video_player(self, release_preview=True):
+        win = self.current_video_window
+        if win is not None:
             self.current_video_window = None
+            self.active_player = None
+            win.close_video_player()
             logging.info("[DEBUG] current_video_window closed/set to None")
+        if release_preview:
+            self._preview_blocked = False
 
         if hasattr(self, "info_panel") and hasattr(self.info_panel, "preview_player"):
             try:

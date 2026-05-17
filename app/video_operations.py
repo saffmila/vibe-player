@@ -321,7 +321,10 @@ class VideoPlayer:
                 
         
         if self.player:
-            self.player.audio_set_volume(self.current_volume)
+            if self.embed:
+                self._ensure_preview_muted()
+            else:
+                self.player.audio_set_volume(self.current_volume)
         
         
         if self.show_video_button_bar:
@@ -1292,7 +1295,47 @@ class VideoPlayer:
                 return False
         if not self.player:
             self.player = self.instance.media_player_new()
+        if self.embed:
+            self._ensure_preview_muted()
         return True
+
+    def _apply_preview_media_options(self, media) -> None:
+        """Disable audio track for embedded preview media."""
+        if not self.embed or media is None:
+            return
+        for opt in (":no-audio", "no-audio"):
+            try:
+                media.add_option(opt)
+            except Exception:
+                pass
+
+    def _ensure_preview_muted(self) -> None:
+        """Keep embedded preview silent (call after play(); VLC may reset volume)."""
+        if not self.embed or not getattr(self, "player", None):
+            return
+        self.current_volume = 0
+        try:
+            self.player.audio_set_mute(True)
+        except Exception:
+            pass
+        try:
+            self.player.audio_set_volume(0)
+        except Exception:
+            pass
+
+    def _schedule_preview_mute_retries(self) -> None:
+        """Re-apply mute shortly after play(); some VLC builds briefly output audio."""
+        if not self.embed:
+            return
+        self._ensure_preview_muted()
+        win = getattr(self, "video_window", None)
+        if win is None:
+            return
+        for delay in (50, 150, 400):
+            try:
+                win.after(delay, self._ensure_preview_muted)
+            except Exception:
+                pass
 
     def apply_preferences(self):
         self.load_vlc_preferences()
@@ -1858,13 +1901,16 @@ class VideoPlayer:
             return
 
         media = self.instance.media_new(self.video_path)
+        self._apply_preview_media_options(media)
         self.player.set_media(media)
         self._mark_media_loaded()
         self._safe_set_hwnd(self.video_label)
 
         # In some VLC builds we must briefly play first, then pause.
         # Keep this non-blocking to avoid UI stalls.
+        self._ensure_preview_muted()
         self.player.play()
+        self._schedule_preview_mute_retries()
         self.video_window.after(120, lambda: self.player.pause() if self.player else None)
         self._schedule_decode_placeholder_checks()
 
@@ -2950,7 +2996,9 @@ class VideoPlayer:
                     return
                 self._cancel_broken_decode_checks()
                 self._safe_set_hwnd(video_widget)
+                self._ensure_preview_muted()
                 self.player.play()
+                self._schedule_preview_mute_retries()
                 self._duration_retry_count = 0
                 if self.current_speed != 1.0:
                     self.video_window.after(
@@ -2972,6 +3020,7 @@ class VideoPlayer:
 
         # 2. Vytvoření média a zbytek logiky (zůstává stejné)
         media = self.instance.media_new(self.video_path)
+        self._apply_preview_media_options(media)
 
         if self.last_position:
             start_time_seconds = self.last_position / 1000.0
@@ -2987,7 +3036,9 @@ class VideoPlayer:
         self.player.set_media(media)
         self._mark_media_loaded()
         self._safe_set_hwnd(video_widget)
+        self._ensure_preview_muted()
         self.player.play()
+        self._schedule_preview_mute_retries()
         self._duration_retry_count = 0
 
         if self.current_speed != 1.0:
@@ -3343,6 +3394,10 @@ class VideoPlayer:
         Zastaví všechny běžící procesy a uvolní všechny systémové zdroje.
         Tato metoda je navržena tak, aby byla odolná proti chybám.
         """
+        if getattr(self, "_cleanup_done", False):
+            return
+        self._cleanup_done = True
+        self._cleaning_up = True
         logging.info("[Cleanup] Spouštím úklid pro video přehrávač...")
         self._pynput_bridge_dead = True
         pj = getattr(self, "_pynput_pump_job", None)
@@ -3361,21 +3416,49 @@ class VideoPlayer:
         self.playing = False  # Zastaví všechny smyčky `update_time_slider`
         self.hide_slider_hover_time_popup()
 
-        if self.global_listener:
-            self.global_listener.stop()
-            self.global_listener = None
-            logging.info("[Cleanup] Globální listener myši zastaven.")
+        listener = self.global_listener
+        self.global_listener = None
 
-        if hasattr(self, 'player') and self.player:
+        player = getattr(self, "player", None)
+        if player:
             try:
-                self.release_held_media()
-                self.player.release()
+                if os.name == "nt" and hasattr(player, "set_hwnd"):
+                    player.set_hwnd(0)
+            except Exception:
+                pass
+            try:
+                player.stop()
+            except Exception:
+                pass
+            time.sleep(0.08)
+
+        video_window = getattr(self, "video_window", None)
+        if video_window is not None:
+            try:
+                if video_window.winfo_exists():
+                    video_window.destroy()
+                    logging.info("[Cleanup] Okno přehrávače zničeno.")
+            except Exception as e:
+                logging.info(f"[Cleanup] Okno destroy: {e}")
+            self.video_window = None
+
+        if player:
+            self._loaded_video_path = None
+            try:
+                media = player.get_media()
+                if media is not None:
+                    player.set_media(None)
+                    media.release()
+            except Exception as e:
+                logging.debug("[Cleanup] media release: %s", e)
+            try:
+                player.release()
                 logging.info("[Cleanup] VLC přehrávač uvolněn.")
             except Exception as e:
                 logging.info(f"[Cleanup] Chyba při uvolňování přehrávače: {e}")
             finally:
                 self.player = None
-                time.sleep(0.2)
+                time.sleep(0.15)
 
         if hasattr(self, 'instance') and self.instance:
             try:
@@ -3386,16 +3469,31 @@ class VideoPlayer:
             finally:
                 self.instance = None
 
-        if hasattr(self, 'video_window') and self.video_window.winfo_exists():
-            self.video_window.destroy()
-            logging.info("[Cleanup] Okno přehrávače zničeno.")
+        if listener:
+            try:
+                listener.stop()
+                logging.info("[Cleanup] Globální listener myši zastaven.")
+            except Exception as e:
+                logging.info(f"[Cleanup] Listener stop: {e}")
 
     def close_video_player(self):
         """Nyní pouze volá robustní cleanup metodu."""
+        controller = self.controller
         self.cleanup()
-        if self.controller:
-            self.controller.current_video_window = None
-            self.controller.after(150, self.controller._focus_back_after_dialog)
+        if controller:
+            def _after_player_closed():
+                if getattr(controller, "_video_player_switching", False):
+                    return
+                if controller.current_video_window is not self:
+                    return
+                controller.current_video_window = None
+                controller.active_player = None
+                controller._preview_blocked = False
+                if hasattr(controller, "refresh_bookmark_manager_if_open"):
+                    controller.refresh_bookmark_manager_if_open()
+                controller.after(150, controller._focus_back_after_dialog)
+
+            controller.after(0, _after_player_closed)
 
 
 
@@ -3677,6 +3775,9 @@ class VideoPlayer:
         canvas.tag_raise("volume_thumb")
 
     def update_volume(self, volume):
+        if self.embed:
+            self._ensure_preview_muted()
+            return
         self.current_volume = int(float(volume))
         self.render_volume_slider(self.current_volume)
         if self.player:

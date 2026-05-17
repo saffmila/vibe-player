@@ -199,8 +199,27 @@ class InfoPanelFrame(ctk.CTkFrame):
                     
                     
 
+    def _preview_controller(self):
+        pp = getattr(self, "preview_player", None)
+        return getattr(pp, "controller", None) if pp else None
+
+    def _main_player_open(self) -> bool:
+        ctrl = self._preview_controller()
+        if ctrl is None:
+            return False
+        if getattr(ctrl, "_preview_blocked", False):
+            return True
+        return getattr(ctrl, "current_video_window", None) is not None
+
+    def cancel_pending_preview(self) -> None:
+        """Invalidate queued/async preview work (e.g. before opening the main player)."""
+        self._pending_preview_path = None
+        self._preview_ticket += 1
+
     def _preview_process_ready_queue(self, retries: int = 0) -> None:
         """Tk main thread: consume file-check result from worker, then run VLC."""
+        if self._main_player_open():
+            return
         want_t = self._preview_ticket
         want_p = getattr(self, "_pending_preview_path", None)
         buf = []
@@ -227,11 +246,15 @@ class InfoPanelFrame(ctk.CTkFrame):
 
     def _preview_load_media_and_embed(self, vp: str) -> None:
         """VLC media_new + embed + play — must run on Tk main thread only."""
+        if self._main_player_open():
+            return
         if getattr(self, "_pending_preview_path", None) != vp:
             return
         media = None
         try:
             media = self.preview_player.instance.media_new(vp)
+            if hasattr(self.preview_player, "_apply_preview_media_options"):
+                self.preview_player._apply_preview_media_options(media)
         except Exception as e:
             logging.info("[Preview] VLC media_new failed: %s", e)
             media = None
@@ -246,6 +269,13 @@ class InfoPanelFrame(ctk.CTkFrame):
             return
 
         def embed_and_play_in_gui():
+            if self._main_player_open():
+                if media is not None:
+                    try:
+                        media.release()
+                    except Exception:
+                        pass
+                return
             if getattr(self, "_pending_preview_path", None) != vp:
                 if media is not None:
                     try:
@@ -272,13 +302,16 @@ class InfoPanelFrame(ctk.CTkFrame):
                     self.preview_player.player.set_media(media)
                     frame.update()
                     self.preview_player.player.set_hwnd(frame.winfo_id())
-                    self.preview_player.player.audio_set_volume(0)
-                    self.preview_player.player.play()
-                    self.preview_player.playing = True
+                    pp = self.preview_player
+                    pp._ensure_preview_muted()
+                    pp.player.play()
+                    pp._schedule_preview_mute_retries()
+                    pp.playing = True
 
                     if hasattr(self, "preview_auto_play_var") and not self.preview_auto_play_var.get():
                         def force_pause():
                             if self.preview_player and self.preview_player.player:
+                                self.preview_player._ensure_preview_muted()
                                 self.preview_player.player.pause()
                                 self.preview_player.playing = False
 
@@ -303,6 +336,8 @@ class InfoPanelFrame(ctk.CTkFrame):
         VLC (media_new, set_hwnd, play) and all Tk updates run on the main thread — never call
         them from the worker (Windows freezes / crashes when Tk/VLC are touched off-thread).
         """
+        if self._main_player_open():
+            return
         self._pending_preview_path = video_path
         self._preview_ticket += 1
         ticket = self._preview_ticket
@@ -323,18 +358,20 @@ class InfoPanelFrame(ctk.CTkFrame):
 
     def stop_video_preview(self):
         """Stop current video preview, if running."""
+        self.cancel_pending_preview()
         pp = getattr(self, "preview_player", None)
         if pp is None:
-            self._pending_preview_path = None
             return
         try:
             if hasattr(pp, "release_held_media"):
                 pp.release_held_media()
             elif hasattr(pp, "stop_video"):
                 pp.stop_video()
+            player = getattr(pp, "player", None)
+            if player is not None:
+                player.set_hwnd(0)
         except Exception as e:
             logging.debug("[InfoPanel] stop_video_preview: %s", e)
-        self._pending_preview_path = None
 
     def show_preview_placeholder(self, text="Loading preview..."):
         """Show placeholder in the preview panel (always uses preview_player.video_window)."""

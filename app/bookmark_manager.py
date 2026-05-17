@@ -38,6 +38,7 @@ class BookmarkManager:
         self._poll_after_id = None
         self.is_open = False
         self.bookmarks: List[Dict[str, object]] = []
+        self._polling_suspended = False
 
     def show_manager(self):
         """
@@ -242,6 +243,10 @@ class BookmarkManager:
         """Refresh visible rows when the filter text changes."""
         self._populate_bookmark_list()
 
+    def set_playback_polling_suspended(self, suspended: bool) -> None:
+        """Pause VLC polling while the main player is being torn down or recreated."""
+        self._polling_suspended = bool(suspended)
+
     def _start_playback_polling(self):
         """Start periodic playback polling while the manager window is open."""
         if not (self.window and self.window.winfo_exists()):
@@ -257,6 +262,18 @@ class BookmarkManager:
         """
         if not (self.is_open and self.window and self.window.winfo_exists()):
             self._poll_after_id = None
+            return
+
+        if self._polling_suspended:
+            self._poll_after_id = self.window.after(500, self._poll_playback_time)
+            return
+
+        ctrl = getattr(self.video_player, "controller", None)
+        if ctrl and (
+            getattr(ctrl, "_video_player_switching", False)
+            or getattr(ctrl, "_open_video_job", None)
+        ):
+            self._poll_after_id = self.window.after(500, self._poll_playback_time)
             return
 
         current_time = self._get_current_playback_time_seconds()

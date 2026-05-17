@@ -258,6 +258,7 @@ class VideoThumbnailPlayer(
         self._pending_dpi_scale = None
         self._dimensions_update_blocked = False
         self._preview_timer = None
+        self._preview_blocked = False
         self.thumbSelColor = "#4f575f"       #3399ff#b0b0b0       # or "#3399ff" for blue selection
         self.thumbBorderColor = "#282828" #  "#282828"
         self.thumbBGColor = "#181a1d"
@@ -3577,6 +3578,19 @@ class VideoThumbnailPlayer(
             # (Optional: clear all thumbnail selection)
             # self.clear_selection()
 
+    def _suspend_preview_for_main_player(self):
+        """Stop preview and cancel debounced loads while the standalone player is open."""
+        if hasattr(self, "_preview_timer") and self._preview_timer:
+            try:
+                self.after_cancel(self._preview_timer)
+            except Exception:
+                pass
+            self._preview_timer = None
+        if hasattr(self, "info_panel") and self.info_panel is not None:
+            if hasattr(self.info_panel, "cancel_pending_preview"):
+                self.info_panel.cancel_pending_preview()
+        self.stop_preview()
+
     def stop_preview(self):
         """
         Note: Safely stops any running preview (video or image).
@@ -3793,7 +3807,11 @@ class VideoThumbnailPlayer(
 
             def load_heavy_preview():
                 self._preview_timer = None  # timer fired, clear handle
-                
+                if getattr(self, "current_video_window", None) is not None or getattr(
+                    self, "_preview_blocked", False
+                ):
+                    return
+
                 is_video = file_path.lower().endswith(VIDEO_FORMATS)
                 is_image = file_path.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.gif'))
 
@@ -3943,6 +3961,7 @@ class VideoThumbnailPlayer(
                 logging.info("[ERROR] Failed to create VLC instance for preview_player.")
                 return
             self.info_panel.preview_player.player = self.info_panel.preview_player.instance.media_player_new()
+            self.info_panel.preview_player._ensure_preview_muted()
 
 
     def set_active_player(self):

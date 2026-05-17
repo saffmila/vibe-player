@@ -869,7 +869,18 @@ class TimelineBarWidget(ctk.CTkFrame):
         has_bookmarks = any(m.get("type") == "bookmark" for m in getattr(self, "markers", []))
         if has_bookmarks:
             menu.add_command(label="Remove All Bookmarks", command=self.remove_all_bookmarks)
-        
+
+        can_bookmark_manager = bool(
+            self.video_path
+            and os.path.isfile(self.video_path)
+            and hasattr(self.controller, "show_bookmark_manager")
+        )
+        menu.add_command(
+            label="Show Bookmark Manager",
+            command=lambda: self.controller.show_bookmark_manager(self.video_path),
+            state="normal" if can_bookmark_manager else "disabled",
+        )
+
         menu.add_separator()
         menu.add_command(label="Copy Timestamp", 
                          command=lambda: self.controller.clipboard_clear() or self.controller.clipboard_append(self.format_time(clicked_time)))
@@ -2053,11 +2064,13 @@ class TimelineBarWidget(ctk.CTkFrame):
 
     # --- NEW THREAD-SAFE THUMBNAIL LOADING ---
     def load_thumbnails(self, video_path=None, num_thumbs=None):
+        video_changed = False
         if video_path is not None and video_path != self.video_path:
             self.save_segments_for_path(self.video_path)
             self.video_path = video_path  # nejdřív nastavíme nové video_path...
             self.clear_selection()        # ...pak clear_selection() dotáže duration správného videa
             self.load_segments_for_path(self.video_path)
+            video_changed = True
         elif video_path is not None:
             self.video_path = video_path
             self.load_segments_for_path(self.video_path)
@@ -2069,6 +2082,10 @@ class TimelineBarWidget(ctk.CTkFrame):
             self.update_bookmarks()
             self.update_thumbnails()
             self.update_subtitles()
+            if video_changed:
+                ctrl = getattr(self, "controller", None)
+                if ctrl and hasattr(ctrl, "refresh_bookmark_manager_if_open"):
+                    ctrl.refresh_bookmark_manager_if_open(self.video_path)
 
         if num_thumbs is not None:
             self.num_thumbs = num_thumbs
@@ -3478,13 +3495,18 @@ class TimelineBarWidget(ctk.CTkFrame):
         old_path = self.video_path
         if video_path is None:
             video_path = self.video_path
-        if video_path != old_path:
+        video_changed = video_path != old_path
+        if video_changed:
             self.save_segments_for_path(old_path)
         self.video_path = video_path
         self.load_segments_for_path(video_path)
         self.update_bookmarks()
         self.update_thumbnails()
         self.update_subtitles()
+        if video_changed and video_path and os.path.isfile(video_path):
+            ctrl = getattr(self, "controller", None)
+            if ctrl and hasattr(ctrl, "refresh_bookmark_manager_if_open"):
+                ctrl.refresh_bookmark_manager_if_open(video_path)
 
     def update_thumbnails(self):
         self.markers = [m for m in self.markers if m.get("type") != "thumbnail"]
