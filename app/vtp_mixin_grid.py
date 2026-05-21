@@ -1337,6 +1337,8 @@ class VtpGridMixin:
     def set_wide_folder_columns(self, num_columns):
         """Set the number of columns for wide folders and refresh display."""
         self.numwidefolders_in_col = num_columns
+        if hasattr(self, "save_preferences"):
+            self.save_preferences()
         self.display_thumbnails(self.current_directory, preserve_scroll=True)  # Refresh the display
     
     def update_load_time(self, cache_hits, cache_misses, from_cache):

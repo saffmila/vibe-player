@@ -73,6 +73,11 @@ class VtpVirtualGridMixin:
         self._vg_scroll_job = None
         self._vg_render_id = 0
         self._vg_pending_gen: set[str] = set()
+        self._vg_gen_queue: list[dict] = []
+        self._vg_gen_active = 0
+        self._vg_gen_limit = 6
+        self._vg_gen_force_refresh = False
+        self._vg_gen_thumbnail_time = None
         self._vg_y_offset = 0
         self._vg_dynamic_label_h = 48
 
@@ -371,6 +376,20 @@ class VtpVirtualGridMixin:
         if isinstance(c, (tuple, list)):
             return c[1]
         return fallback if (not c or c == "transparent") else c
+
+    def _vg_wide_cache_key(self, file_path: str, nprev: int) -> str:
+        """Memory-cache key for generated wide strips, including size-sensitive inputs."""
+        try:
+            wide_w, wide_h = self.widefolder_size
+        except Exception:
+            wide_w, wide_h = 0, 0
+        gap = int(getattr(self, "wide_folder_gap", 18))
+        radius = int(getattr(self, "wide_folder_innerThumbRadius", 10))
+        return (
+            f"{file_path}\x00wide\x00n={int(nprev)}"
+            f"\x00size={int(wide_w)}x{int(wide_h)}"
+            f"\x00g={gap}\x00r={radius}"
+        )
 
     @staticmethod
     def _vg_flatten_rgba_for_tk(img: Image.Image, bg_rgb: tuple[int, int, int]) -> Image.Image:
@@ -1241,7 +1260,7 @@ class VtpVirtualGridMixin:
                      lambda e: (self.display_thumbnails(_get_path()) if _is_folder()
                                 else self.on_thumbnail_click(e, _get_path())))
         canvas.bind("<ButtonRelease-1>",
-                     lambda e: self.on_thumbnail_click(e, _get_path()))
+                     lambda e: None if _is_folder() else self.on_thumbnail_click(e, _get_path()))
         canvas.bind("<Button-3>",
                      lambda e: (self.show_tree_context_menu(e, self.find_node_by_path(_get_path()))
                                 if _is_folder()
@@ -1390,10 +1409,12 @@ class VtpVirtualGridMixin:
         photo = None
         if has_media and self.memory_cache:
             nprev = int(getattr(self, "vg_wide_preview_count", 5))
-            wide_key = file_path + "\x00wide\x00n=" + str(nprev)
+            wide_key = self._vg_wide_cache_key(file_path, nprev)
             cached = thumbnail_cache.get(wide_key, memory_cache=self.memory_cache)
             if cached is None:
                 # Backwards compatibility with older cache key
+                cached = thumbnail_cache.get(file_path + "\x00wide\x00n=" + str(nprev), memory_cache=self.memory_cache)
+            if cached is None:
                 cached = thumbnail_cache.get(file_path + "\x00wide", memory_cache=self.memory_cache)
             # Never fall back to plain file_path: after Standard view that key is the 2x2 folder composite,
             # which then fills the wide strip and looks like "standard folder" instead of a filmstrip.
@@ -1569,6 +1590,10 @@ class VtpVirtualGridMixin:
     def _vg_start_async_generation(self, force_refresh, thumbnail_time, render_id):
         self._vg_render_id = render_id
         self._vg_pending_gen.clear()
+        self._vg_gen_queue = []
+        self._vg_gen_active = 0
+        self._vg_gen_force_refresh = force_refresh
+        self._vg_gen_thumbnail_time = thumbnail_time
 
         if getattr(self, "_thumb_grid_suppress_decode_until_nav", False):
             logging.info(
@@ -1581,6 +1606,17 @@ class VtpVirtualGridMixin:
             fp = item["path"]
             if force_refresh or not self.memory_cache:
                 items_to_generate.append(item)
+            elif self._vg_is_wide and item.get("is_folder", False):
+                # Wide strips never draw the standard folder-preview cache stored under fp.
+                # Require the dedicated wide cache key so folders with only nested media
+                # still get their filmstrip generated after Standard mode cached the 2x2 icon.
+                if item.get("_has_media") is False:
+                    continue
+                nprev = int(getattr(self, "vg_wide_preview_count", 5))
+                wide_key = self._vg_wide_cache_key(fp, nprev)
+                cached = thumbnail_cache.get(wide_key, memory_cache=self.memory_cache)
+                if cached is None:
+                    items_to_generate.append(item)
             elif thumbnail_cache.get(fp, memory_cache=self.memory_cache) is None:
                 items_to_generate.append(item)
 
@@ -1592,15 +1628,38 @@ class VtpVirtualGridMixin:
             return
         logging.info("[VGrid] Async gen: %d / %d", len(items_to_generate), len(self._vg_data))
 
-        for item in items_to_generate:
+        self._vg_pending_gen = {item["path"] for item in items_to_generate}
+        self._vg_gen_queue = list(items_to_generate)
+        self._vg_pump_async_generation(render_id)
+
+    def _vg_pump_async_generation(self, render_id):
+        """Submit thumbnail jobs gradually so stale decoders do not pile up during navigation."""
+        if render_id != self._vg_render_id:
+            return
+        limit = max(1, int(getattr(self, "_vg_gen_limit", 6) or 6))
+        while self._vg_gen_queue and self._vg_gen_active < limit:
+            item = self._vg_gen_queue.pop(0)
             fp, fn = item["path"], item["name"]
-            is_folder = item.get("is_folder", False)
-            self._vg_pending_gen.add(fp)
-            if is_folder:
+            self._vg_gen_active += 1
+            if item.get("is_folder", False):
                 self.executor.submit(self._vg_worker_folder, fp, fn, render_id)
             else:
-                self.executor.submit(self._vg_worker_file, fp, fn, force_refresh,
-                                     thumbnail_time, render_id)
+                self.executor.submit(
+                    self._vg_worker_file,
+                    fp,
+                    fn,
+                    self._vg_gen_force_refresh,
+                    self._vg_gen_thumbnail_time,
+                    render_id,
+                )
+
+    def _vg_generation_job_done(self, file_path: str, render_id) -> None:
+        if render_id != self._vg_render_id:
+            return
+        self._vg_gen_active = max(0, int(getattr(self, "_vg_gen_active", 0)) - 1)
+        self._vg_pending_gen.discard(file_path)
+        self._vg_pump_async_generation(render_id)
+        self._vg_try_finish_folder_cache_mark(render_id)
 
     def _vg_mark_current_directory_cached(self) -> None:
         """Match legacy process_thumbnail_batch: flag current folder after thumbs are ready."""
@@ -1670,8 +1729,7 @@ class VtpVirtualGridMixin:
             logging.debug("[VGrid] File error %s: %s", file_path, e)
         finally:
             if render_id == self._vg_render_id:
-                self._vg_pending_gen.discard(file_path)
-                self.after(0, lambda rid=render_id: self._vg_try_finish_folder_cache_mark(rid))
+                self.after(0, lambda fp=file_path, rid=render_id: self._vg_generation_job_done(fp, rid))
 
     def _vg_worker_folder(self, file_path, file_name, render_id):
         try:
@@ -1720,7 +1778,7 @@ class VtpVirtualGridMixin:
                         with Image.open(wide_path) as img:
                             wide_ctk = ctk.CTkImage(
                                 light_image=img.copy(), dark_image=img.copy())
-                        wide_key = file_path + "\x00wide\x00n=" + str(nprev)
+                        wide_key = self._vg_wide_cache_key(file_path, nprev)
                         thumbnail_cache.set(wide_key, wide_ctk,
                                             memory_cache=self.memory_cache)
                         self.after(0, lambda fp=file_path:
@@ -1736,8 +1794,7 @@ class VtpVirtualGridMixin:
             logging.debug("[VGrid] Folder error %s: %s", file_path, e)
         finally:
             if render_id == self._vg_render_id:
-                self._vg_pending_gen.discard(file_path)
-                self.after(0, lambda rid=render_id: self._vg_try_finish_folder_cache_mark(rid))
+                self.after(0, lambda fp=file_path, rid=render_id: self._vg_generation_job_done(fp, rid))
 
     def _vg_apply_generated_thumb(self, file_path: str):
         if not self._vg_active:
@@ -1871,6 +1928,8 @@ class VtpVirtualGridMixin:
     def deactivate_virtual_grid(self):
         self._vg_active = False
         self._vg_pending_gen.clear()
+        self._vg_gen_queue = []
+        self._vg_gen_active = 0
         self._vg_last_first_row = -1
         self._vg_unwire_scrollbar()
 
