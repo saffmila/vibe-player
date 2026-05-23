@@ -3651,12 +3651,16 @@ class VideoThumbnailPlayer(
     def _focus_video_window_after_dialog(self):
         """Return focus to currently opened video window after keyword dialog."""
         try:
-            vw = getattr(getattr(self, "current_video_window", None), "video_window", None)
+            player = getattr(self, "current_video_window", None)
+            vw = getattr(player, "video_window", None)
             if vw is not None and vw.winfo_exists():
                 # Bring player window back above main app after dialog closes.
                 try:
-                    vw.attributes("-topmost", True)
-                    vw.after(30, lambda: vw.attributes("-topmost", False))
+                    keep_topmost = getattr(player, "_keep_player_window_topmost", None)
+                    if callable(keep_topmost):
+                        keep_topmost()
+                    else:
+                        vw.attributes("-topmost", True)
                 except Exception:
                     pass
                 vw.lift()

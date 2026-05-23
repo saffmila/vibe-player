@@ -399,6 +399,17 @@ class VideoPlayer:
     def _end_opening_raise_guard(self) -> None:
         self._opening_raise_guard = False
 
+    def _keep_player_window_topmost(self) -> None:
+        """Keep the standalone player above the main app while it is open."""
+        if self.embed or getattr(self, "_cleaning_up", False) or getattr(self, "is_fullscreen", False):
+            return
+        try:
+            if not self.video_window.winfo_exists():
+                return
+            self.video_window.winfo_toplevel().attributes("-topmost", True)
+        except Exception as exc:
+            logging.debug("[Focus] keep_player_window_topmost: %s", exc)
+
     def raise_player_window(self) -> None:
         """Bring the standalone player above the main app (CTk parent often stays on top)."""
         if self.embed or getattr(self, "_cleaning_up", False):
@@ -414,7 +425,6 @@ class VideoPlayer:
             top.lift()
             top.attributes("-topmost", True)
             top.focus_force()
-            top.after(40, lambda: top.attributes("-topmost", False) if top.winfo_exists() else None)
         except Exception as exc:
             logging.debug("[Focus] raise_player_window Tk: %s", exc)
         if sys.platform == "win32":
@@ -820,19 +830,14 @@ class VideoPlayer:
     
     def on_focus_in(self, event=None):
         """Když okno získá focus, nastaví se jako 'vždy nahoře'."""
-        if self.video_window.winfo_exists():
-            # self.video_window.attributes("-topmost", True)
-            self.video_window.winfo_toplevel().attributes("-topmost", True)
-            
-            logging.info("[Focus] Video player získal focus, je v popředí.")
+        self._keep_player_window_topmost()
+        logging.info("[Focus] Video player získal focus, je v popředí.")
 
     def on_focus_out(self, event=None):
-        """Když okno ztratí focus, přestane být 'vždy nahoře'."""
+        """Když okno ztratí focus, nepřebíjej appkové dialogy."""
         if getattr(self, "_opening_raise_guard", False):
             return
-        if self.video_window.winfo_exists():
-            self.video_window.winfo_toplevel().attributes("-topmost", False)
-            logging.info("[Focus] Video player ztratil focus, už není v popředí.")
+        logging.info("[Focus] Video player ztratil focus, topmost stav ponechán.")
 
     def on_panel_resize(self, event=None):
         embed_target = getattr(self, "video_label", self.video_window)
@@ -3208,6 +3213,7 @@ class VideoPlayer:
         
         # Reassign video output back to the original window
         self._safe_set_hwnd(self.video_label)
+        self._keep_player_window_topmost()
 
 
 

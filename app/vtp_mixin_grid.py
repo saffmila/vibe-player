@@ -3059,6 +3059,9 @@ class VtpGridMixin:
         self.remove_keyword_window.minsize(480, 200)
         self._center_toplevel_window(self.remove_keyword_window, 520, 240)
         self.remove_keyword_window.transient(self)
+        self.remove_keyword_window.attributes("-topmost", True)
+        self.remove_keyword_window.lift()
+        self.remove_keyword_window.focus_force()
 
         # create a CTkFrame for consistent layout
         frame = ctk.CTkFrame(self.remove_keyword_window)
@@ -4762,6 +4765,8 @@ class VtpGridMixin:
         self._center_toplevel_window(self.keyword_window, 420, 220)
         self.keyword_window.transient(self)  # proper focus return when closed
         self.keyword_window.attributes('-topmost', True)
+        self.keyword_window.lift()
+        self.keyword_window.focus_force()
         # Instruction label
         ctk.CTkLabel(
             self.keyword_window,
