@@ -406,7 +406,14 @@ class VideoPlayer:
         try:
             if not self.video_window.winfo_exists():
                 return
-            self.video_window.winfo_toplevel().attributes("-topmost", True)
+            top = self.video_window.winfo_toplevel()
+            try:
+                current = top.attributes("-topmost")
+                if str(current).lower() in ("1", "true"):
+                    return
+            except Exception:
+                pass
+            top.attributes("-topmost", True)
         except Exception as exc:
             logging.debug("[Focus] keep_player_window_topmost: %s", exc)
 
@@ -423,7 +430,7 @@ class VideoPlayer:
         try:
             top.deiconify()
             top.lift()
-            top.attributes("-topmost", True)
+            self._keep_player_window_topmost()
             top.focus_force()
         except Exception as exc:
             logging.debug("[Focus] raise_player_window Tk: %s", exc)
@@ -830,7 +837,8 @@ class VideoPlayer:
     
     def on_focus_in(self, event=None):
         """Když okno získá focus, nastaví se jako 'vždy nahoře'."""
-        self._keep_player_window_topmost()
+        # Keep focus events passive. Re-applying -topmost from FocusIn can trigger
+        # rapid FocusOut/FocusIn churn between Tk and the embedded VLC HWND on Windows.
         logging.info("[Focus] Video player získal focus, je v popředí.")
 
     def on_focus_out(self, event=None):
