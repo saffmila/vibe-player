@@ -385,8 +385,12 @@ class VtpLegacyDragMixin:
 
             # Update the database with the new path
             self.database.update_folder_path(source_path, new_path)
+            sync_dir_cache = getattr(self, "_sync_directory_parent_cache_status", None)
+            if callable(sync_dir_cache):
+                sync_dir_cache(source_path, new_path, not copy_mode)
 
             # Refresh folder icons
+            self.refresh_folder_icon(os.path.dirname(source_path))
             self.refresh_folder_icons_subtree(source_path)
             self.refresh_folder_icons_subtree(new_path)
         except Exception as e:
@@ -426,11 +430,15 @@ class VtpLegacyDragMixin:
                         continue
 
                 # No conflict; perform the move/copy
+                is_dir = os.path.isdir(file_path)
                 self.database.update_folder_path(file_path, new_path)
                 self.perform_move_or_copy(file_path, new_path, copy_mode, moved_items)
 
-                if os.path.isdir(file_path):
+                if is_dir:
                     self.move_cache(file_path, new_path)
+                    sync_dir_cache = getattr(self, "_sync_directory_parent_cache_status", None)
+                    if callable(sync_dir_cache):
+                        sync_dir_cache(file_path, new_path, not copy_mode)
                     self.refresh_folder_icons_subtree(file_path)
                     self.refresh_folder_icons_subtree(new_path)
                 elif os.path.exists(new_path):
@@ -800,11 +808,15 @@ class VtpLegacyDragMixin:
                         if should_replace and not self._legacy_delete_existing_target(new_path):
                             continue
 
+                    is_dir = os.path.isdir(file_path)
                     if not copy_mode:
                         self.database.update_folder_path(file_path, new_path)
                     self.perform_move_or_copy(file_path, new_path, copy_mode, moved_sources)
-                    if os.path.isdir(file_path):
+                    if is_dir:
                         self.move_cache(file_path, new_path)
+                        sync_dir_cache = getattr(self, "_sync_directory_parent_cache_status", None)
+                        if callable(sync_dir_cache):
+                            sync_dir_cache(file_path, new_path, not copy_mode)
                         self.refresh_folder_icons_subtree(file_path)
                         self.refresh_folder_icons_subtree(new_path)
                     elif os.path.exists(new_path):
