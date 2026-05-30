@@ -1508,6 +1508,7 @@ def create_search_window(app):
         app._center_toplevel_window(search_window, _sw, _sh)
     else:
         search_window.geometry(f"{_sw}x{_sh}")
+    search_window.minsize(680, 430)
     search_window.attributes('-topmost', True) 
     # Add a frame for the search parameter selection
     search_frame = ctk.CTkFrame(search_window)
@@ -1568,16 +1569,47 @@ def create_search_window(app):
         wraplength=720, justify="left"
     )
     instructions_label.pack(fill=ctk.X, padx=10, pady=5)
-    
-    # Create the checkbox and link it to our variable
+
+    separator = ctk.CTkFrame(search_window, height=1, fg_color="#2b3440")
+    separator.pack(fill=ctk.X, padx=10, pady=(6, 8))
+
+    results_actions_frame = ctk.CTkFrame(search_window, fg_color="transparent")
+    results_actions_frame.pack(fill=ctk.X, padx=10, pady=(0, 4))
+
+    restore_hint = ctk.CTkLabel(
+        results_actions_frame,
+        text="You can return to the last search results from here after browsing folders.",
+        anchor="w",
+        text_color="#b8c7d9",
+    )
+    restore_hint.pack(side=ctk.LEFT, fill=ctk.X, expand=True)
+
+    restore_button = ctk.CTkButton(
+        results_actions_frame,
+        text="Display Last Results",
+        width=150,
+        state=("normal" if getattr(app, "current_search_results", None) else "disabled"),
+        command=app.display_last_search_results,
+    )
+    app.search_restore_button = restore_button
+    if hasattr(app, "_update_search_restore_button_state"):
+        app._update_search_restore_button_state()
+    restore_button.pack(side=ctk.RIGHT, padx=(10, 0))
+
     clear_results_checkbox = ctk.CTkCheckBox(
-        search_window, # The parent widget (the search window itself)
+        search_window,
         text="Clear previous results",
         variable=app.clear_search_var,
         onvalue=True,
-        offvalue=False
+        offvalue=False,
+        width=14,
+        height=14,
+        checkbox_width=14,
+        checkbox_height=14,
+        border_width=2,
+        font=ctk.CTkFont(size=11),
     )
-    clear_results_checkbox.pack(pady=10, padx=10,anchor="w") # Or .grid() depending on your layout
+    clear_results_checkbox.pack(pady=(2, 8), padx=10, anchor="w")
 
     def _focus_entry():
         try:

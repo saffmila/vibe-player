@@ -301,11 +301,16 @@ class VideoPlayer:
         # Bind Shift+C to save the current frame as an image
         # Bind Shift+C to save the current frame as an image
         self.video_window.bind('<Shift-C>', lambda e: save_capture_image(self.controller, self.video_path, self.player, method="ffmpeg"))
+        def hk(action_name, default):
+            hmap = getattr(self.controller, "hotkeys_map", None) or {}
+            return hmap.get(action_name, default)
+
         self.video_window.bind("<Control-w>", lambda e: self.close_video_player())
+        self.video_window.bind(hk("video_fullscreen", "f"), self.toggle_fullscreen)
         self.video_window.bind("<Shift-F>", self.toggle_fullscreen)
         self.video_window.bind("<Alt-Return>", self.toggle_fullscreen)
         self.video_window.bind("<Alt-KP_Enter>", self.toggle_fullscreen)
-        self.video_window.bind("<Escape>", self._handle_escape_key)
+        self.video_window.bind(hk("video_windowed_mode", "<Escape>"), self._handle_escape_key)
         self.video_window.bind("<Double-Button-1>", self.toggle_fullscreen)
         self.video_window.bind("<Motion>", self._handle_player_motion_for_slider_popup, add="+")
                 # Bring the video player to the top
@@ -3029,9 +3034,29 @@ class VideoPlayer:
             self.exit_fullscreen()
     
     def _handle_escape_key(self, event=None):
-        if self.is_fullscreen:
+        if self.embed:
+            return None
+        try:
+            is_tk_fullscreen = bool(self.video_window.attributes("-fullscreen"))
+        except Exception:
+            is_tk_fullscreen = False
+
+        if self.is_fullscreen or is_tk_fullscreen:
             self.exit_fullscreen()
             return "break"
+        try:
+            if str(self.video_window.state()) == "zoomed":
+                self.video_window.state("normal")
+                self.show_controls_frame()
+                self.video_label.place(relx=0, rely=0, relwidth=1, relheight=1)
+                if getattr(self, "_broken_playback_overlay_active", False):
+                    self._broken_playback_overlay.lift()
+                self._safe_set_hwnd(self.video_label)
+                self._keep_player_window_topmost()
+                logging.info("Returned video window from maximized to windowed mode.")
+                return "break"
+        except Exception as e:
+            logging.debug("[VideoPlayer] Escape windowed-mode handler failed: %s", e)
         return None
 
 

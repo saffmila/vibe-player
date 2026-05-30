@@ -699,6 +699,18 @@ class VtpGridMixin:
 
         preserve_scroll: if True, restore vertical canvas scroll fraction after reload (virtual grid only). Used e.g. after in-place DnD refresh of the same folder.
         """
+        if self._should_refresh_search_results_instead(dir_path):
+            self.display_last_search_results()
+            return
+
+        was_search_view = getattr(self, "search_results_active", False)
+        self._leave_search_results_view(
+            clear_results=False,
+            clear_action=False,
+        )
+        if was_search_view and hasattr(self, "status_bar") and self.status_bar:
+            self._show_return_to_search_status()
+
         # Capture before any clear — clear_thumbnails resets yview.
         if preserve_scroll:
             try:
@@ -5735,9 +5747,232 @@ class VtpGridMixin:
                 logging.warning("Could not restart dummy preview: %s", e)
 
 
-    
-  
-            
+    def _create_search_results_banner(self):
+        """Create the hidden in-grid banner that marks temporary search results."""
+        parent = getattr(self, "frame", None)
+        if parent is None or getattr(self, "search_results_banner", None) is not None:
+            return
+
+        self.search_results_title_var = ctk.StringVar(value="SEARCH RESULTS")
+        self.search_results_detail_var = ctk.StringVar(value="")
+
+        banner = ctk.CTkFrame(
+            parent,
+            fg_color="#182333",
+            border_color="#244459",
+            border_width=1,
+            corner_radius=8,
+        )
+
+        text_frame = ctk.CTkFrame(banner, fg_color="transparent")
+        text_frame.grid(row=0, column=0, sticky="ew", padx=(12, 8), pady=7)
+        banner.grid_columnconfigure(0, weight=1)
+
+        title = ctk.CTkLabel(
+            text_frame,
+            textvariable=self.search_results_title_var,
+            anchor="w",
+            text_color="#8ecbff",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        )
+        title.pack(side="top", anchor="w")
+
+        detail = ctk.CTkLabel(
+            text_frame,
+            textvariable=self.search_results_detail_var,
+            anchor="w",
+            text_color="#d6dee8",
+            wraplength=520,
+            justify="left",
+        )
+        detail.pack(side="top", anchor="w", fill="x")
+
+        back_button = ctk.CTkButton(
+            banner,
+            text="Back",
+            width=62,
+            height=24,
+            fg_color="#3a7ebf",
+            hover_color="#4a8fd4",
+            command=self.clear_search_results_view,
+        )
+        back_button.grid(row=0, column=1, sticky="e", padx=(4, 10), pady=7)
+
+        def _fit_detail(event):
+            detail.configure(wraplength=max(220, event.width - 100))
+
+        banner.bind("<Configure>", _fit_detail, add="+")
+
+        for widget in (banner, text_frame, title, detail, back_button):
+            widget.bind("<MouseWheel>", self._on_mouse_wheel, add="+")
+            widget.bind("<Shift-MouseWheel>", self._on_shift_mouse_wheel, add="+")
+
+        self.search_results_banner = banner
+
+    def _pack_search_results_banner(self):
+        banner = getattr(self, "search_results_banner", None)
+        if banner is None:
+            return
+        try:
+            if banner.winfo_ismapped():
+                return
+            canvas = getattr(self, "canvas", None)
+            if canvas is not None and canvas.winfo_manager() == "pack":
+                banner.pack(
+                    side="top",
+                    fill="x",
+                    padx=6,
+                    pady=(4, 3),
+                    before=canvas,
+                )
+            else:
+                banner.pack(side="top", fill="x", padx=6, pady=(4, 3))
+        except tk.TclError:
+            banner.pack(side="top", fill="x", padx=6, pady=(4, 3))
+
+    def _hide_search_results_banner(self):
+        banner = getattr(self, "search_results_banner", None)
+        if banner is None:
+            return
+        try:
+            banner.pack_forget()
+        except tk.TclError:
+            pass
+
+    def _has_search_results(self):
+        return bool(getattr(self, "current_search_results", None))
+
+    def _update_search_restore_button_state(self):
+        button = getattr(self, "search_restore_button", None)
+        if button is None:
+            return
+        try:
+            button.configure(state=("normal" if self._has_search_results() else "disabled"))
+        except tk.TclError:
+            self.search_restore_button = None
+
+    def _show_return_to_search_status(self):
+        if not hasattr(self, "status_bar") or not self.status_bar:
+            return
+        self.status_bar.set_action_message("Left search results.")
+        if hasattr(self.status_bar, "set_action_button"):
+            self.status_bar.set_action_button("Return", self.display_last_search_results)
+
+    def _paths_equal_for_search_view(self, left, right):
+        if not left or not right:
+            return False
+        try:
+            return os.path.normcase(os.path.normpath(str(left))) == os.path.normcase(os.path.normpath(str(right)))
+        except (OSError, TypeError, ValueError):
+            return str(left) == str(right)
+
+    def _should_refresh_search_results_instead(self, dir_path):
+        if not getattr(self, "search_results_active", False):
+            return False
+        if not getattr(self, "current_search_results", None):
+            return False
+
+        current_dir = getattr(self, "current_directory", None)
+        return_dir = getattr(self, "search_results_return_directory", None)
+        return (
+            self._paths_equal_for_search_view(dir_path, current_dir)
+            or self._paths_equal_for_search_view(dir_path, return_dir)
+        )
+
+    def _format_search_results_detail(self, query_text, new_count, total_count):
+        if total_count <= 0:
+            return f"No files found for {query_text}."
+        if new_count == total_count:
+            return f"{total_count} file(s) found for {query_text}."
+        if new_count == 0:
+            return f"No new files found for {query_text}. Showing {total_count} accumulated result(s)."
+        return f"{new_count} new file(s) found for {query_text}. Showing {total_count} accumulated result(s)."
+
+    def _set_search_results_view(self, query_text, new_count, total_count):
+        if getattr(self, "search_results_banner", None) is None:
+            self._create_search_results_banner()
+        if getattr(self, "search_results_banner", None) is None:
+            return
+
+        self.search_results_active = True
+        self.search_results_query = query_text
+        self.search_results_count = total_count
+
+        if not getattr(self, "search_results_return_directory", None):
+            self.search_results_return_directory = getattr(self, "current_directory", None)
+
+        self.search_results_title_var.set("SEARCH RESULTS")
+        detail = self._format_search_results_detail(query_text, new_count, total_count)
+        self.search_results_detail_var.set(detail)
+        self._pack_search_results_banner()
+
+        if hasattr(self, "status_bar") and self.status_bar:
+            self.status_bar.set_action_message(detail)
+            if hasattr(self.status_bar, "clear_action_button"):
+                self.status_bar.clear_action_button()
+        self._update_search_restore_button_state()
+
+    def _leave_search_results_view(self, clear_results=False, clear_action=False):
+        was_search_view = getattr(self, "search_results_active", False)
+        if clear_results:
+            self.current_search_results = []
+            self.search_results_query = ""
+            self.search_results_count = 0
+        else:
+            self.search_results_count = len(getattr(self, "current_search_results", []) or [])
+        self.search_results_active = False
+        self._hide_search_results_banner()
+        if clear_action and was_search_view and hasattr(self, "status_bar") and self.status_bar:
+            self.status_bar.clear_action_message()
+        self._update_search_restore_button_state()
+
+    def clear_search_results_view(self):
+        """Leave search results and restore the folder that was active before search."""
+        target = getattr(self, "search_results_return_directory", None)
+        if not target or not os.path.isdir(target):
+            target = getattr(self, "current_directory", None)
+        if not target or not os.path.isdir(target):
+            target = getattr(self, "default_directory", None)
+
+        self._leave_search_results_view(clear_results=False, clear_action=True)
+        if target:
+            self.display_thumbnails(target)
+            self._show_return_to_search_status()
+
+    def display_last_search_results(self):
+        """Restore the last in-memory search results without using virtual folders."""
+        results = list(getattr(self, "current_search_results", []) or [])
+        if not results:
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.set_action_message("No previous search results to display.")
+            self._update_search_restore_button_state()
+            return
+
+        current_dir = getattr(self, "current_directory", None)
+        if current_dir and os.path.isdir(current_dir):
+            self.search_results_return_directory = current_dir
+
+        query_text = getattr(self, "search_results_query", None) or "last search"
+        self.clear_thumbnails()
+        formatted_data = {
+            'folders': [f for f in results if os.path.isdir(f['path'])],
+            'files': [f for f in results if not os.path.isdir(f['path'])]
+        }
+        self._set_search_results_view(
+            query_text,
+            new_count=len(results),
+            total_count=len(results),
+        )
+        self._start_progressive_render(formatted_data, force_refresh=True)
+
+    def _describe_search_query(self, search_param, keyword, and_or, operator=None):
+        field = search_param or "all_fields"
+        term = (keyword or "").strip()
+        joiner = operator or and_or or "AND"
+        if operator:
+            return f"{field} {operator} {term}"
+        return f"{field} {joiner} {term}"
+
     def open_search_window(self):
         """
         Opens the search window. If it's already open, brings it to the front.
@@ -5760,6 +5995,9 @@ class VtpGridMixin:
             Executes a search query and formats results for the progressive renderer.
             Ensures that results are split into folders and files to prevent UI crashes.
             """
+            query_text = self._describe_search_query(search_param, keyword, and_or, operator)
+            if not getattr(self, "search_results_active", False) or self.clear_search_var.get():
+                self.search_results_return_directory = getattr(self, "current_directory", None)
             
             # Check the state of the checkbox at the beginning of the search
             if self.clear_search_var.get():
@@ -5775,6 +6013,14 @@ class VtpGridMixin:
 
             if not new_results:
                 logging.info("No new search results to display.")
+                if not self.current_search_results:
+                    self.clear_thumbnails()
+                self._set_search_results_view(
+                    query_text,
+                    new_count=0,
+                    total_count=len(self.current_search_results),
+                )
+                self.adjust_scroll_region_and_filler()
                 return
 
             # Convert the new database results into the format expected by the renderer
@@ -5793,6 +6039,12 @@ class VtpGridMixin:
                 'folders': [f for f in self.current_search_results if os.path.isdir(f['path'])],
                 'files': [f for f in self.current_search_results if not os.path.isdir(f['path'])]
             }
+
+            self._set_search_results_view(
+                query_text,
+                new_count=len(new_files_to_render),
+                total_count=len(self.current_search_results),
+            )
 
             # Call the progressive render function with the formatted dictionary
             self._start_progressive_render(formatted_data, force_refresh=True)

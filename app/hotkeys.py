@@ -23,6 +23,7 @@ DEFAULT_HOTKEYS = {
     'video_volume_down': '<Down>',
     'video_mute': 'm',
     'video_fullscreen': 'f',
+    'video_windowed_mode': '<Escape>',
     
 # --- Image Viewer: Navigation ---
     'image_next': '<Right>',
@@ -39,7 +40,7 @@ DEFAULT_HOTKEYS = {
     'image_flip_h': 'h',             # Flip Horizontal
     'image_flip_v': 'v',             # Flip Vertical
     # --- Image Viewer: Visuals (NEW) ---
-    'image_toggle_bg': 'b',          # Background color cycle
+    'image_toggle_bg': 'c',          # Background color cycle
     'image_toggle_info': 'i',        # Info HUD toggle
     'image_actual_size': 'a',        # Actual Size (1:1)
     'image_fit_best': 'b',           # Best fit
@@ -132,8 +133,8 @@ HOTKEY_HELP_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     )),
     ("Video / timeline (when player focused)", (
         "video_seek_forward", "video_seek_backward", "video_volume_up", "video_volume_down",
-        "video_mute", "video_fullscreen", "loop_start", "loop_end", "loop_toggle",
-        "video_speed_up", "video_speed_down",
+        "video_mute", "video_fullscreen", "video_windowed_mode", "loop_start",
+        "loop_end", "loop_toggle", "video_speed_up", "video_speed_down",
     )),
     ("Image viewer window", (
         "image_next", "image_prev", "image_copy", "image_save", "image_delete",
@@ -162,6 +163,7 @@ def format_accelerator_menu(seq: str) -> str:
     tokens = {
         "space": "Space",
         "return": "Enter",
+        "escape": "Esc",
         "backspace": "Backspace",
         "delete": "Del",
         "comma": ",",

@@ -544,6 +544,10 @@ class VideoThumbnailPlayer(
         self.clear_search_var = ctk.BooleanVar(value=True) 
         # A list to store and accumulate search results
         self.current_search_results = []
+        self.search_results_active = False
+        self.search_results_query = ""
+        self.search_results_count = 0
+        self.search_results_return_directory = self.current_directory
 
         # Folder icons for grid (yellow placeholders if load fails)
         icons_dir = os.path.join(self.default_directory, "icons")
@@ -785,6 +789,8 @@ class VideoThumbnailPlayer(
         )
 
         self.scrollable_frame = ctk.CTkFrame(self.canvas, fg_color=self.BackroundColor) #self.BackroundColor
+        self.search_results_banner = None
+        self._create_search_results_banner()
         # nove prehoz z displ visibl
         self.wide_folders_frame = ctk.CTkFrame(self.scrollable_frame, fg_color=self.thumbBGColor)  # self.thumbBGColor Container for wide folders
         self.regular_thumbnails_frame = ctk.CTkFrame(self.scrollable_frame, fg_color=self.thumbBGColor)  # self.thumbBGColorContainer for regular thumbnails

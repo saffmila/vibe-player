@@ -90,6 +90,12 @@ class ImageViewerLegacy:
                 return self.controller.hotkeys_map.get(action_name, default)
             return default
 
+        def consume(callback):
+            def handler(event):
+                callback(event)
+                return "break"
+            return handler
+
         # 1. Myš a základní ovládání
         # self.image_window.bind(hk('zoom_thumb', "<Control-MouseWheel>"), self.zoom)
         
@@ -102,38 +108,38 @@ class ImageViewerLegacy:
         self.canvas.bind("<Configure>", self.resize_canvas)
 
         # 2. Navigace (Z `hotkeys.py`)
-        self.image_window.bind(hk('image_next', '<Right>'), lambda e: self.show_next_image())
-        self.image_window.bind(hk('image_prev', '<Left>'), lambda e: self.show_prev_image())
-        self.image_window.bind(hk('close_window', '<Escape>'), lambda e: self._do_close())
-        self.image_window.bind(hk('image_delete', '<Delete>'), self.delete_current_image)
+        self.image_window.bind(hk('image_next', '<Right>'), consume(lambda e: self.show_next_image()))
+        self.image_window.bind(hk('image_prev', '<Left>'), consume(lambda e: self.show_prev_image()))
+        self.image_window.bind(hk('close_window', '<Escape>'), consume(lambda e: self._do_close()))
+        self.image_window.bind(hk('image_delete', '<Delete>'), consume(self.delete_current_image))
 
         # 3. Manipulace s obrázkem (Z `hotkeys.py`)
-        self.image_window.bind(hk('image_actual_size', 'a'), lambda e: self.actual_size())
-        self.image_window.bind(hk('image_toggle_bg', 'b'), self.toggle_background)
-        self.image_window.bind(hk('image_toggle_info', 'i'), self.toggle_info)
+        self.image_window.bind(hk('image_actual_size', 'a'), consume(lambda e: self.actual_size()))
+        self.image_window.bind(hk('image_toggle_bg', 'c'), consume(self.toggle_background))
+        self.image_window.bind(hk('image_toggle_info', 'i'), consume(self.toggle_info))
         
-        self.image_window.bind(hk('image_fit_best', 'b'), lambda e: self.best_fit())
-        self.image_window.bind(hk('image_fit_width', 'w'), lambda e: self.fit_width())
+        self.image_window.bind(hk('image_fit_best', 'b'), consume(lambda e: self.best_fit()))
+        self.image_window.bind(hk('image_fit_width', 'w'), consume(lambda e: self.fit_width()))
         
-        self.image_window.bind(hk('image_zoom_in', '+'), self.zoom_in)
-        self.image_window.bind(hk('image_zoom_out', '-'), self.zoom_out)
+        self.image_window.bind(hk('image_zoom_in', '+'), consume(self.zoom_in))
+        self.image_window.bind(hk('image_zoom_out', '-'), consume(self.zoom_out))
         # Alternativní Control +/- pro zoom
-        self.image_window.bind("<Control-plus>", self.zoom_in)
-        self.image_window.bind("<Control-minus>", self.zoom_out)
+        self.image_window.bind("<Control-plus>", consume(self.zoom_in))
+        self.image_window.bind("<Control-minus>", consume(self.zoom_out))
 
-        self.image_window.bind(hk('image_rotate_left', 'l'), lambda e: self.rotate_left())
-        self.image_window.bind(hk('image_rotate_right', 'r'), lambda e: self.rotate_right())
-        self.image_window.bind(hk('image_flip_h', 'h'), lambda e: self.flip_horizontal())
-        self.image_window.bind(hk('image_flip_v', 'v'), lambda e: self.flip_vertical())
+        self.image_window.bind(hk('image_rotate_left', 'l'), consume(lambda e: self.rotate_left()))
+        self.image_window.bind(hk('image_rotate_right', 'r'), consume(lambda e: self.rotate_right()))
+        self.image_window.bind(hk('image_flip_h', 'h'), consume(lambda e: self.flip_horizontal()))
+        self.image_window.bind(hk('image_flip_v', 'v'), consume(lambda e: self.flip_vertical()))
         
-        self.image_window.bind(hk('image_copy', '<Control-c>'), lambda e: self.copy_image_to_clipboard())
-        self.image_window.bind(hk('image_save', '<Control-s>'), lambda e: self.save_image_to_folder())
+        self.image_window.bind(hk('image_copy', '<Control-c>'), consume(lambda e: self.copy_image_to_clipboard()))
+        self.image_window.bind(hk('image_save', '<Control-s>'), consume(lambda e: self.save_image_to_folder()))
         
         # 4. Fullscreen
-        self.image_window.bind(hk('toggle_fullscreen', '<F11>'), self.toggle_fullscreen)
+        self.image_window.bind(hk('image_fullscreen', '<F11>'), consume(self.toggle_fullscreen))
         # Fallback pro "F" (běžné v prohlížečích) a Alt-Enter
-        self.image_window.bind("f", self.toggle_fullscreen)
-        self.image_window.bind("<Alt-Return>", self.toggle_fullscreen)
+        self.image_window.bind("f", consume(self.toggle_fullscreen))
+        self.image_window.bind("<Alt-Return>", consume(self.toggle_fullscreen))
 
         self.image_window.bind("<F10>", lambda e: self.debug_print_monitor())
 
@@ -1141,7 +1147,7 @@ class ImageViewerGPU:
             '<F11>':       (k.F11,    False),
             '<Control-c>': (k.C,      True),
             '<Control-s>': (k.S,      True),
-            'a': (k.A, False), 'b': (k.B, False), 'i': (k.I, False),
+            'a': (k.A, False), 'b': (k.B, False), 'c': (k.C, False), 'i': (k.I, False),
             'w': (k.W, False), '+': (k.PLUS,  False), '-': (k.MINUS, False),
             'l': (k.L, False), 'r': (k.R,     False), 'h': (k.H,     False),
             'v': (k.V, False), 'f': (k.F,     False),
@@ -1376,8 +1382,8 @@ class ImageViewerGPU:
         k    = pyglet.window.key
         ctrl = bool(modifiers & k.MOD_CTRL)
 
-        # Ctrl+F … main app maps to search; in image viewer we want fullscreen instead
-        if ctrl and symbol in (k.F,):
+        # Plain F is a viewer-local fullscreen alias; Ctrl+F stays reserved for Search.
+        if not ctrl and symbol in (k.F,):
             self._do_toggle_fullscreen()
             return
 

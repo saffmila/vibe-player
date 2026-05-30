@@ -36,6 +36,17 @@ class StatusBar(ctk.CTkFrame):
         )
         self.action_label.pack(side=ctk.LEFT, padx=(10, 20))
 
+        self.action_button = ctk.CTkButton(
+            self.main_frame,
+            text="",
+            width=58,
+            height=19,
+            fg_color="#2f4f68",
+            hover_color="#3f6684",
+            text_color="#ffffff",
+            command=lambda: None,
+        )
+
         # Stop button: idle = neutral gray; active (long-running task) = blue
         self._stop_bg_idle = "#4a4a4a"
         self._stop_hover_idle = "#4a4a4a"
@@ -151,9 +162,19 @@ class StatusBar(ctk.CTkFrame):
         self.action_label.configure(text_color=(color or self._action_info_color))
         self.action_var.set(text)
 
+    def set_action_button(self, text: str, command):
+        self.action_button.configure(text=text, command=command)
+        if not self.action_button.winfo_ismapped():
+            self.action_button.pack(side=ctk.LEFT, padx=(0, 8), before=self.stop_button)
+
+    def clear_action_button(self):
+        if self.action_button.winfo_ismapped():
+            self.action_button.pack_forget()
+
     def clear_action_message(self):
         self.action_label.configure(text_color=self._action_info_color)
         self.action_var.set("")
+        self.clear_action_button()
 
     def set_status(self, message):
         self.after(0, self.status_var.set, message)
