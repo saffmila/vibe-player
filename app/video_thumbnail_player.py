@@ -4447,6 +4447,66 @@ class VideoThumbnailPlayer(
         self._last_tree_rename_scope_ts = max(now, thumb_ts + 1e-6)
         return self.select_item(event)
 
+    def _verify_selected_folder_cache_status_async(self, folder_path):
+        """Lightweight selection-time repair for stale green folder icons."""
+        if (
+            not folder_path
+            or str(folder_path).startswith("virtual_library://")
+            or not os.path.isdir(folder_path)
+        ):
+            return
+        try:
+            if not self.database.is_folder_cached(folder_path):
+                return
+            norm_path = self.database.normalize_path(folder_path)
+        except Exception:
+            return
+
+        now = time.monotonic()
+        last_checks = getattr(self, "_folder_cache_verify_last", None)
+        if last_checks is None:
+            last_checks = {}
+            self._folder_cache_verify_last = last_checks
+        if now - float(last_checks.get(norm_path, 0.0) or 0.0) < 2.0:
+            return
+
+        inflight = getattr(self, "_folder_cache_verify_inflight", None)
+        if inflight is None:
+            inflight = set()
+            self._folder_cache_verify_inflight = inflight
+        if norm_path in inflight or len(inflight) >= 2:
+            return
+
+        last_checks[norm_path] = now
+        inflight.add(norm_path)
+
+        def worker():
+            has_media = True
+            try:
+                allowed_extensions = VIDEO_FORMATS + IMAGE_FORMATS
+                has_media = False
+                for _root, _dirs, files in os.walk(folder_path):
+                    if any(name.lower().endswith(allowed_extensions) for name in files):
+                        has_media = True
+                        break
+            except Exception as e:
+                logging.debug("Folder cache verify skipped for %s: %s", folder_path, e)
+                has_media = True
+
+            def apply_result():
+                try:
+                    inflight.discard(norm_path)
+                    if has_media or not os.path.isdir(folder_path):
+                        return
+                    self.database.update_cache_status(folder_path, False)
+                    self.refresh_folder_icon(folder_path)
+                except Exception as e:
+                    logging.debug("Folder cache verify apply failed for %s: %s", folder_path, e)
+
+            self.after(0, apply_result)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def select_item(self, event):
         """
         Handle selection of a tree item.
@@ -4470,6 +4530,7 @@ class VideoThumbnailPlayer(
 
         # Always update the info panel (metadata, tags, etc.)
         self.update_panel_info(path)
+        self._verify_selected_folder_cache_status_async(path)
 
         # Programmatic tree sync (thumb → tree) must not start a folder load / debounce.
         if getattr(self, "_suppress_tree_select_navigation", False):

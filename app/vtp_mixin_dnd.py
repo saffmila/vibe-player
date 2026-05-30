@@ -12,6 +12,7 @@ import tkinter as tk
 
 import tkinterdnd2 as dnd
 from gui_elements import open_conflict_dialog
+from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS
 
 
 class VtpDndMixin:
@@ -136,13 +137,15 @@ class VtpDndMixin:
             f"internal={internal} is_move={is_move}"
         )
 
+        def _after_canvas_op():
+            self.refresh_folder_icon(dest)
+            self.display_thumbnails(dest, force_refresh=True, preserve_scroll=True)
+
         self._dnd_confirm_and_execute(
             sources=sources,
             dest=dest,
             is_move=is_move,
-            on_success=lambda: self.display_thumbnails(
-                dest, force_refresh=True, preserve_scroll=True
-            )
+            on_success=_after_canvas_op
         )
 
     def _dnd_on_enter_canvas(self, event):
@@ -337,6 +340,39 @@ class VtpDndMixin:
                 break
             p = parent
 
+    def _mark_media_destination_folder_cached(self, src: str, dst: str, is_move: bool) -> None:
+        """After a media file lands in a folder, make that folder immediately green."""
+        if not dst or os.path.isdir(dst):
+            return
+        try:
+            if not dst.lower().endswith(VIDEO_FORMATS + IMAGE_FORMATS):
+                return
+            dest_parent = os.path.dirname(dst)
+            if dest_parent and os.path.isdir(dest_parent):
+                self.database.update_cache_status(dest_parent, True)
+                self._bubble_cached_status_to_ancestors(dest_parent)
+        except Exception as e:
+            logging.debug("[DnD] mark destination folder cached failed %s -> %s: %s", src, dst, e)
+
+    def _reset_media_source_folder_if_empty(self, src: str, is_move: bool) -> str | None:
+        """After moving media out, reset the source folder if it no longer contains media."""
+        if not is_move or not src or os.path.isdir(src):
+            return None
+        try:
+            if not src.lower().endswith(VIDEO_FORMATS + IMAGE_FORMATS):
+                return None
+            source_parent = os.path.dirname(src)
+            if not source_parent or not os.path.isdir(source_parent):
+                return None
+            contains_media = getattr(self, "contains_media_files", None)
+            if callable(contains_media) and contains_media(source_parent):
+                return None
+            self.database.update_cache_status(source_parent, False)
+            return source_parent
+        except Exception as e:
+            logging.debug("[DnD] reset source folder cache failed %s: %s", src, e)
+            return None
+
     def _sync_cache_after_copy_move(self, src: str, dst: str, is_dir: bool, is_move: bool):
         """
         Best-effort disk cache sync after copy/move (folder subtree or file prefix variants).
@@ -478,6 +514,10 @@ class VtpDndMixin:
         """Post-op DB + cache sync (best effort, no exceptions propagated)."""
         self._sync_db_after_copy_move(src, dst, is_dir, is_move)
         self._sync_cache_after_copy_move(src, dst, is_dir, is_move)
+        if not is_dir:
+            self._mark_media_destination_folder_cached(src, dst, is_move)
+            return self._reset_media_source_folder_if_empty(src, is_move)
+        return None
 
     def _dnd_execute_copy_move_thread(
         self,
@@ -491,6 +531,7 @@ class VtpDndMixin:
         action_past = "moved" if is_move else "copied"
         dest_name = os.path.basename(dest) or dest
         ok, fail = [], []
+        changed_source_folders = []
         replace_all = False
         skip_all = False
 
@@ -544,7 +585,11 @@ class VtpDndMixin:
                     shutil.move(src, dst) if is_move else shutil.copytree(src, dst)
                 else:
                     shutil.move(src, dst) if is_move else shutil.copy2(src, dst)
-                self._dnd_sync_db_cache(src, dst, is_dir=is_dir, is_move=is_move)
+                changed_source_folder = self._dnd_sync_db_cache(
+                    src, dst, is_dir=is_dir, is_move=is_move
+                )
+                if changed_source_folder:
+                    changed_source_folders.append(changed_source_folder)
                 ok.append(src)
                 logging.info(f"[DnD] {action_past}: {src} -> {dst}")
             except Exception as e:
@@ -556,6 +601,8 @@ class VtpDndMixin:
                 self.status_bar.set_action_message(
                     f"DnD: {action_past} {len(ok)} item(s) -> {dest_name}"
                 )
+                for folder_path in dict.fromkeys(changed_source_folders):
+                    self.refresh_folder_icon(folder_path)
                 if on_success:
                     on_success()
             if fail:

@@ -433,6 +433,13 @@ class VtpLegacyDragMixin:
                     self.move_cache(file_path, new_path)
                     self.refresh_folder_icons_subtree(file_path)
                     self.refresh_folder_icons_subtree(new_path)
+                elif os.path.exists(new_path):
+                    marker = getattr(self, "_mark_media_destination_folder_cached", None)
+                    if callable(marker):
+                        marker(file_path, new_path, not copy_mode)
+                    reset_source = getattr(self, "_reset_media_source_folder_if_empty", None)
+                    if callable(reset_source):
+                        reset_source(file_path, not copy_mode)
 
             except Exception as e:
                 logging.info(f"Error during move/copy of {file_path}: {e}")
@@ -511,6 +518,8 @@ class VtpLegacyDragMixin:
         # Refresh the tree for all moved items
         for moved_item in moved_items:
             self.update_tree_view(moved_item, target_path)
+            self.refresh_folder_icon(os.path.dirname(moved_item))
+        self.refresh_folder_icon(target_path)
 
         # Refresh views
         if self.current_directory:
@@ -627,6 +636,8 @@ class VtpLegacyDragMixin:
         """Refresh tree, grid, and watcher after clipboard paste (copy or move)."""
         for src in moved_sources:
             self.update_tree_view(src, dest_dir)
+            self.refresh_folder_icon(os.path.dirname(src))
+        self.refresh_folder_icon(dest_dir)
         target_node = self.find_node_by_path(dest_dir)
         if target_node:
             self.process_directory(target_node, dest_dir)
@@ -716,6 +727,13 @@ class VtpLegacyDragMixin:
                         self.move_cache(file_path, new_path)
                         self.refresh_folder_icons_subtree(file_path)
                         self.refresh_folder_icons_subtree(new_path)
+                    elif os.path.exists(new_path):
+                        marker = getattr(self, "_mark_media_destination_folder_cached", None)
+                        if callable(marker):
+                            marker(file_path, new_path, not copy_mode)
+                        reset_source = getattr(self, "_reset_media_source_folder_if_empty", None)
+                        if callable(reset_source):
+                            reset_source(file_path, not copy_mode)
                 except Exception as e:
                     logging.info("Paste error for %s: %s", file_path, e)
 
