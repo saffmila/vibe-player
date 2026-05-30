@@ -163,8 +163,11 @@ class VtpLegacyDragMixin:
                 item_text = self.tree.item(item)['text']
                 logging.info(f"DEBUG: Tree item identified: {item}, Text: {item_text}")
 
-                self.tree.selection_set(item)
-                self.tree.focus(item)
+                if self._legacy_should_preserve_tree_selection():
+                    self._legacy_set_tree_hover(item)
+                else:
+                    self.tree.selection_set(item)
+                    self.tree.focus(item)
 
                 # Ensure the resolved target path matches the tree item
                 resolved_path = self.get_full_path(item)
@@ -179,7 +182,10 @@ class VtpLegacyDragMixin:
 
             else:
                 logging.info("DEBUG: No valid tree item found.")
-                self.tree.selection_remove(self.tree.selection())
+                if self._legacy_should_preserve_tree_selection():
+                    self._legacy_clear_tree_hover()
+                else:
+                    self.tree.selection_remove(self.tree.selection())
 
         elif hasattr(widget, "file_path") and widget.is_folder:
             # Thumbnail highlight logic remains unchanged
@@ -207,10 +213,60 @@ class VtpLegacyDragMixin:
 
 
 
+    def _legacy_should_preserve_tree_selection(self):
+        return (
+            self.drag_data.get("source_type") == "tree"
+            and len(self.drag_data.get("paths") or []) > 1
+        )
+
+    def _legacy_set_tree_hover(self, item):
+        """Highlight a drop target without replacing the selected tree folders."""
+        if self.drag_data.get("tree_hover_item") == item:
+            return
+        self._legacy_clear_tree_hover()
+        try:
+            tags = tuple(self.tree.item(item, "tags") or ())
+            self.drag_data["tree_hover_item"] = item
+            self.drag_data["tree_hover_tags"] = tags
+            if "legacy_dnd_hover" not in tags:
+                tags = tags + ("legacy_dnd_hover",)
+            self.tree.item(item, tags=tags)
+            self.tree.tag_configure(
+                "legacy_dnd_hover",
+                background="#2a5080",
+                foreground="#ffffff"
+            )
+        except Exception as e:
+            logging.info("Error highlighting tree drop target: %s", e)
+
+    def _legacy_clear_tree_hover(self):
+        item = self.drag_data.get("tree_hover_item")
+        if not item:
+            return
+        original_tags = tuple(self.drag_data.get("tree_hover_tags") or ())
+        try:
+            self.tree.item(item, tags=original_tags)
+        except Exception:
+            pass
+        self.drag_data["tree_hover_item"] = None
+        self.drag_data["tree_hover_tags"] = ()
+
     def reset_highlight(self):
         """Reset visual highlights for drag-and-drop targets."""
-        # Reset tree selection
-        self.tree.selection_remove(self.tree.selection())
+        self._legacy_clear_tree_hover()
+        if self._legacy_should_preserve_tree_selection():
+            original_selection = [
+                item for item in self.drag_data.get("tree_selection") or ()
+                if self.tree.exists(item)
+            ]
+            if original_selection:
+                self.tree.selection_set(*original_selection)
+            original_focus = self.drag_data.get("tree_focus")
+            if original_focus and self.tree.exists(original_focus):
+                self.tree.focus(original_focus)
+        else:
+            # Reset tree selection
+            self.tree.selection_remove(self.tree.selection())
 
         # Reset thumbnail highlights
         for canvas in getattr(self, "thumbnail_canvases", []):  # Assume you have a list of canvases
@@ -266,15 +322,23 @@ class VtpLegacyDragMixin:
         def process_drop():
             moved_items = []  # Track moved items for refreshing views
             operation = "copy" if copy_mode else "move"
+            source_type = self.drag_data.get("source_type")
 
-            if not self.selected_thumbnails:
-                # Single folder drag (Tree-specific)
-                logging.debug("DND: single-item drag")
-                self.handle_single_drag(target_path, copy_mode, moved_items)
-            else:
+            if source_type == "tree":
+                tree_sources = self._legacy_drag_source_paths()
+                if len(tree_sources) > 1:
+                    logging.debug("DND: multi-tree drag (%d items)", len(tree_sources))
+                    self.handle_multiple_tree_drag(target_path, copy_mode, moved_items)
+                else:
+                    logging.debug("DND: single-tree drag")
+                    self.handle_single_drag(target_path, copy_mode, moved_items)
+            elif self.selected_thumbnails:
                 # Multiple items drag (Thumbnail-specific)
                 logging.debug("DND: multi-item drag")
                 self.handle_multiple_drag(target_path, copy_mode, moved_items)
+            else:
+                logging.debug("DND: single-item drag")
+                self.handle_single_drag(target_path, copy_mode, moved_items)
 
             # Finalize drop on the main thread
             def finalize():
@@ -347,26 +411,60 @@ class VtpLegacyDragMixin:
         logging.info(f"Validated drop target path: {target_path}")
         return True
 
+    def _legacy_drag_source_paths(self):
+        """Return the source paths captured when the legacy drag started."""
+        raw_paths = list(self.drag_data.get("paths") or [])
+        if not raw_paths:
+            stored_path = self.drag_data.get("path")
+            if stored_path:
+                if os.path.exists(stored_path):
+                    raw_paths = [stored_path]
+                else:
+                    resolved = self.find_path_by_hash(stored_path)
+                    if resolved:
+                        raw_paths = [resolved]
+
+        paths = []
+        seen = set()
+        for path in raw_paths:
+            if not path:
+                continue
+            path = os.path.normpath(path)
+            key = os.path.normcase(path)
+            if key in seen or not os.path.exists(path):
+                continue
+            seen.add(key)
+            paths.append(path)
+        return paths
+
+    def _legacy_drop_would_nest_folder_inside_itself(self, source_path, target_path):
+        if not os.path.isdir(source_path):
+            return False
+        try:
+            src_abs = os.path.normcase(os.path.abspath(source_path))
+            target_abs = os.path.normcase(os.path.abspath(target_path))
+            common = os.path.commonpath([src_abs, target_abs])
+        except ValueError:
+            return False
+        return common == src_abs and target_abs != src_abs
+
 
     def handle_single_drag(self, target_path, copy_mode, moved_items):
         """Handle dragging a single folder from the tree view."""
         logging.info("**************HANDLE SINGLE DRAG!!!")
-        
-        # Resolve the source path
-        source_path_hash = self.drag_data.get("path")
-        if not source_path_hash:
-            logging.info("Error: No source path provided for the drag operation.")
-            return
 
-        # Convert the hash back to a full path
-        source_path = self.find_path_by_hash(source_path_hash)
+        sources = self._legacy_drag_source_paths()
+        source_path = sources[0] if sources else None
         if not source_path:
-            logging.info(f"Error: Could not resolve hash to path: {source_path_hash}")
+            logging.info("Error: No source path provided for the drag operation.")
             return
 
         # Ensure source_path and target_path are not the same
         if target_path == source_path:
             logging.info("Error: Cannot drop onto the same path.")
+            return
+        if self._legacy_drop_would_nest_folder_inside_itself(source_path, target_path):
+            logging.info("Error: Cannot drop a folder inside itself: %s -> %s", source_path, target_path)
             return
 
         try:
@@ -395,6 +493,70 @@ class VtpLegacyDragMixin:
             self.refresh_folder_icons_subtree(new_path)
         except Exception as e:
             logging.info(f"Error during move/copy: {e}")
+
+    def handle_multiple_tree_drag(self, target_path, copy_mode, moved_items):
+        """Handle dragging multiple selected folders from the tree view."""
+        logging.info("**************HANDLE MULTIPLE TREE DRAG!!!")
+        sources = self._legacy_drag_source_paths()
+        if not sources:
+            logging.info("Error: No source paths provided for the tree drag operation.")
+            return
+
+        replace_all = False
+        skip_all = False
+        target_norm = os.path.normcase(os.path.normpath(target_path))
+
+        for source_path in sources:
+            source_norm = os.path.normcase(os.path.normpath(source_path))
+            if target_norm == source_norm:
+                logging.info("Error: Cannot drop %s onto itself.", source_path)
+                continue
+            if self._legacy_drop_would_nest_folder_inside_itself(source_path, target_path):
+                logging.info("Error: Cannot drop a folder inside itself: %s -> %s", source_path, target_path)
+                continue
+
+            try:
+                new_path = os.path.join(target_path, os.path.basename(source_path))
+
+                if os.path.exists(new_path):
+                    if skip_all:
+                        continue
+                    should_replace = replace_all
+                    if not should_replace:
+                        action, apply_all = self._legacy_prompt_conflict_choice(new_path)
+                        if action == "cancel":
+                            break
+                        if action == "skip":
+                            if apply_all:
+                                skip_all = True
+                            continue
+                        should_replace = action == "replace"
+                        if should_replace and apply_all:
+                            replace_all = True
+                    if should_replace and not self._legacy_delete_existing_target(new_path):
+                        continue
+
+                is_dir = os.path.isdir(source_path)
+                self.perform_move_or_copy(source_path, new_path, copy_mode, moved_items)
+                if not os.path.exists(new_path):
+                    continue
+
+                if is_dir:
+                    self.move_cache(source_path, new_path)
+                    if copy_mode:
+                        sync_db = getattr(self, "_sync_db_after_copy_move", None)
+                        if callable(sync_db):
+                            sync_db(source_path, new_path, True, False)
+                    else:
+                        self.database.update_folder_path(source_path, new_path)
+                    sync_dir_cache = getattr(self, "_sync_directory_parent_cache_status", None)
+                    if callable(sync_dir_cache):
+                        sync_dir_cache(source_path, new_path, not copy_mode)
+                    self.refresh_folder_icons_subtree(source_path)
+                    self.refresh_folder_icons_subtree(new_path)
+
+            except Exception as e:
+                logging.info(f"Error during move/copy of {source_path}: {e}")
 
 
     def handle_multiple_drag(self, target_path, copy_mode, moved_items):
@@ -523,6 +685,15 @@ class VtpLegacyDragMixin:
         ]
         logging.info(f"Selected thumbnails after cleanup: {len(self.selected_thumbnails)}")
 
+        refresh_path = self.current_directory
+        if refresh_path and not os.path.exists(refresh_path):
+            refresh_path = self._legacy_remap_moved_current_directory(
+                refresh_path,
+                target_path,
+                moved_items
+            )
+            self.current_directory = refresh_path
+
         # Refresh the tree for all moved items
         for moved_item in moved_items:
             self.update_tree_view(moved_item, target_path)
@@ -530,24 +701,48 @@ class VtpLegacyDragMixin:
         self.refresh_folder_icon(target_path)
 
         # Refresh views
-        if self.current_directory:
-            self.display_thumbnails(self.current_directory, preserve_scroll=True)
-            logging.info(f"Thumbnails refreshed for current directory: {self.current_directory}")
+        if refresh_path and os.path.isdir(refresh_path):
+            self.display_thumbnails(refresh_path, preserve_scroll=True)
+            logging.info(f"Thumbnails refreshed for current directory: {refresh_path}")
+        else:
+            logging.info("Skipping thumbnail refresh; directory no longer exists: %s", refresh_path)
 
         # Restart the directory watcher for the current directory only if it exists
-        if os.path.exists(self.current_directory):
+        if refresh_path and os.path.exists(refresh_path):
             try:
-                logging.info(f"Restarting directory watcher for {self.current_directory}")
-                self.start_directory_watcher(self.current_directory)
+                logging.info(f"Restarting directory watcher for {refresh_path}")
+                self.start_directory_watcher(refresh_path)
             except Exception as e:
                 logging.info(f"Error restarting directory watcher: {e}")
         else:
-            logging.info(f"WARNING: Cannot restart watcher, current directory does not exist: {self.current_directory}")
+            logging.info(f"WARNING: Cannot restart watcher, current directory does not exist: {refresh_path}")
 
         # Update the status bar
-        folder_count, file_count, total_size = self.status_bar.count_folders_and_files(self.current_directory)
+        folder_count, file_count, total_size = self.status_bar.count_folders_and_files(refresh_path)
         selected_count, selected_size = self.status_bar.count_selected_files_and_size(self.selected_thumbnails)
         self.status_bar.update_status(folder_count, file_count, total_size, selected_count, selected_size)
+
+    def _legacy_remap_moved_current_directory(self, current_path, target_path, moved_items):
+        """Map an opened moved folder from its old location to the new drop destination."""
+        current_abs = os.path.abspath(current_path)
+        for moved_item in moved_items:
+            try:
+                moved_abs = os.path.abspath(moved_item)
+                common = os.path.commonpath([current_abs, moved_abs])
+            except ValueError:
+                continue
+            if common != moved_abs:
+                continue
+
+            suffix = os.path.relpath(current_abs, moved_abs)
+            new_root = os.path.join(target_path, os.path.basename(moved_item))
+            new_path = new_root if suffix == "." else os.path.join(new_root, suffix)
+            if os.path.isdir(new_path):
+                return new_path
+
+        if target_path and os.path.isdir(target_path):
+            return target_path
+        return current_path
 
     def paths_for_clipboard_from_thumb_context(self, primary_path: str) -> list:
         """Use multi-selection when the right-clicked item is part of it; otherwise the single path."""
@@ -850,17 +1045,39 @@ class VtpLegacyDragMixin:
 
     def start_drag(self, event, source_type):
         """Start dragging an item from tree or thumbnails."""
+        self.drag_data["source_type"] = source_type
+        self.drag_data["paths"] = []
+        self.drag_data["tree_hover_item"] = None
+        self.drag_data["tree_hover_tags"] = ()
         if source_type == "tree":
+            try:
+                self.drag_data["tree_selection"] = tuple(self.tree.selection() or ())
+                self.drag_data["tree_focus"] = self.tree.focus()
+            except Exception:
+                self.drag_data["tree_selection"] = ()
+                self.drag_data["tree_focus"] = None
             # Handle dragging a folder from the tree
             item = self.tree.identify_row(event.y)
             if item:
                 values = self.tree.item(item, 'values')
                 if values:
                     path = values[0]  # Absolute path
-                    path_hash = values[1]  # Path hash
+                    path_hash = values[1] if len(values) > 1 else None  # Path hash
                     self.drag_data["item_id"] = item
                     self.drag_data["path"] = path_hash  # Use hash for dragging
-                    logging.info(f"Dragging folder (hash): {path_hash}")
+                    try:
+                        drag_paths = self.paths_for_tree_context(path)
+                    except Exception:
+                        drag_paths = [path]
+                    self.drag_data["paths"] = [
+                        p for p in drag_paths
+                        if p and os.path.exists(p)
+                    ]
+                    logging.info(
+                        "Dragging folder(s): count=%d hash=%s",
+                        len(self.drag_data["paths"]) or 1,
+                        path_hash
+                    )
                 else:
                     logging.info("Warning: Tree item has no 'values'.")
         elif source_type == "thumbnail":
@@ -870,6 +1087,7 @@ class VtpLegacyDragMixin:
                 file_path = canvas.file_path
                 self.drag_data["item_id"] = None  # Thumbnails don't have tree nodes
                 self.drag_data["path"] = file_path
+                self.drag_data["paths"] = [file_path]
                 logging.info(f"Dragging file: {file_path}")
             else:
                 logging.info("Error: No file_path associated with this thumbnail.")
@@ -878,6 +1096,8 @@ class VtpLegacyDragMixin:
         self.bind("<Motion>", self.highlight_target)
         # Create drag icon for visual feedback
         self.create_drag_icon(event)
+        if source_type == "tree":
+            return "break"
 
 
 

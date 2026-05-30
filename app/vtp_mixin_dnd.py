@@ -889,6 +889,16 @@ class VtpDndMixin:
         self._dnd_press_kind = "tree"
         item = self.tree.identify_row(event.y) if hasattr(self, "tree") else None
         self._dnd_press_path = self.tree.set(item, "path") if item else None
+        try:
+            self._dnd_tree_press_selection = tuple(self.tree.selection() or ())
+            self._dnd_tree_press_focus = self.tree.focus()
+        except Exception:
+            self._dnd_tree_press_selection = ()
+            self._dnd_tree_press_focus = None
+        try:
+            self._dnd_tree_press_paths = self.paths_for_tree_context(self._dnd_press_path)
+        except Exception:
+            self._dnd_tree_press_paths = [self._dnd_press_path] if self._dnd_press_path else []
 
     def _dnd_hold_elapsed_ok(
         self,
@@ -1074,13 +1084,37 @@ class VtpDndMixin:
             logging.info(f"[DnD] DRAG OUT tree skipped: invalid path={path!r}")
             return
 
-        try:
-            paths = self.paths_for_tree_context(press_path or path)
-        except Exception:
-            paths = [path]
+        press_paths = (
+            list(getattr(self, "_dnd_tree_press_paths", []) or [])
+            if self._dnd_press_kind == "tree"
+            else []
+        )
+        if press_paths:
+            paths = press_paths
+        else:
+            try:
+                paths = self.paths_for_tree_context(press_path or path)
+            except Exception:
+                paths = [path]
         paths = [p for p in paths if p and os.path.exists(p)]
         if not paths:
             return
+        if len(paths) > 1:
+            original_selection = [
+                item for item in getattr(self, "_dnd_tree_press_selection", ())
+                if self.tree.exists(item)
+            ]
+            if original_selection:
+                self._suppress_tree_select_navigation = True
+                try:
+                    self.tree.selection_set(*original_selection)
+                    original_focus = getattr(self, "_dnd_tree_press_focus", None)
+                    if original_focus and self.tree.exists(original_focus):
+                        self.tree.focus(original_focus)
+                finally:
+                    self.after_idle(
+                        lambda: setattr(self, "_suppress_tree_select_navigation", False)
+                    )
 
         data = self._dnd_format_paths(paths)
         logging.info("[DnD] DRAG OUT tree: %d folder(s), first=%s", len(paths), paths[0])
