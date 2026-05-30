@@ -2917,8 +2917,12 @@ class VtpGridMixin:
         if _rn:
             _rename_opts["accelerator"] = _rn
         menu.add_command(**_rename_opts)
+        action_paths = self.paths_for_file_action_context(file_path, event)
         _del = menu_accel(_hk, "delete")
-        _del_opts = {"label": "Delete", "command": lambda: self.confirm_delete_item(paths=[file_path])}
+        _del_opts = {
+            "label": "Delete",
+            "command": lambda paths=action_paths: self.confirm_delete_item(paths=paths),
+        }
         if _del:
             _del_opts["accelerator"] = _del
         menu.add_command(**_del_opts)

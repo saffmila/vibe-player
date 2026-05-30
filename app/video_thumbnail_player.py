@@ -710,7 +710,12 @@ class VideoThumbnailPlayer(
         style.map("Treeview", background=[("selected", self.TreeCursorColor)])  # soft dark gray
         style.map("Treeview", background=[("selected", "#2e2e2e")], foreground=[("selected", "#d0d0d0")])
 
-        self.tree = ttk.Treeview(self.tree_frame, style="NoBorder.Treeview", show="tree")
+        self.tree = ttk.Treeview(
+            self.tree_frame,
+            style="NoBorder.Treeview",
+            show="tree",
+            selectmode="extended",
+        )
         self.tree["show"] = "tree"  # This hides the column header row
         self._node_path_cache: dict[str, str] = {}   # normalized_path → tree item_id
         self._node_missing_cache: set[str] = set()   # paths confirmed NOT in tree (negative cache)
@@ -1414,6 +1419,29 @@ class VideoThumbnailPlayer(
         if not paths:
             logging.info("[Delete] All paths invalid or already gone.")
             return
+        # If both a folder and one of its children are selected, deleting the
+        # folder already covers the child; keep the batch free of stale follow-ups.
+        normalized_pairs = []
+        for path in paths:
+            try:
+                norm = os.path.normcase(os.path.abspath(os.path.normpath(path)))
+            except Exception:
+                norm = os.path.normcase(os.path.normpath(path))
+            normalized_pairs.append((path, norm))
+
+        roots = []
+        root_paths = []
+        seen_roots = set()
+        for path, norm in sorted(normalized_pairs, key=lambda item: (item[1].count(os.sep), item[1])):
+            if norm in seen_roots:
+                continue
+            if any(norm == root or norm.startswith(root + os.sep) for root in roots):
+                continue
+            roots.append(norm)
+            root_paths.append(path)
+            seen_roots.add(norm)
+        if len(root_paths) != len(paths):
+            paths = root_paths
 
         logging.info("[Delete] Paths to delete: %s", paths)
 
@@ -1457,6 +1485,31 @@ class VideoThumbnailPlayer(
                 if ns == nd or ns.startswith(pref):
                     self.selected_file_path = None
 
+        def _folder_has_entries(path: str) -> bool | None:
+            try:
+                with os.scandir(path) as entries:
+                    return next(entries, None) is not None
+            except OSError as e:
+                logging.warning("[Delete] Could not inspect folder contents for %s: %s", path, e)
+                return None
+
+        non_empty_dirs = []
+        unknown_dirs = []
+        for path in paths:
+            if not os.path.isdir(path):
+                continue
+            has_entries = _folder_has_entries(path)
+            if has_entries is True:
+                non_empty_dirs.append(path)
+            elif has_entries is None:
+                unknown_dirs.append(path)
+
+        def _format_path_names(sample_paths):
+            if len(sample_paths) <= 4:
+                return "\n".join(f"  {os.path.basename(p) or p}" for p in sample_paths)
+            names = "\n".join(f"  {os.path.basename(p) or p}" for p in sample_paths[:4])
+            return names + f"\n  … and {len(sample_paths) - 4} more"
+
         n = len(paths)
         if n == 1:
             detail = os.path.basename(paths[0])
@@ -1465,7 +1518,24 @@ class VideoThumbnailPlayer(
         else:
             detail = "\n".join(f"  {os.path.basename(p)}" for p in paths[:4])
             detail += f"\n  … and {n - 4} more"
+
+        warnings = []
+        if non_empty_dirs:
+            warnings.append(
+                f"Warning: {len(non_empty_dirs)} selected folder(s) are not empty.\n"
+                "Their contents will be deleted too:\n"
+                f"{_format_path_names(non_empty_dirs)}"
+            )
+        if unknown_dirs:
+            warnings.append(
+                f"Warning: {len(unknown_dirs)} selected folder(s) could not be inspected.\n"
+                "They may contain files or subfolders:\n"
+                f"{_format_path_names(unknown_dirs)}"
+            )
+
         message = f"Delete {n} item(s)?\n\n{detail}"
+        if warnings:
+            message += "\n\n" + "\n\n".join(warnings)
 
         def purge_cache_for_deleted_path(path: str):
             """Best-effort: remove disk and memory cache for a deleted path."""
@@ -1960,6 +2030,7 @@ class VideoThumbnailPlayer(
         menu.add_separator()
         _cp = menu_accel(_hk, "files_clipboard_copy")
         _ct = menu_accel(_hk, "files_clipboard_cut")
+        action_paths = self.paths_for_file_action_context(file_path, event)
         _copy_opts = {
             "label": "Copy",
             "command": lambda fp=file_path: self.copy_tree_folder_path_to_clipboard(fp),
@@ -1980,7 +2051,7 @@ class VideoThumbnailPlayer(
         _del = menu_accel(_hk, "delete")
         _del_opts = {
             "label": "Delete",
-            "command": lambda: self.confirm_delete_item(paths=[file_path]),
+            "command": lambda paths=action_paths: self.confirm_delete_item(paths=paths),
         }
         if _del:
             _del_opts["accelerator"] = _del
@@ -2039,6 +2110,10 @@ class VideoThumbnailPlayer(
         )
 
     def _primary_path_for_file_clipboard(self):
+        if self._tree_selection_is_active_scope():
+            tree_paths = self.paths_for_tree_context()
+            if tree_paths:
+                return tree_paths[0]
         primary = getattr(self, "selected_file_path", None)
         if primary and os.path.exists(primary):
             return primary
@@ -2057,6 +2132,15 @@ class VideoThumbnailPlayer(
         except Exception:
             pass
         return None
+
+    def _tree_selection_is_active_scope(self) -> bool:
+        """True when the last file-action scope came from the left tree."""
+        try:
+            tree_ts = float(getattr(self, "_last_tree_rename_scope_ts", 0.0) or 0.0)
+            thumb_ts = float(getattr(self, "_last_thumb_rename_scope_ts", 0.0) or 0.0)
+            return tree_ts > thumb_ts and bool(self.paths_for_tree_context())
+        except Exception:
+            return False
 
     def _path_for_rename_hotkey(self) -> str | None:
         """
@@ -2119,6 +2203,9 @@ class VideoThumbnailPlayer(
                 "Nothing to copy — select a file, folder, or tree item.", 3500
             )
             return
+        if self._tree_selection_is_active_scope():
+            self.copy_tree_folder_path_to_clipboard(primary)
+            return
         self.copy_thumb_paths_to_clipboard(primary)
 
     def hotkey_files_clipboard_cut(self, event=None):
@@ -2129,6 +2216,9 @@ class VideoThumbnailPlayer(
             self._clipboard_status_flash(
                 "Nothing to cut — select a file, folder, or tree item.", 3500
             )
+            return
+        if self._tree_selection_is_active_scope():
+            self.copy_tree_folder_path_to_clipboard(primary, cut=True)
             return
         self.copy_thumb_paths_to_clipboard(primary, cut=True)
 
@@ -2801,9 +2891,16 @@ class VideoThumbnailPlayer(
     def handle_global_delete(self, event):
         """
         Priority:
-          1. Selected thumbnails in the grid (canvas) — delete selected files/folders
-          2. Selected tree item — delete folder from tree
+          1. Active tree selection — delete selected folders from the left tree
+          2. Selected thumbnails in the grid (canvas) — delete selected files/folders
+          3. Fallback tree selection — delete selected folders from the left tree
         """
+        tree_paths = self.paths_for_tree_context()
+        if self._tree_selection_is_active_scope() and tree_paths:
+            logging.info(f"[Delete] Tree selection: {tree_paths}")
+            self.confirm_delete_item(paths=tree_paths)
+            return
+
         # 1. Any thumbnails selected in the grid?
         if self.selected_thumbnails:
             paths = [thumb[0] for thumb in self.selected_thumbnails
@@ -2814,17 +2911,11 @@ class VideoThumbnailPlayer(
                 return
 
         # 2. Fallback — selected tree item
-        selected_item = self.tree.focus()
-        if not selected_item:
+        if not tree_paths:
             logging.debug("[Delete] Nothing selected.")
             return
-        values = self.tree.item(selected_item, "values")
-        if values and values[0]:
-            file_path = values[0]
-            logging.info(f"[Delete] Tree selection: {file_path}")
-            self.confirm_delete_item(paths=[file_path])
-        else:
-            logging.debug("[Delete] No valid path in tree.")
+        logging.info(f"[Delete] Tree selection: {tree_paths}")
+        self.confirm_delete_item(paths=tree_paths)
 
     
      #ONLY FOR TESTIN  OR DEBUG - for quickly run plugin
@@ -4523,7 +4614,8 @@ class VideoThumbnailPlayer(
         if not selection:
             return
             
-        item_id = selection[0]
+        focused_item = self.tree.focus()
+        item_id = focused_item if focused_item in selection else selection[0]
         path = self.get_full_path(item_id)
         if not path:
             return

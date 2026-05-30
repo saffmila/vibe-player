@@ -554,6 +554,82 @@ class VtpLegacyDragMixin:
             return paths
         return [primary]
 
+    def paths_for_tree_context(self, primary_path: str | None = None) -> list:
+        """Use multi-selection when the right-clicked tree item is selected."""
+        primary = os.path.normpath(primary_path) if primary_path else None
+        selected_paths = []
+        seen = set()
+        try:
+            selected_items = list(self.tree.selection() or ())
+        except Exception:
+            selected_items = []
+
+        for item_id in selected_items:
+            try:
+                path = self.get_file_path_from_item_id(item_id)
+            except Exception:
+                path = None
+            if not path:
+                continue
+            path = os.path.normpath(path)
+            key = os.path.normcase(path)
+            if key in seen or not os.path.exists(path):
+                continue
+            seen.add(key)
+            selected_paths.append(path)
+
+        if primary:
+            primary_key = os.path.normcase(primary)
+            selected_keys = {os.path.normcase(p) for p in selected_paths}
+            if len(selected_paths) > 1 and primary_key in selected_keys:
+                return selected_paths
+            if os.path.exists(primary):
+                return [primary]
+            return []
+
+        return selected_paths
+
+    def paths_for_file_action_context(self, primary_path: str, event=None) -> list:
+        """Resolve Copy/Cut/Delete targets for either thumbnail or tree context menus."""
+        if not primary_path:
+            return []
+
+        widget = getattr(event, "widget", None) if event is not None else None
+        prefer_thumbnail_selection = bool(
+            widget is not None
+            and widget is not getattr(self, "tree", None)
+            and getattr(widget, "file_path", None)
+        )
+
+        def _existing_unique(paths):
+            unique = []
+            seen = set()
+            for path in paths:
+                if not path:
+                    continue
+                path = os.path.normpath(path)
+                key = os.path.normcase(path)
+                if key in seen or not os.path.exists(path):
+                    continue
+                seen.add(key)
+                unique.append(path)
+            return unique
+
+        thumb_paths = _existing_unique(
+            self.paths_for_clipboard_from_thumb_context(primary_path)
+        )
+        tree_paths = _existing_unique(self.paths_for_tree_context(primary_path))
+
+        if prefer_thumbnail_selection and len(thumb_paths) > 1:
+            return thumb_paths
+        if len(tree_paths) > 1:
+            return tree_paths
+        if len(thumb_paths) > 1:
+            return thumb_paths
+        if tree_paths:
+            return tree_paths
+        return thumb_paths
+
     def _clipboard_status_flash(self, message: str, clear_after_ms: int = 4000) -> None:
         """Brief sky-blue status line (same strip as autotag / scan messages)."""
         try:
@@ -579,14 +655,18 @@ class VtpLegacyDragMixin:
                 self._clipboard_status_flash(f"{verb} to clipboard ({n} items).")
 
     def copy_tree_folder_path_to_clipboard(self, folder_path: str, *, cut: bool = False) -> None:
-        if not folder_path or not os.path.isdir(folder_path):
+        paths = self.paths_for_file_action_context(folder_path)
+        if not paths:
             return
-        if set_clipboard_file_paths([os.path.normpath(folder_path)], cut=cut):
+        if set_clipboard_file_paths(paths, cut=cut):
             verb = "Cut" if cut else "Copied"
-            logging.info("[clipboard] %s folder: %s", verb.lower(), folder_path)
-            self._clipboard_status_flash(
-                f"{verb} to clipboard: folder {os.path.basename(folder_path)}"
-            )
+            logging.info("[clipboard] %s %d path(s) from tree context", verb, len(paths))
+            if len(paths) == 1:
+                self._clipboard_status_flash(
+                    f"{verb} to clipboard: {os.path.basename(paths[0])}"
+                )
+            else:
+                self._clipboard_status_flash(f"{verb} to clipboard ({len(paths)} items).")
 
     def add_clipboard_paste_cascade(self, menu: tk.Menu, dest_dir: str | None) -> None:
         """Append a Paste submenu (Copy here / Move here) to a context menu."""

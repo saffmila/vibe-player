@@ -1043,12 +1043,21 @@ class VtpDndMixin:
         if not path or not os.path.exists(path):
             logging.info(f"[DnD] DRAG OUT tree skipped: invalid path={path!r}")
             return
-        path_fwd = "{" + path.replace("\\", "/") + "}"
-        logging.info(f"[DnD] DRAG OUT tree: {path}")
+
+        try:
+            paths = self.paths_for_tree_context(press_path or path)
+        except Exception:
+            paths = [path]
+        paths = [p for p in paths if p and os.path.exists(p)]
+        if not paths:
+            return
+
+        data = self._dnd_format_paths(paths)
+        logging.info("[DnD] DRAG OUT tree: %d folder(s), first=%s", len(paths), paths[0])
         self._dnd_internal_drag = True
-        self._dnd_mark_internal_drag_payload([path])
+        self._dnd_mark_internal_drag_payload(paths)
         self._dnd_internal_drag_end_ts = 0.0
-        return ((dnd.MOVE, dnd.COPY), dnd.DND_FILES, path_fwd)
+        return ((dnd.MOVE, dnd.COPY), dnd.DND_FILES, data)
 
     def _dnd_drag_end(self, event):
         self._cancel_tree_dnd_autoscroll()
