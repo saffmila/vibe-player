@@ -455,12 +455,16 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.time_axis_label_offset_above_thumb_top = 32
         # Staggered bookmark row colors (text + tab + stem tint).
         self.bookmark_colors = ["#FFFFB3", "#FFD700", "#FFA500"]
+        # Extra scrollable vertical space lets users position the timeline even
+        # when the actual drawn content fits inside the current panel height.
+        self.timeline_vertical_scroll_slack_ratio = 0.40
         self.zoom_factor = 1.0
         self.min_zoom = 0.2
         self.max_zoom = 5.0
         self.pan_offset = 0.0
         self._pan_start_x = None
         self._pan_start_offset = 0.0
+        self._timeline_vscrollbar_visible = False
         self.BackroundColor = "#2b2b2b"
         self.thumb_TextColor = "#dddddd"
         self.timeline_manager = timeline_manager
@@ -1087,20 +1091,18 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.canvas.configure(yscrollincrement=24)
 
         # Canvas must exist before Scrollbar(command=canvas.yview).
-        self._timeline_vscrollbar = tk.Scrollbar(
+        self._timeline_vscrollbar = ctk.CTkScrollbar(
             self.canvas_frame,
-            orient=tk.VERTICAL,
-            command=self.canvas.yview,
+            orientation="vertical",
+            command=self._timeline_yview,
             width=14,
-            bg="#242424",
-            troughcolor="#1a1a1a",
-            activebackground="#3d5a80",
-            highlightthickness=0,
-            bd=0,
-            elementborderwidth=0,
+            fg_color="#1a1a1a",
+            button_color="#555555",
+            button_hover_color="#777777",
         )
         self._timeline_vscrollbar.grid(row=0, column=1, sticky="ns")
-        self.canvas.configure(yscrollcommand=self._timeline_vscrollbar.set)
+        self._timeline_vscrollbar_visible = True
+        self.canvas.configure(yscrollcommand=self._on_timeline_yscroll)
 
         # Bind mouse events for interaction.
         self.canvas.bind("<B1-Motion>", self.on_canvas_drag)
@@ -1123,6 +1125,10 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.canvas.bind("<Enter>", lambda e: self.canvas.focus_set())
         self.canvas.bind("<MouseWheel>", self._on_timeline_mousewheel, add="+")
         self.canvas_frame.bind("<MouseWheel>", self._on_timeline_mousewheel, add="+")
+        self.canvas.bind("<Button-4>", self._on_timeline_mousewheel, add="+")
+        self.canvas.bind("<Button-5>", self._on_timeline_mousewheel, add="+")
+        self.canvas_frame.bind("<Button-4>", self._on_timeline_mousewheel, add="+")
+        self.canvas_frame.bind("<Button-5>", self._on_timeline_mousewheel, add="+")
 
         # Define button styling.
         btn_style = {
@@ -2507,28 +2513,65 @@ class TimelineBarWidget(ctk.CTkFrame):
         }
 
     def _update_timeline_vscrollbar_visibility(self):
-        """Show the vertical scrollbar only when content is taller than the viewport."""
+        """Keep the timeline scrollbar visible; reset scroll only when content fits."""
         sb = getattr(self, "_timeline_vscrollbar", None)
         if sb is None:
             return
         try:
-            self.canvas.update_idletasks()
-            ch = float(getattr(self, "_timeline_content_height", 0) or 0)
-            vh = max(1, int(self.canvas.winfo_height()))
-            if ch <= vh + 1:
-                sb.grid_remove()
-                self.canvas.yview_moveto(0)
-            else:
+            if not self._timeline_vscrollbar_visible:
                 sb.grid(row=0, column=1, sticky="ns")
+                self._timeline_vscrollbar_visible = True
+            needs_scroll = self._timeline_vscroll_needed()
+            if not needs_scroll and self.canvas.yview() != (0.0, 1.0):
+                self.canvas.yview_moveto(0)
         except tk.TclError:
             pass
 
-    def _on_timeline_mousewheel(self, event):
-        ch = float(getattr(self, "_timeline_content_height", 0) or 0)
+    def _timeline_scrollregion_height(self, content_height=None):
+        content_h = float(
+            (getattr(self, "_timeline_content_height", 0) or 0)
+            if content_height is None
+            else content_height
+        )
         vh = max(1, int(self.canvas.winfo_height()))
-        if ch <= vh + 1:
-            return
-        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        if content_h <= 0:
+            return float(vh)
+        slack_h = vh * float(self.timeline_vertical_scroll_slack_ratio)
+        return max(content_h + slack_h, vh + slack_h)
+
+    def _timeline_vscroll_needed(self):
+        self.canvas.update_idletasks()
+        ch = self._timeline_scrollregion_height()
+        bbox = self.canvas.bbox("all")
+        if bbox:
+            ch = max(ch, self._timeline_scrollregion_height(float(bbox[3] - bbox[1])))
+        vh = max(1, int(self.canvas.winfo_height()))
+        return ch > vh + 1
+
+    def _timeline_yview(self, *args):
+        self.canvas.yview(*args)
+        self._update_timeline_vscrollbar_visibility()
+
+    def _on_timeline_yscroll(self, first, last):
+        sb = getattr(self, "_timeline_vscrollbar", None)
+        if sb is not None:
+            sb.set(first, last)
+        self.after_idle(self._update_timeline_vscrollbar_visibility)
+
+    def _on_timeline_mousewheel(self, event):
+        if not self._timeline_vscroll_needed():
+            return None
+        if getattr(event, "num", None) == 4:
+            direction = -1
+        elif getattr(event, "num", None) == 5:
+            direction = 1
+        else:
+            delta = getattr(event, "delta", 0)
+            if not delta:
+                return None
+            direction = -1 if delta > 0 else 1
+        self.canvas.yview_scroll(direction * 3, "units")
+        return "break"
 
     def _canvas_pointer_x(self, event):
         """X in canvas coordinates (accounts for vertical scroll)."""
@@ -3186,7 +3229,7 @@ class TimelineBarWidget(ctk.CTkFrame):
             pass
 
         vw = max(1, int(self.canvas.winfo_width()))
-        self.canvas.configure(scrollregion=(0, 0, vw, float(self._timeline_content_height)))
+        self.canvas.configure(scrollregion=(0, 0, vw, self._timeline_scrollregion_height()))
         self.after_idle(self._update_timeline_vscrollbar_visibility)
 
         self.update_info_toolbar()
@@ -3240,7 +3283,7 @@ class TimelineBarWidget(ctk.CTkFrame):
             )
 
         vw = max(1, int(self.canvas.winfo_width()))
-        self.canvas.configure(scrollregion=(0, 0, vw, float(self._timeline_content_height)))
+        self.canvas.configure(scrollregion=(0, 0, vw, self._timeline_scrollregion_height()))
         self.after_idle(self._update_timeline_vscrollbar_visibility)
         
         # --- Z-INDEX MAGIE ---

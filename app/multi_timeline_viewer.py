@@ -48,6 +48,7 @@ class MultiTimelineViewer(ctk.CTkFrame):
         self._strip_frames       = {}      # path → tk.Frame
         self._thumb_canvases     = []      # shared horizontal scroll
         self._syncing            = False
+        self._v_visible          = False
         self._h_visible          = False
         self._user_zoomed        = False
 
@@ -59,9 +60,19 @@ class MultiTimelineViewer(ctk.CTkFrame):
     def _build_layout(self):
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=0)
 
-        self._v_scroll = ctk.CTkScrollbar(self, orientation="vertical")
+        self._v_scroll = ctk.CTkScrollbar(
+            self,
+            orientation="vertical",
+            command=self._v_canvas_yview,
+            width=14,
+            fg_color="#1a1a1a",
+            button_color="#555555",
+            button_hover_color="#777777",
+        )
         self._v_scroll.grid(row=0, column=1, sticky="ns")
+        self._v_scroll.grid_remove()
 
         # Horizontální CTk scrollbar – skrytý dokud není zoom
         self._h_scroll = ctk.CTkScrollbar(
@@ -70,11 +81,10 @@ class MultiTimelineViewer(ctk.CTkFrame):
         self._v_canvas = tk.Canvas(
             self,
             bg=self.BG_CANVAS,
-            yscrollcommand=self._v_scroll.set,
+            yscrollcommand=self._on_vscroll_changed,
             highlightthickness=0,
         )
         self._v_canvas.grid(row=0, column=0, sticky="nsew")
-        self._v_scroll.configure(command=self._v_canvas.yview)
 
         # Vnitřní frame s obsahem (stripy)
         self._inner = tk.Frame(self._v_canvas, bg=self.BG_CANVAS)
@@ -86,15 +96,65 @@ class MultiTimelineViewer(ctk.CTkFrame):
         for w in (self, self._v_canvas, self._inner):
             w.bind("<MouseWheel>",       self._on_vscroll)
             w.bind("<Shift-MouseWheel>", self._on_resize_scroll)
+            w.bind("<Button-4>",         self._on_vscroll)
+            w.bind("<Button-5>",         self._on_vscroll)
 
     def _on_inner_configure(self, event):
-        self._v_canvas.configure(scrollregion=self._v_canvas.bbox("all"))
+        self._refresh_vscroll_region()
 
     def _on_canvas_configure(self, event):
         self._v_canvas.itemconfig(self._inner_id, width=event.width)
+        self._refresh_vscroll_region()
 
     def _on_vscroll(self, event):
-        self._v_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        if not self._v_scroll_needed():
+            return None
+        direction = 0
+        if getattr(event, "num", None) == 4:
+            direction = -1
+        elif getattr(event, "num", None) == 5:
+            direction = 1
+        else:
+            delta = getattr(event, "delta", 0)
+            if delta:
+                direction = -1 if delta > 0 else 1
+        if direction:
+            self._v_canvas.yview_scroll(direction * 3, "units")
+            return "break"
+        return None
+
+    def _v_canvas_yview(self, *args):
+        self._v_canvas.yview(*args)
+        self._update_vscroll_visibility()
+
+    def _on_vscroll_changed(self, first, last):
+        self._v_scroll.set(first, last)
+        self._update_vscroll_visibility()
+
+    def _refresh_vscroll_region(self):
+        bbox = self._v_canvas.bbox("all") or (0, 0, 1, 1)
+        self._v_canvas.configure(scrollregion=bbox)
+        self.after_idle(self._update_vscroll_visibility)
+
+    def _v_scroll_needed(self):
+        bbox = self._v_canvas.bbox("all")
+        if not bbox:
+            return False
+        content_h = max(0, bbox[3] - bbox[1])
+        viewport_h = max(1, self._v_canvas.winfo_height())
+        return content_h > viewport_h + 1
+
+    def _update_vscroll_visibility(self):
+        if not self.winfo_exists():
+            return
+        needs = self._v_scroll_needed()
+        if needs and not self._v_visible:
+            self._v_scroll.grid(row=0, column=1, sticky="ns")
+            self._v_visible = True
+        elif not needs and self._v_visible:
+            self._v_scroll.grid_remove()
+            self._v_visible = False
+            self._v_canvas.yview_moveto(0)
 
     # ------------------------------------------------------------------ #
     #  SDÍLENÝ HORIZONTÁLNÍ SCROLL                                         #
@@ -192,6 +252,8 @@ class MultiTimelineViewer(ctk.CTkFrame):
         for w in self._inner.winfo_children():
             w.destroy()
         self.image_references.clear()
+        self._v_canvas.yview_moveto(0)
+        self._refresh_vscroll_region()
 
         self._current_load_id += 1
         load_id = self._current_load_id
@@ -283,6 +345,7 @@ class MultiTimelineViewer(ctk.CTkFrame):
         for w in (strip_frame, thumb_canvas, inner_row):
             self._bind_events(w, video_path)
 
+        self.after(120, self._update_vscroll_visibility)
         self.after(120, self._update_hscroll_visibility)
 
     # ------------------------------------------------------------------ #
@@ -294,6 +357,8 @@ class MultiTimelineViewer(ctk.CTkFrame):
         widget.bind("<Double-Button-1>", lambda e, p=video_path: self._on_strip_double_click(p))
         widget.bind("<Shift-MouseWheel>", self._on_resize_scroll)
         widget.bind("<MouseWheel>",       self._on_vscroll)
+        widget.bind("<Button-4>",         self._on_vscroll)
+        widget.bind("<Button-5>",         self._on_vscroll)
         widget.bind("<Enter>", lambda e, p=video_path: self._on_hover_enter(e, p))
         widget.bind("<Leave>", lambda e: self._on_hover_leave())
 
