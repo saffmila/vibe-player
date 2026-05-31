@@ -213,7 +213,7 @@ class _BookmarkSeekProxy:
             label = str(item.get("label", item.get("name", ""))).strip()
             entry = {"name": label, "time": max(0.0, ts)}
             color = BookmarkManager._normalize_hex_color(item.get("color"))
-            if color:
+            if BookmarkManager.is_custom_bookmark_color(color):
                 entry["color"] = color
             normalized.append(entry)
 
@@ -4557,7 +4557,7 @@ class VtpGridMixin:
                 "label": item.get("label") or item.get("name") or "",
             }
             color = BookmarkManager._normalize_hex_color(item.get("color"))
-            if color:
+            if BookmarkManager.is_custom_bookmark_color(color):
                 row["color"] = color
             rows.append(row)
         return rows

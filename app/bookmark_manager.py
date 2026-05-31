@@ -13,7 +13,8 @@ from typing import Dict, List, Optional
 
 import customtkinter as ctk
 
-DEFAULT_BOOKMARK_COLOR = "#FFA500"
+DEFAULT_BOOKMARK_COLOR = "#FFFFFF"
+LEGACY_AUTO_BOOKMARK_COLORS = {"#FFA500", "#FFD700", "#FFFFB3"}
 
 
 class BookmarkManager:
@@ -59,6 +60,16 @@ class BookmarkManager:
         except ValueError:
             return None
         return f"#{hex_part.upper()}"
+
+    @classmethod
+    def is_custom_bookmark_color(cls, value) -> bool:
+        """True only for user-selected colors, not legacy/auto display colors."""
+        color = cls._normalize_hex_color(value)
+        if not color:
+            return False
+        if color == DEFAULT_BOOKMARK_COLOR:
+            return False
+        return color not in LEGACY_AUTO_BOOKMARK_COLORS
 
     @staticmethod
     def _blend_hex(bg: str, fg: str, fg_weight: float) -> str:
@@ -153,7 +164,7 @@ class BookmarkManager:
                 "label": str(label) if label is not None else "",
             }
             color = self._normalize_hex_color(item.get("color"))
-            if color:
+            if self.is_custom_bookmark_color(color):
                 entry["color"] = color
             self.bookmarks.append(entry)
 
@@ -400,7 +411,7 @@ class BookmarkManager:
             bookmark = self.bookmarks[bookmark_idx]
             is_active = bookmark_idx == self.active_bookmark_index
             color = self._normalize_hex_color(bookmark.get("color"))
-            if color:
+            if self.is_custom_bookmark_color(color):
                 mix = 0.42 if is_active else 0.28
                 row_bg = self._blend_hex(default_bg if not is_active else active_bg, color, mix)
                 row_fg = color
@@ -445,7 +456,10 @@ class BookmarkManager:
         if not chosen:
             return
 
-        bookmark["color"] = chosen
+        if self.is_custom_bookmark_color(chosen):
+            bookmark["color"] = chosen
+        else:
+            bookmark.pop("color", None)
         self._populate_bookmark_list()
         self._sync_bookmarks_to_player()
 

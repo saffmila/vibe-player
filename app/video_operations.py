@@ -142,6 +142,9 @@ class VideoPlayer:
         self.timeline_widget = None
         self._loaded_video_path = None
         self._duration_retry_count = 0
+        self._bookmark_nav_anchor = None
+        self._bookmark_nav_anchor_set_at = 0.0
+        self._bookmark_nav_grace_seconds = 1.5
         self.slider_hover_popup = None
         self.slider_hover_label = None
         self._init_cinematic_theme()
@@ -305,6 +308,12 @@ class VideoPlayer:
             hmap = getattr(self.controller, "hotkeys_map", None) or {}
             return hmap.get(action_name, default)
 
+        def consume_shortcut(callback):
+            def handler(event):
+                callback()
+                return "break"
+            return handler
+
         self.video_window.bind("<Control-w>", lambda e: self.close_video_player())
         self.video_window.bind(hk("video_fullscreen", "f"), self.toggle_fullscreen)
         self.video_window.bind("<Shift-F>", self.toggle_fullscreen)
@@ -321,12 +330,12 @@ class VideoPlayer:
         self.video_window.bind("<Shift-S>", lambda e: self.controller.set_loop_start_shortcut())
         self.video_window.bind("<Shift-E>", lambda e: self.controller.set_loop_end_shortcut())
         self.video_window.bind("<Shift-L>", lambda e: self.controller.toggle_loop_shortcut())
-        self.video_window.bind("<Alt-Right>", lambda e: self.skip_to_next_bookmark())
-        self.video_window.bind("<Alt-Left>", lambda e: self.skip_to_previous_bookmark())
+        self.video_window.bind("<Alt-Right>", consume_shortcut(self.skip_to_next_bookmark))
+        self.video_window.bind("<Alt-Left>", consume_shortcut(self.skip_to_previous_bookmark))
         self.video_window.bind("<Control-Right>", lambda e: self.skip_to_next_cut())
         self.video_window.bind("<Control-Left>", lambda e: self.skip_to_previous_cut())
-        self.video_window.bind("<Shift-Right>", lambda e: self.long_seek(direction=1))
-        self.video_window.bind("<Shift-Left>", lambda e: self.long_seek(direction=-1))
+        self.video_window.bind("<Shift-Right>", consume_shortcut(lambda: self.long_seek(direction=1)))
+        self.video_window.bind("<Shift-Left>", consume_shortcut(lambda: self.long_seek(direction=-1)))
 
         # Speed bindings when this window has focus
         self.video_window.bind("<greater>", lambda e: self.speed_step(+1))
@@ -370,6 +379,22 @@ class VideoPlayer:
             # else:
                 # self.display_first_frame()
     
+    def _refresh_bookmark_marker_views(self):
+        """Lightweight delayed refresh for bookmark markers after player startup."""
+        if getattr(self, "_cleaning_up", False):
+            return
+
+        timeline = getattr(self, "timeline_widget", None)
+        if timeline:
+            try:
+                timeline.update_bookmarks()
+                timeline.redraw_timeline()
+            except Exception as e:
+                logging.info("[Bookmark] timeline marker refresh failed: %s", e)
+
+        self.update_loop_bar_display()
+
+
     # SOUBOR: video_operations.py
 
     def show_and_play(self):
@@ -881,7 +906,10 @@ class VideoPlayer:
 
     @staticmethod
     def _bookmark_display_color(value) -> str:
-        return BookmarkManager._normalize_hex_color(value) or DEFAULT_BOOKMARK_COLOR
+        color = BookmarkManager._normalize_hex_color(value)
+        if BookmarkManager.is_custom_bookmark_color(color):
+            return color
+        return DEFAULT_BOOKMARK_COLOR
 
     def _get_progress_bar_bookmarks(self, duration_s: float) -> list:
         """Merge player + timeline bookmarks for seek-bar markers (time, name, color)."""
@@ -928,6 +956,82 @@ class VideoPlayer:
                 add_entry(t, name, m.get("color"))
 
         return sorted(merged.values(), key=lambda e: e["time"])
+
+    def _get_bookmark_seek_times(self) -> list[float]:
+        """Use the same merged bookmark source that is drawn on the player seek bar."""
+        duration_s = 0.0
+        if self.player:
+            try:
+                duration_s = max(0.0, float(self.player.get_length() or 0) / 1000.0)
+            except Exception:
+                duration_s = 0.0
+
+        if duration_s > 0:
+            return sorted({
+                round(float(bm["time"]), 3)
+                for bm in self._get_progress_bar_bookmarks(duration_s)
+                if isinstance(bm, dict) and bm.get("time") is not None
+            })
+
+        times = set()
+
+        def add_time(raw_time):
+            try:
+                times.add(round(max(0.0, float(raw_time)), 3))
+            except (TypeError, ValueError):
+                pass
+
+        for b in getattr(self, "bookmarks", []) or []:
+            if isinstance(b, dict):
+                add_time(b.get("time"))
+
+        timeline = getattr(self, "timeline_widget", None)
+        if timeline and hasattr(timeline, "markers"):
+            for m in getattr(timeline, "markers", []) or []:
+                if isinstance(m, dict) and m.get("type") == "bookmark":
+                    add_time(m.get("timestamp"))
+
+        return sorted(times)
+
+    def _clear_bookmark_nav_anchor(self):
+        self._bookmark_nav_anchor = None
+        self._bookmark_nav_anchor_set_at = 0.0
+
+    def _bookmark_navigation_base_time(self) -> float:
+        """Stable base for repeated bookmark jumps despite VLC seek/playback drift."""
+        current_time = 0.0
+        if self.player:
+            try:
+                current_time = max(0.0, float(self.player.get_time()) / 1000.0)
+            except Exception:
+                current_time = 0.0
+
+        anchor = getattr(self, "_bookmark_nav_anchor", None)
+        if anchor is None:
+            return current_time
+
+        try:
+            anchor_time = max(0.0, float(anchor))
+        except (TypeError, ValueError):
+            self._clear_bookmark_nav_anchor()
+            return current_time
+
+        set_at = float(getattr(self, "_bookmark_nav_anchor_set_at", 0.0) or 0.0)
+        recently_jumped = set_at > 0 and (time.monotonic() - set_at) <= 3.0
+        still_near_anchor = abs(current_time - anchor_time) <= float(getattr(self, "_bookmark_nav_grace_seconds", 1.5))
+        if recently_jumped or still_near_anchor:
+            return anchor_time
+
+        self._clear_bookmark_nav_anchor()
+        return current_time
+
+    def _jump_to_bookmark_time(self, timestamp: float):
+        target = max(0.0, float(timestamp))
+        self.player.set_time(int(target * 1000))
+        self.last_position = int(target * 1000)
+        self._bookmark_nav_anchor = target
+        self._bookmark_nav_anchor_set_at = time.monotonic()
+        self._sync_seek_ui(target)
 
     def _slider_canvas_local_x(self, event) -> int | None:
         canvas = getattr(self, "slider_canvas", None)
@@ -1532,48 +1636,38 @@ class VideoPlayer:
         """Seek to the nearest bookmark after current playback time."""
         if not self.player:
             return
-        if not self.bookmarks:
+        sorted_times = self._get_bookmark_seek_times()
+        if not sorted_times:
             logging.info("[Bookmark] No bookmarks available.")
             return
 
-        current_time = max(0.0, self.player.get_time() / 1000.0)
-        sorted_times = sorted(
-            float(b.get("time", 0.0))
-            for b in self.bookmarks
-            if isinstance(b, dict) and b.get("time") is not None
-        )
-        next_time = next((t for t in sorted_times if t > current_time + 0.05), None)
+        base_time = self._bookmark_navigation_base_time()
+        next_time = next((t for t in sorted_times if t > base_time + 0.001), None)
         if next_time is None:
             logging.info("[Bookmark] Already at or beyond the last bookmark.")
             return
 
-        self.player.set_time(int(next_time * 1000))
-        self.last_position = int(next_time * 1000)
-        logging.info("[Bookmark] Jumped to next bookmark: %.2fs", next_time)
+        self._jump_to_bookmark_time(next_time)
+        logging.info("[Bookmark] Jumped to next bookmark: %.2fs (base %.2fs)", next_time, base_time)
 
     def skip_to_previous_bookmark(self):
         """Seek to the nearest bookmark before current playback time."""
         if not self.player:
             return
-        if not self.bookmarks:
+        sorted_times = self._get_bookmark_seek_times()
+        if not sorted_times:
             logging.info("[Bookmark] No bookmarks available.")
             return
 
-        current_time = max(0.0, self.player.get_time() / 1000.0)
-        sorted_times = sorted(
-            float(b.get("time", 0.0))
-            for b in self.bookmarks
-            if isinstance(b, dict) and b.get("time") is not None
-        )
-        prev_candidates = [t for t in sorted_times if t < current_time - 0.05]
+        base_time = self._bookmark_navigation_base_time()
+        prev_candidates = [t for t in sorted_times if t < base_time - 0.001]
         prev_time = prev_candidates[-1] if prev_candidates else None
         if prev_time is None:
             logging.info("[Bookmark] Already at or before the first bookmark.")
             return
 
-        self.player.set_time(int(prev_time * 1000))
-        self.last_position = int(prev_time * 1000)
-        logging.info("[Bookmark] Jumped to previous bookmark: %.2fs", prev_time)
+        self._jump_to_bookmark_time(prev_time)
+        logging.info("[Bookmark] Jumped to previous bookmark: %.2fs (base %.2fs)", prev_time, base_time)
 
     def _get_cut_boundaries(self):
         timeline = getattr(self, "timeline_widget", None)
@@ -1600,10 +1694,10 @@ class VideoPlayer:
         if next_time is None:
             logging.info("[Cut] Already at or beyond the last Loop / Cut boundary.")
             return
+        self._clear_bookmark_nav_anchor()
         self.player.set_time(int(next_time * 1000))
         self.last_position = int(next_time * 1000)
-        if self.timeline_widget:
-            self.timeline_widget.set_current_time(next_time)
+        self._sync_seek_ui(next_time)
         logging.info("[Cut] Jumped to next Loop / Cut boundary: %.2fs", next_time)
 
     def skip_to_previous_cut(self):
@@ -1619,10 +1713,10 @@ class VideoPlayer:
         if prev_time is None:
             logging.info("[Cut] Already at or before the first Loop / Cut boundary.")
             return
+        self._clear_bookmark_nav_anchor()
         self.player.set_time(int(prev_time * 1000))
         self.last_position = int(prev_time * 1000)
-        if self.timeline_widget:
-            self.timeline_widget.set_current_time(prev_time)
+        self._sync_seek_ui(prev_time)
         logging.info("[Cut] Jumped to previous Loop / Cut boundary: %.2fs", prev_time)
 
     def long_seek(self, direction: int, seconds: float = 10.0):
@@ -1642,8 +1736,10 @@ class VideoPlayer:
         else:
             target_ms = max(0, target_ms)
 
+        self._clear_bookmark_nav_anchor()
         self.player.set_time(target_ms)
         self.last_position = target_ms
+        self._sync_seek_ui(target_ms / 1000.0)
         logging.info("[Seek] Long seek %s by %.1fs to %.2fs", "forward" if direction >= 0 else "backward", seconds, target_ms / 1000.0)
 
 
@@ -1677,9 +1773,30 @@ class VideoPlayer:
             os.makedirs(bookmark_dir, exist_ok=True)
         try:
             with open(self.bookmark_file, "w", encoding="utf-8") as f:
-                json.dump(self.bookmarks, f, indent=2)
+                json.dump(self._bookmarks_for_storage(self.bookmarks), f, indent=2)
         except Exception as e:
             logging.info(f"Failed to save bookmarks: {e}")
+
+    def _bookmarks_for_storage(self, raw_bookmarks):
+        """Normalize bookmark payload and drop legacy/auto display colors."""
+        normalized = []
+        for item in raw_bookmarks or []:
+            if not isinstance(item, dict):
+                continue
+            t = item.get("time") if item.get("time") is not None else item.get("timestamp")
+            if t is None:
+                continue
+            try:
+                timestamp = max(0.0, float(t))
+            except (TypeError, ValueError):
+                continue
+            name = item.get("name") if item.get("name") is not None else item.get("label", "")
+            entry = {"name": str(name or ""), "time": timestamp}
+            color = BookmarkManager._normalize_hex_color(item.get("color"))
+            if BookmarkManager.is_custom_bookmark_color(color):
+                entry["color"] = color
+            normalized.append(entry)
+        return normalized
 
     def _get_sidecar_bookmark_path(self, video_path: str) -> str:
         """
@@ -1722,7 +1839,7 @@ class VideoPlayer:
         if os.path.exists(source_path):
             try:
                 with open(source_path, "r", encoding="utf-8") as f:
-                    self.bookmarks = json.load(f)
+                    self.bookmarks = self._bookmarks_for_storage(json.load(f))
                 # Always save back to sidecar path from now on.
                 self.bookmark_file = sidecar_path
             except Exception as e:
@@ -3426,11 +3543,51 @@ class VideoPlayer:
             self.player.video_set_spu(-1)
 
 
+    def _sync_seek_ui(self, timestamp):
+        """Immediately refresh seek-related widgets after a programmatic seek."""
+        try:
+            seconds = max(0.0, float(timestamp))
+        except (TypeError, ValueError):
+            return
+
+        duration_ms = 0
+        if self.player:
+            try:
+                duration_ms = int(self.player.get_length() or 0)
+            except Exception:
+                duration_ms = 0
+
+        if duration_ms > 0 and hasattr(self, "slider_canvas") and self.slider_canvas and self.slider_canvas.winfo_exists():
+            pct = min(100.0, max(0.0, (seconds * 1000.0 / duration_ms) * 100.0))
+            self.render_slider(pct)
+
+        if hasattr(self, "timer_label") and self.timer_label.winfo_exists():
+            total_time = max(0, int(duration_ms / 1000))
+            current_time = max(0, int(seconds))
+            current_time_formatted = f"{current_time // 60:02}:{current_time % 60:02}"
+            total_time_formatted = f"{total_time // 60:02}:{total_time % 60:02}"
+            self.timer_label.configure(text=f"{current_time_formatted} / {total_time_formatted}".lower())
+
+        if hasattr(self, "timeline_widget") and self.timeline_widget is not None:
+            try:
+                self.timeline_widget.set_current_time(seconds)
+            except Exception as e:
+                logging.info(f"[DEBUG] timeline_widget seek sync failed: {e}")
+
+        if hasattr(self.parent, "timeline_window") and self.parent.timeline_window is not None:
+            try:
+                self.parent.timeline_window.set_current_time(seconds)
+            except Exception as e:
+                logging.info(f"[DEBUG] timeline_window seek sync failed: {e}")
+                self.parent.timeline_window = None
+
     # only for timelinebar_plugin!
     def seek_to_time(self, timestamp):
         if self.player:
+            self._clear_bookmark_nav_anchor()
             self.player.set_time(int(timestamp * 1000))  # ms
             self.last_position = int(timestamp * 1000)
+            self._sync_seek_ui(timestamp)
             logging.info(f"[VideoPlayer] Seek to {timestamp:.2f}s")
 
 
@@ -3537,6 +3694,8 @@ class VideoPlayer:
         self.update_loop_bar_display()
         self.video_window.after(250, self.update_loop_bar_display)
         self.video_window.after(900, self.update_loop_bar_display)
+        self.video_window.after(150, self._refresh_bookmark_marker_views)
+        self.video_window.after(700, self._refresh_bookmark_marker_views)
 
         self._schedule_decode_placeholder_checks()
 
@@ -3699,6 +3858,7 @@ class VideoPlayer:
             self.video_path = path
             self.video_name = name
             self.last_position = 0
+            self._clear_bookmark_nav_anchor()
             self.bookmark_file = self._get_sidecar_bookmark_path(path)
             self.load_bookmarks()
             try:
@@ -4264,10 +4424,10 @@ class VideoPlayer:
             return
         pct = max(0.0, min(float(percentage), 100.0))
         new_time = (pct / 100.0) * (duration / 1000.0)
+        self._clear_bookmark_nav_anchor()
         self.player.set_time(int(new_time * 1000))
         self.last_position = int(new_time * 1000)
-        if hasattr(self, "timeline_widget") and self.timeline_widget is not None:
-            self.timeline_widget.set_current_time(new_time)
+        self._sync_seek_ui(new_time)
 
     def slider_update(self, event=None):
         self.seek_video(getattr(self, "_slider_percent", 0.0))

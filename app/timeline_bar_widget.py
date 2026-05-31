@@ -21,6 +21,7 @@ import customtkinter as ctk
 import cv2
 from PIL import Image, ImageDraw, ImageTk
 
+from bookmark_manager import BookmarkManager, DEFAULT_BOOKMARK_COLOR
 from file_operations import (
     create_video_thumbnail,
     get_ffmpeg_path,
@@ -453,8 +454,8 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.time_axis_minor_tick_height = 22
         # Time labels: anchor ``s`` at ``thumb_y_top -`` this offset.
         self.time_axis_label_offset_above_thumb_top = 32
-        # Staggered bookmark row colors (text + tab + stem tint).
-        self.bookmark_colors = ["#FFFFB3", "#FFD700", "#FFA500"]
+        # Default bookmark color; custom colors override it per bookmark.
+        self.bookmark_colors = [DEFAULT_BOOKMARK_COLOR]
         # Extra scrollable vertical space lets users position the timeline even
         # when the actual drawn content fits inside the current panel height.
         self.timeline_vertical_scroll_slack_ratio = 0.40
@@ -942,10 +943,31 @@ class TimelineBarWidget(ctk.CTkFrame):
             json_path = os.path.splitext(video_path)[0] + "_bookmarks.json"
             try:
                 with open(json_path, 'w', encoding='utf-8') as f:
-                    json.dump(bookmarks, f, indent=4, ensure_ascii=False)
+                    json.dump(self._bookmarks_for_storage(bookmarks), f, indent=4, ensure_ascii=False)
                 logging.info(f"[Timeline] Standalone save successful: {json_path}")
             except Exception as e:
                 logging.error(f"Failed to save bookmarks standalone: {e}")
+
+    def _bookmarks_for_storage(self, raw_bookmarks):
+            """Normalize bookmark payload and drop legacy/auto display colors."""
+            normalized = []
+            for item in raw_bookmarks or []:
+                if not isinstance(item, dict):
+                    continue
+                t = item.get("time") if item.get("time") is not None else item.get("timestamp")
+                if t is None:
+                    continue
+                try:
+                    timestamp = max(0.0, float(t))
+                except (TypeError, ValueError):
+                    continue
+                name = item.get("name") if item.get("name") is not None else item.get("label", "")
+                entry = {"name": str(name or ""), "time": timestamp}
+                color = BookmarkManager._normalize_hex_color(item.get("color"))
+                if BookmarkManager.is_custom_bookmark_color(color):
+                    entry["color"] = color
+                normalized.append(entry)
+            return normalized
 
     def remove_bookmark_at(self, marker_to_remove):
             """Removes a specific bookmark even if player is closed."""
@@ -2869,8 +2891,9 @@ class TimelineBarWidget(ctk.CTkFrame):
             y_top = y_timeline - 32
             y_bot = y_timeline - 6
             
-            rect_id = self.canvas.create_rectangle(x-6, y_top, x+6, y_bot, fill=marker["color"], outline="", tags="marker")
-            arrow_id = self.canvas.create_polygon([x-6, y_bot, x+6, y_bot, x, y_bot+9], fill=marker["color"], outline="", tags="marker")
+            color = marker.get("color", DEFAULT_BOOKMARK_COLOR)
+            rect_id = self.canvas.create_rectangle(x-6, y_top, x+6, y_bot, fill=color, outline="", tags="marker")
+            arrow_id = self.canvas.create_polygon([x-6, y_bot, x+6, y_bot, x, y_bot+9], fill=color, outline="", tags="marker")
             x_int = int(x)
             offset = marker_spacing.get(x_int, 0)
             marker_spacing[x_int] = offset + 1
@@ -3642,8 +3665,9 @@ class TimelineBarWidget(ctk.CTkFrame):
                     "label": str(n),
                 }
                 raw_color = b.get("color")
-                if isinstance(raw_color, str) and raw_color.strip().startswith("#"):
-                    marker["color"] = raw_color.strip()
+                custom_color = BookmarkManager._normalize_hex_color(raw_color)
+                if BookmarkManager.is_custom_bookmark_color(custom_color):
+                    marker["color"] = custom_color
                 self.markers.append(marker)
 
         n_bm = len([m for m in self.markers if m.get("type") == "bookmark"])
@@ -3670,7 +3694,6 @@ class TimelineBarWidget(ctk.CTkFrame):
             marker_spacing = {} # Pro skládání popisků nad sebe při kolizi X (ne-bookmark markery)
 
             bookmark_stagger_index = 0
-            bookmark_colors = getattr(self, "bookmark_colors", ["#FFD700", "#FFA500", "#FF4500"])
 
             for marker in self.markers:
                 if not self.marker_types_visible.get(marker.get("type"), True):
@@ -3696,10 +3719,10 @@ class TimelineBarWidget(ctk.CTkFrame):
                     level = bookmark_stagger_index % n_rows
                     bookmark_stagger_index += 1
                     custom_color = marker.get("color")
-                    if isinstance(custom_color, str) and custom_color.strip().startswith("#"):
-                        current_color = custom_color.strip()
+                    if BookmarkManager.is_custom_bookmark_color(custom_color):
+                        current_color = BookmarkManager._normalize_hex_color(custom_color)
                     else:
-                        current_color = bookmark_colors[level % len(bookmark_colors)]
+                        current_color = DEFAULT_BOOKMARK_COLOR
                 else:
                     level = 0
                     current_color = None
