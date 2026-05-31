@@ -57,6 +57,7 @@ run_debug.bat
 
 # cProfile outputs stay out of repository (profiling .bat files save to profiling/)
 # — already covered by global *.prof below
+profiling/local/
 
 # --- Tests / Tools ---
 .pytest_cache/
@@ -92,7 +93,6 @@ backup.py
 # Profiling outputs and debug logs
 app/*_cprofile.txt
 app/profile_paths_*.txt
-app/run_profiling.py
 
 # Redundant requirements (main file is in root)
 app/requirements.txt

@@ -1,20 +1,9 @@
 @echo off
 setlocal
-
-cd /d "%~dp0.."
-set "ROOT=%CD%"
-set "APP=%ROOT%\app"
-set "PY=%ROOT%\venv\Scripts\python.exe"
-set "PROF_OUT=%ROOT%\profiling"
-
-echo --- Running STARTUP profile ---
-
-pushd "%APP%"
-"%PY%" -m cProfile -o "%PROF_OUT%\profile_grid.prof" run_profiling.py --cprofile-grid
-popd
-
-echo.
-echo --- Profile results ---
-"%PY%" -c "import pstats; pstats.Stats(r'%PROF_OUT%\profile_grid.prof').sort_stats('time').print_stats(30)"
-
-if not "%NOPAUSE%"=="1" pause
+set "PROFILE_TITLE=GRID"
+set "PROFILE_OUTPUT=profile_grid.prof"
+set "PROFILE_ARGS=--cprofile-grid"
+set "PROFILE_SORT=time"
+set "PROFILE_LIMIT=30"
+call "%~dp0_run_single_profile.bat"
+exit /b %ERRORLEVEL%
