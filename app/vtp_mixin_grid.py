@@ -3507,10 +3507,18 @@ class VtpGridMixin:
 
 
 
-    def _get_folder_content_for_preview(self, folder_path, num_files=5):
+    def _get_folder_content_for_preview(
+        self,
+        folder_path,
+        num_files=5,
+        max_depth=5,
+        max_dirs=250,
+        max_entries=3000,
+        time_budget_s=0.75,
+    ):
         """
         Gets a list of the first N media file paths from a directory for preview purposes.
-        This function is a fast, non-blocking way to get the source files.
+        This function is bounded so folder previews cannot walk huge trees indefinitely.
 
         Args:
             folder_path (str): The path to the folder.
@@ -3521,30 +3529,38 @@ class VtpGridMixin:
         """
         valid_extensions = set(ext.lower() for ext in VIDEO_FORMATS + IMAGE_FORMATS)
         collected = []
+        dirs_seen = 0
+        entries_seen = 0
+        deadline = time.monotonic() + float(time_budget_s)
+        pending = [(folder_path, 0)]
 
-        def _collect(path):
-            if len(collected) >= num_files:
-                return
+        while pending and len(collected) < num_files:
+            if time.monotonic() > deadline or dirs_seen >= max_dirs or entries_seen >= max_entries:
+                break
+            current, depth = pending.pop(0)
+            dirs_seen += 1
             try:
-                with os.scandir(path) as entries:
-                    # deterministic order for stable preview output/cache
-                    for entry in sorted(entries, key=lambda e: e.name.lower()):
+                with os.scandir(current) as entries:
+                    child_dirs = []
+                    for entry in entries:
                         if len(collected) >= num_files:
-                            return
+                            break
+                        if time.monotonic() > deadline or entries_seen >= max_entries:
+                            break
+                        entries_seen += 1
                         try:
                             if entry.is_file(follow_symlinks=False):
                                 if os.path.splitext(entry.name)[1].lower() in valid_extensions:
                                     collected.append(entry.path)
-                            elif entry.is_dir(follow_symlinks=False):
-                                if preview_skip_subdir(entry.name):
-                                    continue
-                                _collect(entry.path)
+                            elif depth < max_depth and entry.is_dir(follow_symlinks=False):
+                                if not preview_skip_subdir(entry.name):
+                                    child_dirs.append(entry.path)
                         except (OSError, PermissionError):
                             continue
+                    if depth < max_depth:
+                        pending.extend((path, depth + 1) for path in child_dirs)
             except (OSError, PermissionError):
-                return
-
-        _collect(folder_path)
+                continue
         return collected
 
 

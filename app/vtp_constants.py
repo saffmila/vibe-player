@@ -23,7 +23,18 @@ VIDEO_FORMATS = (
     ".rm",
     ".qt",
 )
-IMAGE_FORMATS = (".png", ".jpg", ".jpeg", ".bmp", ".gif")
+IMAGE_FORMATS = (
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".jpe",
+    ".jfif",
+    ".bmp",
+    ".gif",
+    ".webp",
+    ".tif",
+    ".tiff",
+)
 
 # Do not recurse into these when building folder preview grids (Windows junk / ACL).
 _PREVIEW_SKIP_SUBDIRS = frozenset(

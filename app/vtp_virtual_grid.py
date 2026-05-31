@@ -15,6 +15,9 @@ from __future__ import annotations
 import logging
 import math
 import os
+import queue
+import threading
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 
@@ -27,7 +30,7 @@ from file_operations import (
     create_image_thumbnail,
     create_video_thumbnail,
 )
-from vtp_constants import VIDEO_FORMATS, IMAGE_FORMATS
+from vtp_constants import VIDEO_FORMATS, IMAGE_FORMATS, preview_skip_subdir
 
 _OVERSCAN_ROWS = 3
 _OFFSCREEN_Y = -10000
@@ -86,6 +89,19 @@ class VtpVirtualGridMixin:
         self._vg_label_font_cache: dict[int, tkfont.Font | None] = {}
         self._vg_label_measure_cache: dict[tuple, int] = {}
         self._vg_info_state_key: tuple = ()
+        self._preview_status_cache: dict[tuple, str] = {}
+        self._folder_preview_pending_render_ids: dict[tuple, int | None] = {}
+        self._folder_preview_queue: queue.Queue = queue.Queue()
+        self._folder_preview_worker_started = False
+        self._folder_preview_idle_delay_ms = 650
+        self._folder_preview_worker_sleep_s = 0.10
+        self._folder_preview_max_depth = 5
+        self._folder_preview_max_dirs = 250
+        self._folder_preview_max_entries = 3000
+        self._folder_preview_scan_budget_s = 0.75
+        self._folder_preview_empty_retry_s = 30.0
+        self._folder_preview_empty_seen_at: dict[tuple, float] = {}
+        self._start_folder_preview_worker()
 
         # ------------------------------------------------------------------
         # Wide folder tuning (easy tweaking)
@@ -1388,6 +1404,9 @@ class VtpVirtualGridMixin:
             "label": slot.get("_first_label_widget"),
         }
 
+        if is_folder:
+            self._queue_folder_preview_if_needed(file_path, self._vg_render_id)
+
         # tkinterdnd2 drag-out (Explorer / other apps): classic grid does this in bind_canvas_events;
         # virtual grid pools only call _vg_bind_slot_events once per canvas, so register here on every rebind.
         try:
@@ -1751,6 +1770,339 @@ class VtpVirtualGridMixin:
                 self._apply_selection_border(slot["strip"], idx in selected_indices)
 
     # ------------------------------------------------------------------
+    # 9b. Low-priority recursive folder previews
+    # ------------------------------------------------------------------
+
+    def _start_folder_preview_worker(self) -> None:
+        if self._folder_preview_worker_started:
+            return
+        self._folder_preview_worker_started = True
+        worker = threading.Thread(
+            target=self._folder_preview_worker_loop,
+            name="folder-preview-worker",
+            daemon=True,
+        )
+        worker.start()
+        logging.debug("[FolderPreview] worker thread started")
+
+    def _folder_preview_is_green(self, folder_path: str) -> bool:
+        try:
+            return bool(self.database.is_folder_cached(folder_path))
+        except Exception:
+            return False
+
+    def _folder_preview_cache_key(self, folder_path: str, thumbnail_size=None, is_green=None) -> tuple:
+        size = tuple(thumbnail_size or self.thumbnail_size)
+        green = self._folder_preview_is_green(folder_path) if is_green is None else bool(is_green)
+        return (self._vg_norm_path(folder_path), size, green)
+
+    def _queue_folder_preview_if_needed(self, folder_path: str, render_id=None) -> None:
+        if not folder_path or not os.path.isdir(folder_path):
+            logging.debug("[FolderPreview] skip queue: not a directory path=%s", folder_path)
+            return
+        thumbnail_size = tuple(self.thumbnail_size)
+        is_green = self._folder_preview_is_green(folder_path)
+        key = self._folder_preview_cache_key(folder_path, thumbnail_size, is_green)
+        status = self._preview_status_cache.get(key)
+        if status == "READY":
+            logging.debug("[FolderPreview] queue sees READY path=%s", folder_path)
+            self._folder_preview_apply_ready(folder_path, render_id, thumbnail_size)
+            return
+        if status == "PENDING":
+            pending_rid = self._folder_preview_pending_render_ids.get(key)
+            if pending_rid == render_id:
+                logging.debug("[FolderPreview] skip queue: already PENDING path=%s rid=%s", folder_path, render_id)
+                return
+            logging.debug(
+                "[FolderPreview] replace stale PENDING path=%s old_rid=%s new_rid=%s",
+                folder_path,
+                pending_rid,
+                render_id,
+            )
+        if status == "EMPTY":
+            last_empty = self._folder_preview_empty_seen_at.get(key, 0.0)
+            retry_after = float(getattr(self, "_folder_preview_empty_retry_s", 30.0))
+            if time.monotonic() - last_empty < retry_after:
+                logging.debug("[FolderPreview] skip queue: recent EMPTY path=%s", folder_path)
+                return
+
+        try:
+            if self.file_ops.folder_preview_cache_exists(
+                folder_path,
+                thumbnail_size,
+                cache_dir=self.thumbnail_cache_path,
+                for_green_folder_icon=is_green,
+            ):
+                self._preview_status_cache[key] = "READY"
+                logging.debug("[FolderPreview] disk cache hit path=%s green=%s", folder_path, is_green)
+                self._folder_preview_apply_ready(folder_path, render_id, thumbnail_size)
+                return
+        except Exception:
+            logging.debug("[FolderPreview] disk cache check failed path=%s", folder_path, exc_info=True)
+
+        self._preview_status_cache[key] = "PENDING"
+        self._folder_preview_pending_render_ids[key] = render_id
+        logging.debug(
+            "[FolderPreview] scheduled delayed enqueue path=%s rid=%s green=%s size=%s",
+            folder_path,
+            render_id,
+            is_green,
+            thumbnail_size,
+        )
+
+        def _enqueue_if_still_visible():
+            try:
+                if render_id is not None and render_id != self._vg_render_id:
+                    if (
+                        self._preview_status_cache.get(key) == "PENDING"
+                        and self._folder_preview_pending_render_ids.get(key) == render_id
+                    ):
+                        self._preview_status_cache.pop(key, None)
+                        self._folder_preview_pending_render_ids.pop(key, None)
+                    logging.debug(
+                        "[FolderPreview] delayed enqueue cancelled stale path=%s rid=%s current=%s",
+                        folder_path,
+                        render_id,
+                        self._vg_render_id,
+                    )
+                    return
+                norm = self._vg_norm_path(folder_path)
+                if not getattr(self, "_vg_active", False) or norm not in self._vg_visible_std_slots_by_path:
+                    if (
+                        self._preview_status_cache.get(key) == "PENDING"
+                        and self._folder_preview_pending_render_ids.get(key) == render_id
+                    ):
+                        self._preview_status_cache.pop(key, None)
+                        self._folder_preview_pending_render_ids.pop(key, None)
+                    logging.debug(
+                        "[FolderPreview] delayed enqueue cancelled not visible path=%s active=%s",
+                        folder_path,
+                        getattr(self, "_vg_active", False),
+                    )
+                    return
+                self._folder_preview_queue.put(
+                    {
+                        "folder_path": folder_path,
+                        "thumbnail_size": thumbnail_size,
+                        "is_green": is_green,
+                        "render_id": render_id,
+                        "key": key,
+                    }
+                )
+                logging.debug("[FolderPreview] enqueued path=%s qsize=%s", folder_path, self._folder_preview_queue.qsize())
+            except Exception as exc:
+                logging.debug("[FolderPreview] enqueue failed path=%s error=%s", folder_path, exc, exc_info=True)
+                self._preview_status_cache.pop(key, None)
+                self._folder_preview_pending_render_ids.pop(key, None)
+
+        try:
+            self.after(int(self._folder_preview_idle_delay_ms), _enqueue_if_still_visible)
+        except Exception:
+            logging.debug("[FolderPreview] after() schedule failed path=%s", folder_path, exc_info=True)
+            self._preview_status_cache.pop(key, None)
+            self._folder_preview_pending_render_ids.pop(key, None)
+
+    def _folder_preview_worker_loop(self) -> None:
+        while True:
+            item = self._folder_preview_queue.get()
+            status = "EMPTY"
+            try:
+                time.sleep(float(getattr(self, "_folder_preview_worker_sleep_s", 0.10)))
+                folder_path = item["folder_path"]
+                thumbnail_size = tuple(item["thumbnail_size"])
+                is_green = bool(item["is_green"])
+                logging.debug(
+                    "[FolderPreview] worker job start path=%s green=%s size=%s",
+                    folder_path,
+                    is_green,
+                    thumbnail_size,
+                )
+                sources = self._collect_folder_preview_sources(folder_path)
+                logging.debug(
+                    "[FolderPreview] worker sources=%d folder=%s first=%s",
+                    len(sources),
+                    folder_path,
+                    sources[0] if sources else "",
+                )
+                if sources:
+                    preview_path = self.file_ops.create_cached_folder_preview(
+                        folder_path=folder_path,
+                        thumbnail_size=thumbnail_size,
+                        source_file_paths=sources,
+                        cache_enabled=self.cache_enabled,
+                        cache_dir=self.thumbnail_cache_path,
+                        database=self.database,
+                        for_green_folder_icon=is_green,
+                    )
+                    status = "READY" if preview_path else "EMPTY"
+                    logging.debug(
+                        "[FolderPreview] worker write status=%s folder=%s cache=%s",
+                        status,
+                        folder_path,
+                        preview_path,
+                    )
+            except Exception as exc:
+                logging.debug("[FolderPreview] worker failed error=%s item=%s", exc, item, exc_info=True)
+                status = "EMPTY"
+            finally:
+                try:
+                    self._folder_preview_queue.task_done()
+                except Exception:
+                    pass
+                try:
+                    self.after(
+                        0,
+                        lambda it=item, st=status: self._folder_preview_worker_finished(it, st),
+                    )
+                except Exception:
+                    logging.debug("[FolderPreview] worker finish after() failed item=%s", item, exc_info=True)
+
+    def _collect_folder_preview_sources(self, folder_path: str) -> list[str]:
+        started = time.monotonic()
+        valid_extensions = set(ext.lower() for ext in VIDEO_FORMATS + IMAGE_FORMATS)
+        max_files = 4
+        max_depth = int(getattr(self, "_folder_preview_max_depth", 3))
+        max_dirs = int(getattr(self, "_folder_preview_max_dirs", 80))
+        max_entries = int(getattr(self, "_folder_preview_max_entries", 800))
+        deadline = time.monotonic() + float(getattr(self, "_folder_preview_scan_budget_s", 0.25))
+
+        collected: list[str] = []
+        dirs_seen = 0
+        entries_seen = 0
+        queue_dirs: list[tuple[str, int]] = [(folder_path, 0)]
+
+        while queue_dirs and len(collected) < max_files:
+            if time.monotonic() > deadline or dirs_seen >= max_dirs or entries_seen >= max_entries:
+                break
+            current, depth = queue_dirs.pop(0)
+            dirs_seen += 1
+            try:
+                with os.scandir(current) as entries:
+                    child_dirs: list[str] = []
+                    for entry in entries:
+                        if len(collected) >= max_files:
+                            break
+                        if time.monotonic() > deadline or entries_seen >= max_entries:
+                            break
+                        entries_seen += 1
+                        try:
+                            if entry.is_file(follow_symlinks=False):
+                                if os.path.splitext(entry.name)[1].lower() in valid_extensions:
+                                    collected.append(entry.path)
+                            elif depth < max_depth and entry.is_dir(follow_symlinks=False):
+                                if not preview_skip_subdir(entry.name):
+                                    child_dirs.append(entry.path)
+                        except (OSError, PermissionError):
+                            continue
+                    if depth < max_depth:
+                        queue_dirs.extend((path, depth + 1) for path in child_dirs)
+            except (OSError, PermissionError):
+                continue
+        logging.debug(
+            "[FolderPreview] scan done path=%s found=%d dirs=%d entries=%d elapsed=%.3fs",
+            folder_path,
+            len(collected),
+            dirs_seen,
+            entries_seen,
+            time.monotonic() - started,
+        )
+        return collected
+
+    def _folder_preview_worker_finished(self, item: dict, status: str) -> None:
+        key = item.get("key")
+        if key is not None:
+            self._preview_status_cache[key] = status
+            self._folder_preview_pending_render_ids.pop(key, None)
+            if status == "EMPTY":
+                self._folder_preview_empty_seen_at[key] = time.monotonic()
+            elif status == "READY":
+                self._folder_preview_empty_seen_at.pop(key, None)
+        logging.debug(
+            "[FolderPreview] worker finished status=%s path=%s",
+            status,
+            item.get("folder_path"),
+        )
+        if status != "READY":
+            return
+        self._folder_preview_apply_ready(
+            item.get("folder_path"),
+            item.get("render_id"),
+            tuple(item.get("thumbnail_size") or self.thumbnail_size),
+        )
+
+    def _folder_preview_apply_ready(self, folder_path: str, render_id=None, thumbnail_size=None) -> None:
+        if not folder_path or not getattr(self, "_vg_active", False):
+            logging.debug(
+                "[FolderPreview] apply skipped inactive path=%s active=%s",
+                folder_path,
+                getattr(self, "_vg_active", False),
+            )
+            return
+        if render_id is not None and render_id != self._vg_render_id:
+            logging.debug(
+                "[FolderPreview] apply skipped stale path=%s rid=%s current=%s",
+                folder_path,
+                render_id,
+                self._vg_render_id,
+            )
+            return
+        thumbnail_size = tuple(thumbnail_size or self.thumbnail_size)
+        if thumbnail_size != tuple(self.thumbnail_size):
+            logging.debug(
+                "[FolderPreview] apply skipped size changed path=%s job_size=%s current_size=%s",
+                folder_path,
+                thumbnail_size,
+                self.thumbnail_size,
+            )
+            return
+        norm = self._vg_norm_path(folder_path)
+        slot = self._vg_visible_std_slots_by_path.get(norm)
+        data_idx = self._vg_data_index_by_path.get(norm, -1)
+        if not slot or data_idx < 0 or data_idx >= len(self._vg_data):
+            logging.debug(
+                "[FolderPreview] apply skipped not visible path=%s slot=%s data_idx=%s",
+                folder_path,
+                bool(slot),
+                data_idx,
+            )
+            return
+        item = self._vg_data[data_idx]
+        if not item.get("is_folder", False):
+            logging.debug("[FolderPreview] apply skipped not folder path=%s", folder_path)
+            return
+        is_green = self._folder_preview_is_green(folder_path)
+        thumb = self.file_ops.create_folder_thumbnail(
+            thumbnail_size=self.thumbnail_size,
+            folder_path=folder_path,
+            cache_enabled=self.cache_enabled,
+            cache_dir=self.thumbnail_cache_path,
+            database=self.database,
+            is_cached=is_green,
+        )
+        if thumb is None:
+            logging.debug("[FolderPreview] apply failed create_folder_thumbnail returned None path=%s", folder_path)
+            return
+        item.pop("_photo", None)
+        item.pop("_photo_cache_key", None)
+        if self.memory_cache:
+            thumbnail_cache.set(folder_path, thumb, memory_cache=self.memory_cache)
+            self._vg_apply_generated_thumb(folder_path)
+            logging.debug("[FolderPreview] applied via memory cache path=%s", folder_path)
+            return
+
+        source = getattr(thumb, "_light_image", None)
+        if source is None:
+            return
+        resized = ImageOps.contain(source, tuple(self.thumbnail_size))
+        photo = ImageTk.PhotoImage(resized)
+        item["_photo"] = photo
+        item["_photo_cache_key"] = (id(source), getattr(source, "size", None), tuple(self.thumbnail_size))
+        slot["canvas"].itemconfig("thumbnail", image=photo)
+        slot["canvas"].image = photo
+        slot["photo"] = photo
+        logging.debug("[FolderPreview] applied direct path=%s", folder_path)
+
+    # ------------------------------------------------------------------
     # 10. Async thumbnail generation
     # ------------------------------------------------------------------
 
@@ -1767,6 +2119,23 @@ class VtpVirtualGridMixin:
                 "[VGrid] Thumbnail decode suppressed after Clear — switch folder or use Refresh/Scan to rebuild."
             )
             return
+
+        try:
+            visible_folder_count = 0
+            for slot in list(self._vg_visible_std_slots_by_path.values()):
+                data_idx = int(slot.get("data_idx", -1))
+                if 0 <= data_idx < len(self._vg_data):
+                    item = self._vg_data[data_idx]
+                    if item.get("is_folder", False):
+                        visible_folder_count += 1
+                        self._queue_folder_preview_if_needed(item.get("path"), render_id)
+            logging.debug(
+                "[FolderPreview] start_async visible standard folders=%d rid=%s",
+                visible_folder_count,
+                render_id,
+            )
+        except Exception:
+            logging.debug("[FolderPreview] start_async queue visible failed", exc_info=True)
 
         items_to_generate = []
         for item in self._vg_data:
@@ -1913,11 +2282,6 @@ class VtpVirtualGridMixin:
             if basic and self.memory_cache and not self._vg_is_wide:
                 thumbnail_cache.set(file_path, basic, memory_cache=self.memory_cache)
                 self.after(0, lambda fp=file_path: self._vg_apply_generated_thumb(fp))
-
-            try:
-                self.ensure_basic_thumbnails(file_path, self.thumbnail_size, count=4)
-            except (OSError, PermissionError):
-                pass
 
             if render_id != self._vg_render_id:
                 return

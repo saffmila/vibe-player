@@ -2262,19 +2262,21 @@ class VideoThumbnailPlayer(
 
 
     def _delete_wide_folder_preview_cache_files(self, folder_path):
-        """Remove cached wide-folder PNG previews for this folder (not recursive)."""
+        """Remove cached folder preview PNGs for this folder (not recursive)."""
         cache_dir_path, _ = get_cache_dir_path(folder_path, self.thumbnail_cache_path)
         _bn = os.path.basename(folder_path.rstrip(os.sep))
-        _prefix = f"!folder_wide_{_bn}_"
+        _prefixes = (f"!folder_wide_{_bn}_", f"!folder_preview_{_bn}_")
         if not os.path.isdir(cache_dir_path):
             return
         for fn in os.listdir(cache_dir_path):
-            if fn.startswith(_prefix) and fn.lower().endswith(".png"):
+            if fn.startswith(_prefixes) and fn.lower().endswith(".png"):
                 try:
                     os.remove(os.path.join(cache_dir_path, fn))
-                    logging.info(f"[Wide cache] Deleted cached wide thumbnail: {fn}")
+                    logging.info(f"[Folder preview cache] Deleted cached thumbnail: {fn}")
                 except OSError as e:
-                    logging.error(f"[Wide cache] Failed to delete cache {fn}: {e}")
+                    logging.error(f"[Folder preview cache] Failed to delete cache {fn}: {e}")
+        if hasattr(self, "_preview_status_cache"):
+            self._preview_status_cache.clear()
 
     def refresh_folder_wide_thumbnail(self, folder_path):
         """

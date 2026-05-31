@@ -7,6 +7,7 @@ Implements video/image/folder thumbnails, ffprobe/OpenCV helpers, and ``FileOper
 import os
 import sys
 import json
+import hashlib
 from PIL import Image, ImageTk, ImageOps, ImageDraw, UnidentifiedImageError
 from PIL import ImageColor
 import time
@@ -95,6 +96,8 @@ class FileOperations:
         cache_dir=None,
         database=None,
         for_green_folder_icon: bool = False,
+        source_file_paths=None,
+        pil_only_images: bool = False,
     ):
         """
         Generates a 2x2 preview grid for a folder icon.
@@ -108,13 +111,13 @@ class FileOperations:
             if cache_dir is None or cache_dir == "thumbnail_cache":
                 # Try to get path from main app to avoid relative path issues
                 cache_dir = getattr(self.parent, "thumbnail_cache_path", "thumbnail_cache")
-            # --- MAJOR CHANGE PART 1: Get file paths, not ready-made thumbnails ---
-            # Use the fast helper function to get a list of up to 4 media file paths.
-            # This replaces the call to the old, slow 'create_thumbnails_for_wide_folder'.
-            source_file_paths = self.parent._get_folder_content_for_preview(
-                folder_path=folder_path,
-                num_files=4
-            )
+            # Source discovery can be expensive on deep folders, so callers may pass
+            # pre-scanned paths from a low-priority worker.
+            if source_file_paths is None:
+                source_file_paths = self.parent._get_folder_content_for_preview(
+                    folder_path=folder_path,
+                    num_files=4
+                )
 
             if not source_file_paths:
                 logging.debug("No media files found to create preview grid for: %s", folder_path)
@@ -135,10 +138,25 @@ class FileOperations:
                         cache_enabled=cache_enabled, cache_dir=cache_dir
                     )
                 elif file_path.lower().endswith(self.IMAGE_FORMATS):
-                    thumb_obj = create_image_thumbnail(
-                        file_path, small_thumb_size,
-                        cache_enabled=cache_enabled, cache_dir=cache_dir, database=database
-                    )
+                    if pil_only_images:
+                        try:
+                            with Image.open(file_path) as image:
+                                image = ImageOps.exif_transpose(image).convert("RGBA")
+                                image.thumbnail(small_thumb_size, Image.LANCZOS)
+                                bg = Image.new("RGBA", small_thumb_size, (71, 71, 71, 255))
+                                x = (small_thumb_size[0] - image.size[0]) // 2
+                                y = (small_thumb_size[1] - image.size[1]) // 2
+                                bg.paste(image, (x, y), image)
+                                thumbnails.append(bg)
+                                continue
+                        except (UnidentifiedImageError, OSError) as e:
+                            logging.debug("[FolderPreview] Skip unreadable image %s: %s", file_path, e)
+                            continue
+                    else:
+                        thumb_obj = create_image_thumbnail(
+                            file_path, small_thumb_size,
+                            cache_enabled=cache_enabled, cache_dir=cache_dir, database=database
+                        )
                 
                 if thumb_obj:
                     thumbnails.append(thumb_obj._light_image) # We only need the raw PIL Image object
@@ -268,11 +286,99 @@ class FileOperations:
         except Exception as e:
             logging.error(f"❌ Error creating folder preview thumbnail: {e}", exc_info=True)
             return None        
+
+    def _folder_preview_cache_path(self, folder_path, thumbnail_size, cache_dir=None, for_green_folder_icon=False):
+        """Return the on-disk cache path for a standard folder preview overlay."""
+        cache_root = cache_dir
+        if cache_root is None or cache_root == "thumbnail_cache":
+            cache_root = getattr(self.parent, "thumbnail_cache_path", "thumbnail_cache")
+        cache_root = os.path.abspath(cache_root)
+        cache_dir_path, _ = get_cache_dir_path(folder_path, cache_root)
+        base = os.path.basename(os.path.normpath(folder_path)) or "root"
+        safe_base = "".join(c if c not in '<>:"/\\|?*' else "_" for c in base)
+        digest = hashlib.sha1(os.path.normcase(os.path.abspath(folder_path)).encode("utf-8", "ignore")).hexdigest()[:10]
+        mode = "green" if for_green_folder_icon else "standard"
+        w, h = int(thumbnail_size[0]), int(thumbnail_size[1])
+        filename = f"!folder_preview_{safe_base}_{w}x{h}_{mode}_{digest}.png"
+        return cache_dir_path, os.path.join(cache_dir_path, filename)
+
+    def folder_preview_cache_exists(self, folder_path, thumbnail_size, cache_dir=None, for_green_folder_icon=False):
+        """Fast existence check used before queueing background preview work."""
+        try:
+            _, cache_path = self._folder_preview_cache_path(
+                folder_path, thumbnail_size, cache_dir, for_green_folder_icon
+            )
+            return os.path.exists(cache_path)
+        except Exception:
+            return False
+
+    def load_folder_preview_cache(self, folder_path, thumbnail_size, cache_dir=None, for_green_folder_icon=False):
+        """Load a cached transparent folder preview overlay without scanning."""
+        try:
+            _, cache_path = self._folder_preview_cache_path(
+                folder_path, thumbnail_size, cache_dir, for_green_folder_icon
+            )
+            if not os.path.exists(cache_path):
+                return None
+            with Image.open(cache_path) as img:
+                loaded = img.convert("RGBA")
+                loaded.load()
+                return loaded
+        except Exception as e:
+            logging.debug("[FolderPreview] Cache load failed for %s: %s", folder_path, e)
+            return None
+
+    def create_cached_folder_preview(
+        self,
+        folder_path,
+        thumbnail_size,
+        source_file_paths,
+        cache_enabled=True,
+        cache_dir=None,
+        database=None,
+        for_green_folder_icon=False,
+    ):
+        """Generate and persist a folder preview overlay from pre-scanned media paths."""
+        if not source_file_paths:
+            logging.debug("[FolderPreview] create_cached skipped no sources path=%s", folder_path)
+            return None
+        try:
+            logging.debug(
+                "[FolderPreview] create_cached start path=%s sources=%d first=%s",
+                folder_path,
+                len(source_file_paths),
+                source_file_paths[0] if source_file_paths else "",
+            )
+            grid_img = self.create_folder_preview_thumbnail(
+                folder_path=folder_path,
+                thumbnail_size=thumbnail_size,
+                cache_enabled=cache_enabled,
+                cache_dir=cache_dir,
+                database=database,
+                for_green_folder_icon=for_green_folder_icon,
+                source_file_paths=source_file_paths,
+                pil_only_images=True,
+            )
+            if grid_img is None:
+                logging.debug("[FolderPreview] create_cached grid None path=%s", folder_path)
+                return None
+            cache_dir_path, cache_path = self._folder_preview_cache_path(
+                folder_path, thumbnail_size, cache_dir, for_green_folder_icon
+            )
+            os.makedirs(cache_dir_path, exist_ok=True)
+            tmp_path = cache_path + ".tmp"
+            grid_img.save(tmp_path, "PNG")
+            os.replace(tmp_path, cache_path)
+            logging.debug("[FolderPreview] create_cached saved path=%s cache=%s", folder_path, cache_path)
+            return cache_path
+        except Exception as e:
+            logging.debug("[FolderPreview] create_cached failed path=%s error=%s", folder_path, e, exc_info=True)
+            return None
         
     def create_folder_thumbnail(self, thumbnail_size, folder_path=None, cache_enabled=True, cache_dir="thumbnail_cache", database=None, is_cached=False):
         """
         Creates the folder icon with an optional preview grid.
-        OPTIMIZED: Uses memory cache for base icons + fast return if not scanned.
+        Uses memory cache for base icons and only overlays already-cached previews.
         """
         try:
             # 1. Load base icon (green for cache, yellow/standard for others)
@@ -285,13 +391,21 @@ class FileOperations:
             canvas = Image.new("RGBA", thumbnail_size, (0, 0, 0, 0))
             canvas.paste(folder_base, (0, 0), folder_base)
 
-            # 3. If folder is scanned (in DB), insert preview grid
-            if folder_path and os.path.isdir(folder_path) and is_cached:
-                grid_img = self.create_folder_preview_thumbnail(
+            # 3. Insert the preview grid only if a background worker already built it.
+            if folder_path and os.path.isdir(folder_path):
+                grid_img = self.load_folder_preview_cache(
                     folder_path=folder_path,
                     thumbnail_size=thumbnail_size,
+                    cache_dir=cache_dir,
                     for_green_folder_icon=is_cached,
                 )
+                if grid_img is None and is_cached:
+                    grid_img = self.load_folder_preview_cache(
+                        folder_path=folder_path,
+                        thumbnail_size=thumbnail_size,
+                        cache_dir=cache_dir,
+                        for_green_folder_icon=False,
+                    )
                 if grid_img:
                     # Overlay grid onto folder icon
                     canvas.paste(grid_img, (0, 0), grid_img)
