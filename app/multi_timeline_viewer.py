@@ -32,6 +32,7 @@ class MultiTimelineViewer(ctk.CTkFrame):
     BORDER_COLOR     = "#2a2a2a"
     BG_STRIP         = "#242424"
     BG_CANVAS        = "#1a1a1a"
+    ZOOM_TEXT_COLOR  = "#00bfff"
     THUMB_W_DEFAULT  = 100
 
     def __init__(self, master, timeline_manager, controller=None,
@@ -51,6 +52,8 @@ class MultiTimelineViewer(ctk.CTkFrame):
         self._v_visible          = False
         self._h_visible          = False
         self._user_zoomed        = False
+        self._zoom_overlay_visible = False
+        self._zoom_overlay_hide_job = None
 
         self.thumb_w = self.THUMB_W_DEFAULT
         self.thumb_h = 56
@@ -86,6 +89,16 @@ class MultiTimelineViewer(ctk.CTkFrame):
         )
         self._v_canvas.grid(row=0, column=0, sticky="nsew")
 
+        self._zoom_overlay = tk.Label(
+            self._v_canvas,
+            text=self._zoom_percent_text(),
+            bg=self.BG_CANVAS,
+            fg=self.ZOOM_TEXT_COLOR,
+            font=("Segoe UI", 10, "bold"),
+            padx=3,
+            pady=1,
+        )
+
         # Vnitřní frame s obsahem (stripy)
         self._inner = tk.Frame(self._v_canvas, bg=self.BG_CANVAS)
         self._inner_id = self._v_canvas.create_window(0, 0, anchor="nw", window=self._inner)
@@ -93,7 +106,7 @@ class MultiTimelineViewer(ctk.CTkFrame):
         self._inner.bind("<Configure>", self._on_inner_configure)
         self._v_canvas.bind("<Configure>", self._on_canvas_configure)
 
-        for w in (self, self._v_canvas, self._inner):
+        for w in (self, self._v_canvas, self._inner, self._zoom_overlay):
             w.bind("<MouseWheel>",       self._on_vscroll)
             w.bind("<Shift-MouseWheel>", self._on_resize_scroll)
             w.bind("<Button-4>",         self._on_vscroll)
@@ -105,6 +118,7 @@ class MultiTimelineViewer(ctk.CTkFrame):
     def _on_canvas_configure(self, event):
         self._v_canvas.itemconfig(self._inner_id, width=event.width)
         self._refresh_vscroll_region()
+        self._update_zoom_overlay()
 
     def _on_vscroll(self, event):
         if not self._v_scroll_needed():
@@ -126,15 +140,18 @@ class MultiTimelineViewer(ctk.CTkFrame):
     def _v_canvas_yview(self, *args):
         self._v_canvas.yview(*args)
         self._update_vscroll_visibility()
+        self._update_zoom_overlay()
 
     def _on_vscroll_changed(self, first, last):
         self._v_scroll.set(first, last)
         self._update_vscroll_visibility()
+        self._update_zoom_overlay()
 
     def _refresh_vscroll_region(self):
         bbox = self._v_canvas.bbox("all") or (0, 0, 1, 1)
         self._v_canvas.configure(scrollregion=bbox)
         self.after_idle(self._update_vscroll_visibility)
+        self.after_idle(self._update_zoom_overlay)
 
     def _v_scroll_needed(self):
         bbox = self._v_canvas.bbox("all")
@@ -209,6 +226,37 @@ class MultiTimelineViewer(ctk.CTkFrame):
             self._h_scroll.grid_remove()
             self._h_visible = False
 
+    def _zoom_percent_text(self):
+        return f"Zoom: {int(round((self.thumb_w / self.THUMB_W_DEFAULT) * 100))}%"
+
+    def _update_zoom_overlay(self):
+        if not self.winfo_exists():
+            return
+        if hasattr(self, "_zoom_overlay") and self._zoom_overlay.winfo_exists():
+            self._zoom_overlay.configure(text=self._zoom_percent_text())
+            if self._zoom_overlay_visible:
+                self._zoom_overlay.place(relx=1.0, x=-12, y=10, anchor="ne")
+                self._zoom_overlay.lift()
+
+    def _show_zoom_overlay_temporarily(self):
+        if not hasattr(self, "_zoom_overlay") or not self._zoom_overlay.winfo_exists():
+            return
+        if self._zoom_overlay_hide_job is not None:
+            try:
+                self.after_cancel(self._zoom_overlay_hide_job)
+            except Exception:
+                pass
+            self._zoom_overlay_hide_job = None
+        self._zoom_overlay_visible = True
+        self._update_zoom_overlay()
+        self._zoom_overlay_hide_job = self.after(900, self._hide_zoom_overlay)
+
+    def _hide_zoom_overlay(self):
+        self._zoom_overlay_hide_job = None
+        self._zoom_overlay_visible = False
+        if hasattr(self, "_zoom_overlay") and self._zoom_overlay.winfo_exists():
+            self._zoom_overlay.place_forget()
+
     # ------------------------------------------------------------------ #
     #  RESIZE (Shift+Scroll)                                               #
     # ------------------------------------------------------------------ #
@@ -222,6 +270,7 @@ class MultiTimelineViewer(ctk.CTkFrame):
         self._user_zoomed = True   # uživatel explicitně zoomoval → auto-fit se přeskočí
         self.thumb_w = new_w
         self.thumb_h = new_h
+        self._show_zoom_overlay_temporarily()
         if self._current_video_paths:
             self.load_videos(self._current_video_paths)
         self.after(120, self._update_hscroll_visibility)
@@ -242,6 +291,7 @@ class MultiTimelineViewer(ctk.CTkFrame):
             new_w = max(60, (avail_w - 20) // num_thumbs)
             self.thumb_w = new_w
             self.thumb_h = new_w * 56 // 100
+            self._update_zoom_overlay()
 
         self._current_video_paths = list(video_paths)
         self._selected_paths.clear()
@@ -254,6 +304,7 @@ class MultiTimelineViewer(ctk.CTkFrame):
         self.image_references.clear()
         self._v_canvas.yview_moveto(0)
         self._refresh_vscroll_region()
+        self._update_zoom_overlay()
 
         self._current_load_id += 1
         load_id = self._current_load_id

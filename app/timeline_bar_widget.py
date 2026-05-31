@@ -1092,8 +1092,17 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.info_label = ctk.CTkLabel(self.toolbar_frame, text="Loading info...", anchor="w", font=toolbar_font)
         self.info_label.pack(side="left", fill="x", expand=True, padx=10, pady=(0, 2))
 
+        self.zoom_label = ctk.CTkLabel(
+            self.toolbar_frame,
+            text=self._zoom_percent_text(),
+            anchor="e",
+            font=toolbar_font,
+            text_color="#00bfff",
+        )
+        self.zoom_label.pack(side="right", padx=(6, 10), pady=(0, 2))
+
         self.selection_label = ctk.CTkLabel(self.toolbar_frame, text="", anchor="e", font=toolbar_font, text_color="#FFA500")
-        self.selection_label.pack(side="right", padx=10, pady=(0, 2))
+        self.selection_label.pack(side="right", padx=(10, 6), pady=(0, 2))
 
         # Timeline canvas + vertical scroll when staggered bookmarks exceed viewport height.
         self.canvas_frame = tk.Frame(self, bg="#222222")
@@ -1283,6 +1292,13 @@ class TimelineBarWidget(ctk.CTkFrame):
    
             
             
+    def _zoom_percent_text(self):
+            return f"Zoom: {int(round(self.zoom_factor * 100))}%"
+
+    def _update_zoom_label(self):
+            if hasattr(self, "zoom_label"):
+                self.zoom_label.configure(text=self._zoom_percent_text())
+
     def update_info_toolbar(self):
             """
             Updates the top info toolbar with the current video filename, format, 
@@ -1290,6 +1306,7 @@ class TimelineBarWidget(ctk.CTkFrame):
             """
             if not hasattr(self, 'info_label') or not hasattr(self, 'selection_label'):
                 return
+            self._update_zoom_label()
 
             if not self.video_path:
                 self.info_label.configure(text="No video selected")
@@ -2222,10 +2239,12 @@ class TimelineBarWidget(ctk.CTkFrame):
         else:
             self.zoom_factor = max(self.zoom_factor / 1.2, self.min_zoom)
         logging.info(f"[DEBUG] Zoom changed to {self.zoom_factor:.2f}")
+        self._update_zoom_label()
         self.redraw_timeline()
 
     def reset_zoom(self):
         self.zoom_factor = 1.0
+        self._update_zoom_label()
         self.redraw_timeline()
 
     def toggle_marker_type(self, marker_type):

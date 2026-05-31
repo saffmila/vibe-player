@@ -82,6 +82,7 @@ class ImageViewerLegacy:
         self.bg_index = 0
         self.show_info = True # Defaultně zapnuto
         self.info_text_id = None
+        self.zoom_text_id = None
         self.minimap_max_size = 150
         self.minimap_padding = 12
 
@@ -209,6 +210,7 @@ class ImageViewerLegacy:
     def _refresh_overlays(self):
         self.draw_info_hud()
         self.draw_minimap()
+        self.draw_zoom_overlay()
 
     def _on_canvas_xscroll(self, *args):
         self.canvas.xview(*args)
@@ -537,7 +539,6 @@ class ImageViewerLegacy:
             return
 
         # Získání dat
-        zoom_pct = int(self.zoom_factor * 100)
         w, h = self.original_image.size
         
         # Zkusíme zjistit index souboru (např. 5/120)
@@ -553,7 +554,7 @@ class ImageViewerLegacy:
         except:
             pass
 
-        text = f"{index_str}{self.image_name}  |  {w}x{h} px  |  {zoom_pct}%"
+        text = f"{index_str}{self.image_name}  |  {w}x{h} px"
         
         # Barva textu podle pozadí (aby byl vždy čitelný)
         text_color = "black" if self.bg_colors[self.bg_index] == "white" else "white"
@@ -573,6 +574,45 @@ class ImageViewerLegacy:
         
         # Zajistit, že HUD je vždy nahoře
         self.canvas.tag_raise("hud")
+
+    def _zoom_percent_text(self):
+        return f"{int(round(self.zoom_factor * 100))}%"
+
+    def draw_zoom_overlay(self):
+        """Draw a compact zoom indicator above the bottom-right minimap/widget."""
+        self.canvas.delete("zoom_hud")
+        self.zoom_text_id = None
+
+        canvas_w = self.canvas.winfo_width()
+        canvas_h = self.canvas.winfo_height()
+        if canvas_w <= 1 or canvas_h <= 1:
+            return
+
+        y_screen = canvas_h - self.minimap_padding
+        image_bbox = self.canvas.bbox(self.canvas_image)
+        if image_bbox:
+            img_x1, img_y1, img_x2, img_y2 = image_bbox
+            img_w = img_x2 - img_x1
+            img_h = img_y2 - img_y1
+            if img_w > canvas_w or img_h > canvas_h:
+                mm_scale = self.minimap_max_size / max(img_w, img_h)
+                mm_h = max(4, int(img_h * mm_scale))
+                y_screen = canvas_h - self.minimap_padding - mm_h - 6
+
+        cx = self.canvas.canvasx(canvas_w - 12)
+        cy = self.canvas.canvasy(y_screen)
+        text = self._zoom_percent_text()
+        font = ("Segoe UI", 10, "bold")
+
+        self.canvas.create_text(
+            cx + 1, cy + 1, text=text, anchor="se",
+            fill="black", font=font, tags="zoom_hud"
+        )
+        self.zoom_text_id = self.canvas.create_text(
+            cx, cy, text=text, anchor="se",
+            fill="white", font=font, tags="zoom_hud"
+        )
+        self.canvas.tag_raise("zoom_hud")
 
     def draw_minimap(self):
         """Draw bottom-right viewport overview for zoomed/panned legacy Canvas viewer."""
@@ -976,6 +1016,7 @@ class ImageViewerGPU:
     ]
     _BG_HEX = ["black", "#1A1C1E", "white"]
     _HUD_ON_SURFACE = (176, 179, 184, 230)  # #B0B3B8
+    _ZOOM_ON_WIDGET = (240, 240, 240, 235)
 
     # ------------------------------------------------------------------
     # Construction  (main / Tkinter thread — non-blocking)
@@ -1039,6 +1080,8 @@ class ImageViewerGPU:
         self._sprite     = None
         self._hud_label  = None
         self._hud_shadow = None
+        self._zoom_label = None
+        self._zoom_shadow = None
         self._keys       = None
         self._mm_bg_shape = None   # minimap: gray background rect
         self._mm_vp_shape = None   # minimap: viewport indicator (box outline)
@@ -1173,6 +1216,20 @@ class ImageViewerGPU:
             '', font_name='Segoe UI', font_size=10, weight='bold',
             x=10, y=win_h - 20,
             color=self._HUD_ON_SURFACE,
+            batch=self._batch, group=hud_group,
+        )
+        self._zoom_shadow = pyglet.text.Label(
+            '', font_name='Segoe UI', font_size=10, weight='bold',
+            x=win_w - 11, y=win_h - 21,
+            anchor_x='right',
+            color=(0, 0, 0, 200),
+            batch=self._batch, group=hud_group,
+        )
+        self._zoom_label = pyglet.text.Label(
+            '', font_name='Segoe UI', font_size=10, weight='bold',
+            x=win_w - 12, y=20,
+            anchor_x='right',
+            color=self._ZOOM_ON_WIDGET,
             batch=self._batch, group=hud_group,
         )
 
@@ -1330,8 +1387,24 @@ class ImageViewerGPU:
         )
         self._hud_label.y  = self.window.height - 20
         self._hud_shadow.y = self.window.height - 21
+        zoom_x, zoom_y = self._zoom_overlay_position()
+        self._zoom_label.x = zoom_x
+        self._zoom_label.y = zoom_y
+        self._zoom_shadow.x = zoom_x + 1
+        self._zoom_shadow.y = zoom_y - 1
         self._batch.draw()
         self._draw_minimap()
+
+    def _zoom_overlay_position(self):
+        win_w = self.window.width
+        win_h = self.window.height
+        y = 20
+        if self._img_w > 0 and self._img_h > 0:
+            if self._img_w * self.zoom > win_w or self._img_h * self.zoom > win_h:
+                mm_scale = 150 / max(self._img_w, self._img_h)
+                mm_h = max(4, int(self._img_h * mm_scale))
+                y = 12 + mm_h + 8
+        return win_w - 12, y
 
     def _on_resize(self, width, height):
         from pyglet.gl import glViewport
@@ -1683,14 +1756,19 @@ class ImageViewerGPU:
     def _update_hud(self):
         if self._hud_label is None:
             return
+        zoom_text = f"{int(round(self.zoom * 100))}%"
+        if self._zoom_label is not None:
+            self._zoom_label.text = zoom_text
+            self._zoom_shadow.text = zoom_text
+            self._zoom_label.color = self._ZOOM_ON_WIDGET
+            self._zoom_shadow.color = (0, 0, 0, 200)
         if not self.show_info:
             self._hud_label.text  = ''
             self._hud_shadow.text = ''
             return
-        zoom_pct = int(self.zoom * 100)
         text = (
             f"{self._get_hud_index_str()}{self.image_name}"
-            f"  |  {self._img_w}×{self._img_h} px  |  {zoom_pct}%"
+            f"  |  {self._img_w}×{self._img_h} px"
         )
         self._hud_label.text  = text
         self._hud_shadow.text = text
