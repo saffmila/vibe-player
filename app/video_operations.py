@@ -187,8 +187,8 @@ class VideoPlayer:
         self._cleaning_up = False
         self._cleanup_done = False
 
-        self.global_listener = mouse.Listener(on_click=self._on_global_click)
-        self.global_listener.start()
+        self.global_listener = None
+        self._start_global_mouse_listener_async()
         try:
             self._pynput_pump_job = self.video_window.after(25, self._pynput_queue_pump)
         except Exception:
@@ -2780,6 +2780,31 @@ class VideoPlayer:
                 self._pynput_queue.get_nowait()
         except queue.Empty:
             pass
+
+    def _start_global_mouse_listener_async(self) -> None:
+        """Start pynput off the Tk thread; Windows hooks can stall during rapid player reopen."""
+        def _run() -> None:
+            if getattr(self, "_pynput_bridge_dead", True) or getattr(self, "_cleaning_up", False):
+                return
+            try:
+                listener = mouse.Listener(on_click=self._on_global_click)
+                listener.start()
+                self.global_listener = listener
+                logging.info("[pynput bridge] global mouse listener started.")
+                if getattr(self, "_pynput_bridge_dead", True) or getattr(self, "_cleaning_up", False):
+                    try:
+                        listener.stop()
+                    except Exception:
+                        pass
+                    self.global_listener = None
+            except Exception as e:
+                logging.info("[pynput bridge] global mouse listener start failed: %s", e)
+
+        threading.Thread(
+            target=_run,
+            name="VideoPlayerPynputStart",
+            daemon=True,
+        ).start()
 
     def _menu_popup_xy(self, x_root: int, y_root: int) -> tuple[int, int]:
         """Keep popup inside the player toplevel (avoids multi-monitor geometry glitches)."""

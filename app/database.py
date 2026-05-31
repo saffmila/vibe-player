@@ -78,6 +78,70 @@ class Database:
             self._entry_cache[norm] = self.table.find_one(file_path=norm)
         return self._entry_cache[norm]
 
+    def get_entries_bulk(self, file_paths) -> dict[str, dict | None]:
+        """Return cached DB rows for many paths with a small number of SQL queries."""
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for file_path in file_paths:
+            if not file_path:
+                continue
+            try:
+                norm = self.normalize_path(file_path)
+            except Exception:
+                continue
+            if norm in seen:
+                continue
+            seen.add(norm)
+            normalized.append(norm)
+
+        result: dict[str, dict | None] = {}
+        missing: list[str] = []
+        for norm in normalized:
+            if norm in self._entry_cache:
+                result[norm] = self._entry_cache[norm]
+            else:
+                missing.append(norm)
+
+        if not missing:
+            return result
+
+        if len(self._entry_cache) + len(missing) >= _ENTRY_CACHE_MAXSIZE:
+            self._entry_cache.clear()
+            result.clear()
+            missing = normalized
+            logging.debug(f"Entry cache evicted before bulk load (reached {_ENTRY_CACHE_MAXSIZE} entries).")
+
+        chunk_size = 500
+        found: set[str] = set()
+        for start in range(0, len(missing), chunk_size):
+            chunk = missing[start:start + chunk_size]
+            params = {f"p{i}": path for i, path in enumerate(chunk)}
+            placeholders = ", ".join(f":p{i}" for i in range(len(chunk)))
+            query = f"SELECT * FROM files WHERE file_path IN ({placeholders})"
+            try:
+                rows = self.db.query(query, **params)
+                for row in rows:
+                    row_dict = dict(row)
+                    row_path = row_dict.get("file_path")
+                    if not row_path:
+                        continue
+                    found.add(row_path)
+                    self._entry_cache[row_path] = row_dict
+                    result[row_path] = row_dict
+            except Exception as e:
+                logging.error(f"Bulk entry load failed: {e}")
+                for path in chunk:
+                    result[path] = self._get_cached_entry(path)
+                    found.add(path)
+
+        for norm in missing:
+            if norm in found:
+                continue
+            self._entry_cache[norm] = None
+            result[norm] = None
+
+        return result
+
     def _invalidate_cache(self, file_path: str) -> None:
         """Remove a single path from the row cache so next read hits DB fresh."""
         self._entry_cache.pop(self.normalize_path(file_path), None)

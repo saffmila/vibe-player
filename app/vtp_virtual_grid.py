@@ -80,6 +80,12 @@ class VtpVirtualGridMixin:
         self._vg_gen_thumbnail_time = None
         self._vg_y_offset = 0
         self._vg_dynamic_label_h = 48
+        self._vg_data_index_by_path: dict[str, int] = {}
+        self._vg_visible_std_slots_by_path: dict[str, dict] = {}
+        self._vg_visible_wide_slots_by_path: dict[str, dict] = {}
+        self._vg_label_font_cache: dict[int, tkfont.Font | None] = {}
+        self._vg_label_measure_cache: dict[tuple, int] = {}
+        self._vg_info_state_key: tuple = ()
 
         # ------------------------------------------------------------------
         # Wide folder tuning (easy tweaking)
@@ -855,12 +861,14 @@ class VtpVirtualGridMixin:
                             slot["_last_y"] = abs_y
                     else:
                         if slot["data_idx"] != -1:
+                            self._vg_forget_slot_path(slot, self._vg_visible_wide_slots_by_path)
                             self.canvas.coords(slot["win_id"], 0, _OFFSCREEN_Y)
                             slot["data_idx"] = -1
                             slot["_last_y"] = _OFFSCREEN_Y
 
         for i in range(self._vg_wide_pool_size):
             if i not in used_wide_slots and self._vg_wide_pool[i]["data_idx"] != -1:
+                self._vg_forget_slot_path(self._vg_wide_pool[i], self._vg_visible_wide_slots_by_path)
                 self.canvas.coords(self._vg_wide_pool[i]["win_id"], 0, _OFFSCREEN_Y)
                 self._vg_wide_pool[i]["data_idx"] = -1
                 self._vg_wide_pool[i]["_last_y"] = _OFFSCREEN_Y
@@ -904,12 +912,14 @@ class VtpVirtualGridMixin:
                         slot["_last_y"] = abs_y
                 else:
                     if slot["data_idx"] != -1:
+                        self._vg_forget_slot_path(slot, self._vg_visible_std_slots_by_path)
                         self.canvas.coords(slot["win_id"], 0, _OFFSCREEN_Y)
                         slot["data_idx"] = -1
                         slot["_last_y"] = _OFFSCREEN_Y
 
         for i in range(self._vg_std_pool_size):
             if i not in used_std_slots and self._vg_std_pool[i]["data_idx"] != -1:
+                self._vg_forget_slot_path(self._vg_std_pool[i], self._vg_visible_std_slots_by_path)
                 self.canvas.coords(self._vg_std_pool[i]["win_id"], 0, _OFFSCREEN_Y)
                 self._vg_std_pool[i]["data_idx"] = -1
                 self._vg_std_pool[i]["_last_y"] = _OFFSCREEN_Y
@@ -919,6 +929,118 @@ class VtpVirtualGridMixin:
     # ------------------------------------------------------------------
     # 6b. Standard slot labels (multi-line colors + live keyword updates)
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _vg_norm_path(file_path: str) -> str:
+        return os.path.normcase(os.path.normpath(file_path or ""))
+
+    def _vg_file_info_state_key(self) -> tuple:
+        keys = ("name", "path", "file_size", "date_time", "dimensions", "keywords")
+        state = []
+        vars_map = getattr(self, "file_info_vars", {})
+        for key in keys:
+            try:
+                state.append((key, bool(vars_map.get(key).get())))
+            except Exception:
+                state.append((key, False))
+        return tuple(state)
+
+    def _vg_get_label_font(self, font_size: int) -> tkfont.Font | None:
+        font_size = int(font_size)
+        if font_size not in self._vg_label_font_cache:
+            try:
+                self._vg_label_font_cache[font_size] = tkfont.Font(font=("Helvetica", font_size))
+            except Exception:
+                self._vg_label_font_cache[font_size] = None
+        return self._vg_label_font_cache[font_size]
+
+    def _vg_get_item_info_parts(self, item: dict) -> list[tuple[str, str]]:
+        state_key = self._vg_file_info_state_key()
+        if item.get("_vg_info_key") == state_key and "_vg_info_parts" in item:
+            return item.get("_vg_info_parts") or []
+        try:
+            parts = self.joininfotexts(
+                item["path"],
+                item["name"],
+                db_entry=item.get("_vg_db_entry"),
+            )
+        except Exception:
+            parts = []
+        item["_vg_info_key"] = state_key
+        item["_vg_info_parts"] = parts
+        return parts
+
+    def _vg_index_data(self) -> None:
+        self._vg_data_index_by_path = {}
+        for idx, item in enumerate(self._vg_data):
+            try:
+                self._vg_data_index_by_path[self._vg_norm_path(item["path"])] = idx
+            except Exception:
+                continue
+
+    def _vg_forget_slot_path(self, slot: dict, slot_map: dict[str, dict]) -> None:
+        old_idx = int(slot.get("data_idx", -1))
+        if old_idx < 0 or old_idx >= len(self._vg_data):
+            return
+        try:
+            old_key = self._vg_norm_path(self._vg_data[old_idx]["path"])
+        except Exception:
+            return
+        if slot_map.get(old_key) is slot:
+            slot_map.pop(old_key, None)
+
+    def _vg_get_item_photo(self, item: dict, file_path: str, force_rebuild: bool = False):
+        photo = item.get("_photo")
+        if photo is not None and not force_rebuild:
+            return photo
+        if not self.memory_cache:
+            return None
+        cached = thumbnail_cache.get(file_path, memory_cache=self.memory_cache)
+        if cached is None:
+            return None
+        source = getattr(cached, "_light_image", None)
+        if source is None:
+            return None
+        target_size = tuple(self.thumbnail_size)
+        cache_key = (id(source), getattr(source, "size", None), target_size)
+        if item.get("_photo_cache_key") == cache_key and item.get("_photo") is not None:
+            return item["_photo"]
+        if getattr(source, "size", None) == target_size:
+            resized = source
+        else:
+            resized = ImageOps.contain(source, target_size)
+        photo = ImageTk.PhotoImage(resized)
+        item["_photo"] = photo
+        item["_photo_cache_key"] = cache_key
+        return photo
+
+    def _vg_warm_item_metadata(self) -> None:
+        paths = [item.get("path") for item in self._vg_data if item.get("path")]
+        entries = {}
+        try:
+            getter = getattr(self.database, "get_entries_bulk", None)
+            if callable(getter):
+                entries = getter(paths)
+        except Exception as e:
+            logging.debug("[VGrid] bulk metadata load failed: %s", e)
+            entries = {}
+
+        self._vg_info_state_key = self._vg_file_info_state_key()
+        for item in self._vg_data:
+            fp = item.get("path")
+            if not fp:
+                continue
+            entry = entries.get(self.database.normalize_path(fp)) if entries else None
+            item["_vg_db_entry"] = entry
+            try:
+                item["_rating"] = int(entry.get("rating") or 0) if entry else 0
+            except Exception:
+                item["_rating"] = 0
+            try:
+                item["_vg_info_parts"] = self.joininfotexts(fp, item["name"], db_entry=entry)
+            except Exception:
+                item["_vg_info_parts"] = []
+            item["_vg_info_key"] = self._vg_info_state_key
 
     @staticmethod
     def _vg_wrap_text_lines(text: str, font_obj: tkfont.Font, wrap_px: int) -> list[str]:
@@ -987,7 +1109,14 @@ class VtpVirtualGridMixin:
         kept[-1] = (last + ell) if last else ell
         return "\n".join(kept)
 
-    def _vg_measure_item_label_height_px(self, fp: str, name: str, is_folder: bool, thumb_w: int) -> int:
+    def _vg_measure_item_label_height_px(
+        self,
+        fp: str,
+        name: str,
+        is_folder: bool,
+        thumb_w: int,
+        parts: list[tuple[str, str]] | None = None,
+    ) -> int:
         """Estimate stacked caption height using actual Tk font metrics."""
         top, bot = getattr(self, "vg_std_label_row_pady", (9, 3))
         pad_block = top + bot
@@ -999,14 +1128,30 @@ class VtpVirtualGridMixin:
         except Exception:
             fs = 11
         wrap_w = max(8, int(thumb_w))
-        try:
-            lbl_font = tkfont.Font(font=("Helvetica", fs))
-        except Exception:
-            lbl_font = None
-        try:
-            parts = self.joininfotexts(fp, name)
-        except Exception:
-            parts = []
+        lbl_font = self._vg_get_label_font(fs)
+        if parts is None:
+            try:
+                data_idx = self._vg_data_index_by_path.get(self._vg_norm_path(fp), -1)
+                if 0 <= data_idx < len(self._vg_data):
+                    parts = self._vg_get_item_info_parts(self._vg_data[data_idx])
+                else:
+                    parts = self.joininfotexts(fp, name)
+            except Exception:
+                parts = []
+        label_texts = tuple(text for text, _ in (parts or [])) or (name,)
+        cache_key = (
+            label_texts,
+            fs,
+            wrap_w,
+            pad_block,
+            fudge,
+            line_reserve,
+            stack_margin,
+            self._vg_file_info_state_key(),
+        )
+        cached_h = self._vg_label_measure_cache.get(cache_key)
+        if cached_h is not None:
+            return cached_h
         # Adaptive cap keeps last info rows visible when many metadata lines are enabled.
         cap = self._vg_effective_label_cap_px(thumb_w, info_rows=max(1, len(parts)))
         if not parts:
@@ -1014,7 +1159,9 @@ class VtpVirtualGridMixin:
             line_h = max(1, int(lbl_font.metrics("linespace"))) if lbl_font else max(17, int(round(fs * 1.68)))
             line_count = max(1, display.count("\n") + 1)
             text_h = line_count * (line_h + line_reserve)
-            return min(cap, max(34, text_h + pad_block + fudge))
+            measured = min(cap, max(34, text_h + pad_block + fudge))
+            self._vg_label_measure_cache[cache_key] = measured
+            return measured
         total = 0
         line_h = max(1, int(lbl_font.metrics("linespace"))) if lbl_font else max(17, int(round(fs * 1.68)))
         for idx, (text, _) in enumerate(parts):
@@ -1024,7 +1171,9 @@ class VtpVirtualGridMixin:
             text_h = line_count * (line_h + line_reserve)
             total += text_h + pad_block
         stack_extra = max(0, len(parts) - 1) * stack_margin
-        return min(cap, max(34, total + fudge + stack_extra))
+        measured = min(cap, max(34, total + fudge + stack_extra))
+        self._vg_label_measure_cache[cache_key] = measured
+        return measured
 
     def _vg_effective_label_cap_px(self, thumb_w: int, info_rows: int = 1) -> int:
         """
@@ -1065,14 +1214,16 @@ class VtpVirtualGridMixin:
             self._vg_safe_color(self.labelBGColor),
         )
         thumb_w = self.thumbnail_size[0]
-        lbl_font = ("Helvetica", self._get_effective_thumb_font_size())
+        font_size = self._get_effective_thumb_font_size()
+        lbl_font = ("Helvetica", font_size)
         top, bot = getattr(self, "vg_std_label_row_pady", (9, 3))
+        measure_font = self._vg_get_label_font(int(font_size))
         try:
-            measure_font = tkfont.Font(font=lbl_font)
-        except Exception:
-            measure_font = None
-        try:
-            parts = self.joininfotexts(file_path, file_name)
+            data_idx = self._vg_data_index_by_path.get(self._vg_norm_path(file_path), -1)
+            if 0 <= data_idx < len(self._vg_data):
+                parts = self._vg_get_item_info_parts(self._vg_data[data_idx])
+            else:
+                parts = self.joininfotexts(file_path, file_name)
         except Exception:
             parts = []
         if not parts:
@@ -1100,18 +1251,25 @@ class VtpVirtualGridMixin:
         """Rebuild under-thumb captions for one file (e.g. after keyword edit). Virtual grid only."""
         if not getattr(self, "_vg_active", False) or not self._vg_data:
             return
-        norm = os.path.normcase(os.path.normpath(file_path))
-        data_idx = -1
-        for i, item in enumerate(self._vg_data):
-            if os.path.normcase(os.path.normpath(item["path"])) == norm:
-                data_idx = i
-                break
+        norm = self._vg_norm_path(file_path)
+        data_idx = self._vg_data_index_by_path.get(norm, -1)
         if data_idx < 0:
             return
         item = self._vg_data[data_idx]
+        item.pop("_vg_info_parts", None)
+        item.pop("_vg_info_key", None)
+        try:
+            item["_vg_db_entry"] = self.database.get_entry(item["path"])
+        except Exception:
+            item["_vg_db_entry"] = None
+        self._vg_label_measure_cache.clear()
         thumb_w = self.thumbnail_size[0]
         item["_vg_label_h_px"] = self._vg_measure_item_label_height_px(
-            item["path"], item["name"], item.get("is_folder", False), thumb_w
+            item["path"],
+            item["name"],
+            item.get("is_folder", False),
+            thumb_w,
+            parts=self._vg_get_item_info_parts(item),
         )
         for slot in self._vg_std_pool:
             if slot["data_idx"] == data_idx:
@@ -1135,7 +1293,7 @@ class VtpVirtualGridMixin:
         max_rows = 1
         try:
             for it in self._vg_data:
-                parts = self.joininfotexts(it["path"], it["name"])
+                parts = self._vg_get_item_info_parts(it)
                 max_rows = max(max_rows, max(1, len(parts) if parts else 1))
         except Exception:
             pass
@@ -1145,7 +1303,11 @@ class VtpVirtualGridMixin:
             h = it.get("_vg_label_h_px")
             if h is None:
                 h = self._vg_measure_item_label_height_px(
-                    it["path"], it["name"], it.get("is_folder", False), thumb_w
+                    it["path"],
+                    it["name"],
+                    it.get("is_folder", False),
+                    thumb_w,
+                    parts=self._vg_get_item_info_parts(it),
                 )
                 it["_vg_label_h_px"] = h
             max_h = max(max_h, int(h))
@@ -1169,23 +1331,25 @@ class VtpVirtualGridMixin:
 
     def _vg_bind_slot(self, slot: dict, data_idx: int):
         if slot["data_idx"] == data_idx:
+            try:
+                self._vg_visible_std_slots_by_path[
+                    self._vg_norm_path(self._vg_data[data_idx]["path"])
+                ] = slot
+            except Exception:
+                pass
             return
+        self._vg_forget_slot_path(slot, self._vg_visible_std_slots_by_path)
         slot["data_idx"] = data_idx
         item = self._vg_data[data_idx]
         file_path, file_name = item["path"], item["name"]
         is_folder = item.get("is_folder", False)
+        self._vg_visible_std_slots_by_path[self._vg_norm_path(file_path)] = slot
 
         canvas = slot["canvas"]
         canvas.file_path = file_path
         canvas.is_folder = is_folder
 
-        photo = item.get("_photo")
-        if photo is None and self.memory_cache:
-            cached = thumbnail_cache.get(file_path, memory_cache=self.memory_cache)
-            if cached is not None:
-                resized = ImageOps.contain(cached._light_image, self.thumbnail_size)
-                photo = ImageTk.PhotoImage(resized)
-                item["_photo"] = photo
+        photo = self._vg_get_item_photo(item, file_path)
         if photo:
             canvas.itemconfig("thumbnail", image=photo)
             canvas.image = photo
@@ -1325,10 +1489,13 @@ class VtpVirtualGridMixin:
             and not geom_changed
             and slot.get("_wide_photo_key") is not None
         ):
+            self._vg_visible_wide_slots_by_path[self._vg_norm_path(file_path)] = slot
             return
 
+        self._vg_forget_slot_path(slot, self._vg_visible_wide_slots_by_path)
         slot["data_idx"] = data_idx
         slot["_vg_wide_slot_path"] = file_path
+        self._vg_visible_wide_slots_by_path[self._vg_norm_path(file_path)] = slot
 
         has_media = item.get("_has_media", False)
 
@@ -1799,34 +1966,37 @@ class VtpVirtualGridMixin:
     def _vg_apply_generated_thumb(self, file_path: str):
         if not self._vg_active:
             return
-        for item in self._vg_data:
-            if item["path"] == file_path:
-                cached = thumbnail_cache.get(file_path, memory_cache=self.memory_cache)
-                if cached:
-                    resized = ImageOps.contain(cached._light_image, self.thumbnail_size)
-                    item["_photo"] = ImageTk.PhotoImage(resized)
-                break
+        norm = self._vg_norm_path(file_path)
+        data_idx = self._vg_data_index_by_path.get(norm, -1)
+        if data_idx < 0:
+            for idx, item in enumerate(self._vg_data):
+                if self._vg_norm_path(item.get("path", "")) == norm:
+                    data_idx = idx
+                    self._vg_data_index_by_path[norm] = idx
+                    break
+        if data_idx < 0 or data_idx >= len(self._vg_data):
+            return
 
-        for slot in self._vg_std_pool:
-            idx = slot["data_idx"]
-            if idx >= 0 and idx < len(self._vg_data) and self._vg_data[idx]["path"] == file_path:
-                photo = self._vg_data[idx].get("_photo")
-                if photo:
-                    slot["canvas"].itemconfig("thumbnail", image=photo)
-                    slot["canvas"].image = photo
-                    slot["photo"] = photo
-                return
-        for slot in self._vg_wide_pool:
-            idx = slot["data_idx"]
-            if idx >= 0 and idx < len(self._vg_data) and self._vg_data[idx]["path"] == file_path:
-                # Re-render wide preview using the same centering/padding/rounded logic
-                # as the normal binder (fixes small/un-centered/sharp corners on startup).
-                slot.pop("_wide_photo_key", None)
-                try:
-                    self._vg_bind_wide_slot(slot, idx)
-                except Exception:
-                    pass
-                return
+        item = self._vg_data[data_idx]
+        photo = self._vg_get_item_photo(item, item["path"], force_rebuild=True)
+
+        slot = self._vg_visible_std_slots_by_path.get(norm)
+        if slot and slot.get("data_idx") == data_idx:
+            if photo:
+                slot["canvas"].itemconfig("thumbnail", image=photo)
+                slot["canvas"].image = photo
+                slot["photo"] = photo
+            return
+
+        slot = self._vg_visible_wide_slots_by_path.get(norm)
+        if slot and slot.get("data_idx") == data_idx:
+            # Re-render wide preview using the same centering/padding/rounded logic
+            # as the normal binder (fixes small/un-centered/sharp corners on startup).
+            slot.pop("_wide_photo_key", None)
+            try:
+                self._vg_bind_wide_slot(slot, data_idx)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # 11. Activation / deactivation
@@ -1836,6 +2006,9 @@ class VtpVirtualGridMixin:
         self._vg_last_first_row = -1
         self._vg_active = True
         self._vg_y_offset = 0
+        self._vg_visible_std_slots_by_path.clear()
+        self._vg_visible_wide_slots_by_path.clear()
+        self._vg_label_measure_cache.clear()
 
         self._vg_is_wide = self.folder_view_mode.get() == "Wide"
         if self._vg_is_wide:
@@ -1853,6 +2026,9 @@ class VtpVirtualGridMixin:
         else:
             self._vg_data = video_files
             self._vg_folder_count = 0
+
+        self._vg_index_data()
+        self._vg_warm_item_metadata()
 
         if hasattr(self, "scrollable_frame_window_id"):
             try:
@@ -1875,32 +2051,30 @@ class VtpVirtualGridMixin:
             slot.pop("_wide_photo_key", None)
             slot.pop("_vg_wide_slot_path", None)
 
-        for item in video_files:
+        for item in self._vg_data:
             fp = item["path"]
-            
-            # --- 1. Zjištění hodnocení (Rating) ---
-            if "_rating" not in item:
-                try:
-                    item["_rating"] = self.database.get_rating(fp) or 0
-                except Exception:
-                    item["_rating"] = 0
-            
-            # --- 2. Odhad výšky popisku (px) pro jednotnou výšku řádku mřížky ---
+            parts = self._vg_get_item_info_parts(item)
+
+            # --- 1. Odhad výšky popisku (px) pro jednotnou výšku řádku mřížky ---
             item["_vg_label_h_px"] = self._vg_measure_item_label_height_px(
-                fp, item["name"], item.get("is_folder", False), self.thumbnail_size[0]
+                fp,
+                item["name"],
+                item.get("is_folder", False),
+                self.thumbnail_size[0],
+                parts=parts,
             )
 
-        # --- 3. Nejvyšší blok popisků v této složce ---
+        # --- 2. Nejvyšší blok popisků v této složce ---
         max_rows = 1
         try:
-            for item in video_files:
-                parts = self.joininfotexts(item["path"], item["name"])
+            for item in self._vg_data:
+                parts = self._vg_get_item_info_parts(item)
                 max_rows = max(max_rows, max(1, len(parts) if parts else 1))
         except Exception:
             pass
         cap_px = self._vg_effective_label_cap_px(self.thumbnail_size[0], info_rows=max_rows)
         max_h = 34
-        for item in video_files:
+        for item in self._vg_data:
             max_h = max(max_h, int(item.get("_vg_label_h_px", 34)))
         self._vg_dynamic_label_h = min(max_h, cap_px)
 
@@ -1931,6 +2105,10 @@ class VtpVirtualGridMixin:
         self._vg_gen_queue = []
         self._vg_gen_active = 0
         self._vg_last_first_row = -1
+        self._vg_data_index_by_path.clear()
+        self._vg_visible_std_slots_by_path.clear()
+        self._vg_visible_wide_slots_by_path.clear()
+        self._vg_label_measure_cache.clear()
         self._vg_unwire_scrollbar()
 
         for slot in self._vg_std_pool:

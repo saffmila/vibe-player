@@ -3224,7 +3224,7 @@ class VtpGridMixin:
 
 
     # The user's function with the missing 'path' logic added.
-    def joininfotexts(self, file_path, file_name):
+    def joininfotexts(self, file_path, file_name, db_entry=None):
         """
         Constructs a list of informational texts about a file based on user-selected options.
         Args:
@@ -3260,7 +3260,8 @@ class VtpGridMixin:
 
         # Check if the 'dimensions' option is enabled.
         if self.file_info_vars.get("dimensions").get():
-            db_entry = self.database.get_entry(file_path) # Fetch entry from database.
+            if db_entry is None:
+                db_entry = self.database.get_entry(file_path) # Fetch entry from database.
             if db_entry:
                 width = db_entry.get('width')
                 height = db_entry.get('height')
@@ -3269,7 +3270,10 @@ class VtpGridMixin:
 
         # Check if the 'keywords' option is enabled.
         if self.file_info_vars.get("keywords").get():
-            keywords = self.database.get_keywords(file_path)
+            if db_entry is not None:
+                keywords = db_entry.get('keywords') or 'No keywords'
+            else:
+                keywords = self.database.get_keywords(file_path)
             if keywords and keywords != "No keywords":
                 # Clean up the keywords string by removing leading commas and whitespace.
                 keywords = keywords.lstrip(",").strip()
