@@ -50,11 +50,11 @@ class ImageViewerLegacy:
         self.canvas = tk.Canvas(self.image_window, bg='black')
         self.canvas.grid(row=0, column=0, sticky='nsew')
 
-        self.hbar = tk.Scrollbar(self.image_window, orient=tk.HORIZONTAL, command=self.canvas.xview)
+        self.hbar = tk.Scrollbar(self.image_window, orient=tk.HORIZONTAL, command=self._on_canvas_xscroll)
         self.hbar.grid(row=1, column=0, sticky='ew')
         self.canvas.config(xscrollcommand=self.hbar.set)
 
-        self.vbar = tk.Scrollbar(self.image_window, orient=tk.VERTICAL, command=self.canvas.yview)
+        self.vbar = tk.Scrollbar(self.image_window, orient=tk.VERTICAL, command=self._on_canvas_yscroll)
         self.vbar.grid(row=0, column=1, sticky='ns')
         self.canvas.config(yscrollcommand=self.vbar.set)
 
@@ -82,6 +82,8 @@ class ImageViewerLegacy:
         self.bg_index = 0
         self.show_info = True # Defaultně zapnuto
         self.info_text_id = None
+        self.minimap_max_size = 150
+        self.minimap_padding = 12
 
         # --- BINDINGS (Napojení na centrální hotkeys) ---
         # Funkce pro bezpečné získání klávesy z hlavního nastavení
@@ -147,7 +149,7 @@ class ImageViewerLegacy:
         self._set_image_scrollregion_only()
 
         #Na konci initu vynutíme první vykreslení HUDu
-        self.image_window.after(100, self.draw_info_hud)
+        self.image_window.after(100, self._refresh_overlays)
 
         # Same flags as Pyglet viewer — used by main.py fast-open and delete flow
         self._running = True
@@ -193,6 +195,7 @@ class ImageViewerLegacy:
         # logging.info(f"DEBUG Center image: Canvas={canvas_width}x{canvas_height}, Img={image_width}x{image_height}")
         self.canvas.coords(self.canvas_image, x, y)
         self._set_image_scrollregion_only()
+        self._refresh_overlays()
 
     def _center_image_for_size(self, image_width, image_height):
         """Center canvas image using known resized dimensions (reduces visible recenter jitter)."""
@@ -202,6 +205,18 @@ class ImageViewerLegacy:
         x = max((canvas_width - int(image_width)) // 2, 0)
         y = max((canvas_height - int(image_height)) // 2, 0)
         self.canvas.coords(self.canvas_image, x, y)
+
+    def _refresh_overlays(self):
+        self.draw_info_hud()
+        self.draw_minimap()
+
+    def _on_canvas_xscroll(self, *args):
+        self.canvas.xview(*args)
+        self._refresh_overlays()
+
+    def _on_canvas_yscroll(self, *args):
+        self.canvas.yview(*args)
+        self._refresh_overlays()
 
     def _set_image_scrollregion_only(self):
         """Scroll jen podle obrázku — HUD nesmí rozšiřovat scrollregion (posuny / skoky)."""
@@ -267,6 +282,7 @@ class ImageViewerLegacy:
     def resize_canvas(self, event):
         self.update_scrollbars()
         self._set_image_scrollregion_only()
+        self._refresh_overlays()
         # self.canvas.update_idletasks() # Není nutné volat při každém pohybu, zpomaluje resize
 
     def zoom(self, event):
@@ -366,6 +382,7 @@ class ImageViewerLegacy:
 
     def do_pan(self, event):
         self.canvas.scan_dragto(event.x, event.y, gain=1)
+        self._refresh_overlays()
  
     def toggle_fullscreen(self, event=None):
         self.is_fullscreen = not self.is_fullscreen
@@ -398,6 +415,7 @@ class ImageViewerLegacy:
         self._set_image_scrollregion_only()
         # Po změně velikosti vycentrujeme
         self.image_window.after(100, self.center_image)
+        self._refresh_overlays()
 
     def debug_print_monitor(self):
         self.image_window.update_idletasks()
@@ -440,6 +458,7 @@ class ImageViewerLegacy:
             # Nebo raději vertikální posun canvasu? Standard je posun canvasu.
             if self.vbar.get() != (0.0, 1.0):
                 self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+                self._refresh_overlays()
 
 
     def update_image(self, high_quality=False, center=False):
@@ -486,7 +505,7 @@ class ImageViewerLegacy:
             self._hq_timer = self.image_window.after(150, self._render_hq)
             
         # --- ZDE MUSÍ BÝT TOTO: ---
-        self.draw_info_hud()    
+        self._refresh_overlays()
 
     def _render_hq(self):
         """Voláno časovačem, když je klid."""
@@ -501,12 +520,12 @@ class ImageViewerLegacy:
         self.bg_index = (self.bg_index + 1) % len(self.bg_colors)
         color = self.bg_colors[self.bg_index]
         self.canvas.configure(bg=color)
-        self.draw_info_hud() # Překreslit info, aby bylo vidět (změna barvy textu)
+        self._refresh_overlays() # Překreslit info, aby bylo vidět (změna barvy textu)
 
     def toggle_info(self, event=None):
         """Zobrazí/Skryje info text."""
         self.show_info = not self.show_info
-        self.draw_info_hud()
+        self._refresh_overlays()
 
     def draw_info_hud(self):
         """Vykreslí textové info v levém horním rohu."""
@@ -554,6 +573,68 @@ class ImageViewerLegacy:
         
         # Zajistit, že HUD je vždy nahoře
         self.canvas.tag_raise("hud")
+
+    def draw_minimap(self):
+        """Draw bottom-right viewport overview for zoomed/panned legacy Canvas viewer."""
+        self.canvas.delete("minimap")
+
+        image_bbox = self.canvas.bbox(self.canvas_image)
+        if not image_bbox:
+            return
+
+        canvas_w = self.canvas.winfo_width()
+        canvas_h = self.canvas.winfo_height()
+        if canvas_w <= 1 or canvas_h <= 1:
+            return
+
+        img_x1, img_y1, img_x2, img_y2 = image_bbox
+        img_w = img_x2 - img_x1
+        img_h = img_y2 - img_y1
+        if img_w <= 0 or img_h <= 0:
+            return
+
+        if img_w <= canvas_w and img_h <= canvas_h:
+            return
+
+        mm_scale = self.minimap_max_size / max(img_w, img_h)
+        mm_w = max(4, int(img_w * mm_scale))
+        mm_h = max(4, int(img_h * mm_scale))
+
+        view_x1 = self.canvas.canvasx(0)
+        view_y1 = self.canvas.canvasy(0)
+        view_x2 = self.canvas.canvasx(canvas_w)
+        view_y2 = self.canvas.canvasy(canvas_h)
+
+        mm_x1 = view_x2 - mm_w - self.minimap_padding
+        mm_y1 = view_y2 - mm_h - self.minimap_padding
+        mm_x2 = mm_x1 + mm_w
+        mm_y2 = mm_y1 + mm_h
+
+        self.canvas.create_rectangle(
+            mm_x1, mm_y1, mm_x2, mm_y2,
+            fill="#323232", outline="#747474", stipple="gray50",
+            tags="minimap",
+        )
+
+        vp_l = max(img_x1, min(img_x2, view_x1))
+        vp_t = max(img_y1, min(img_y2, view_y1))
+        vp_r = max(img_x1, min(img_x2, view_x2))
+        vp_b = max(img_y1, min(img_y2, view_y2))
+
+        if vp_r <= vp_l or vp_b <= vp_t:
+            return
+
+        rx1 = mm_x1 + (vp_l - img_x1) * mm_scale
+        ry1 = mm_y1 + (vp_t - img_y1) * mm_scale
+        rx2 = mm_x1 + (vp_r - img_x1) * mm_scale
+        ry2 = mm_y1 + (vp_b - img_y1) * mm_scale
+
+        self.canvas.create_rectangle(
+            rx1, ry1, rx2, ry2,
+            outline="#f0f0f0", width=2,
+            tags="minimap",
+        )
+        self.canvas.tag_raise("minimap")
 
 
     def update_scrollbars(self):
