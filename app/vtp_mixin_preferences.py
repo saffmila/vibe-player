@@ -154,9 +154,12 @@ class VtpPreferencesMixin:
         # --- Info Panel ---
         # Get the desired state from settings, default to True if not found
         desired_info_state = settings.get("info_panel_expanded", True)
+        saved_info_restore_height = settings.get("info_panel_restore_height", 150)
 
         # Check if the container exists before accessing it
         if hasattr(self, "info_panel_container") and self.info_panel_container:
+            if hasattr(self.info_panel_container, "set_restore_height"):
+                self.info_panel_container.set_restore_height(saved_info_restore_height)
 
             self.preview_on = desired_info_state
             logging.info(f"[ApplySettings][InfoPanel] Set preview_on = {self.preview_on} based on settings.")
@@ -166,13 +169,18 @@ class VtpPreferencesMixin:
             if self.info_panel_container.expanded != desired_info_state:
                 # toggle_infopanel_menu already calls update_panel_flags internally
                 self.toggle_infopanel_menu(save_prefs=False)  # Don't save during load - avoids overwriting other panel states prematurely
+                if hasattr(self.info_panel_container, "set_restore_height"):
+                    self.info_panel_container.set_restore_height(saved_info_restore_height)
 
         # --- Timeline Widget ---
         # Get the desired state from settings, default to True if not found
         desired_timeline_state = settings.get("timeline_widget_expanded", True)
+        saved_timeline_restore_height = settings.get("timeline_widget_restore_height", 150)
 
         # Check if the container exists before accessing it
         if hasattr(self, "timeline_container") and self.timeline_container:
+            if hasattr(self.timeline_container, "set_restore_height"):
+                self.timeline_container.set_restore_height(saved_timeline_restore_height)
             self.ShowTWidget = desired_timeline_state
             logging.info(f"[ApplySettings][Timeline] Set ShowTWidget = {self.ShowTWidget} based on settings.")
 
@@ -181,6 +189,8 @@ class VtpPreferencesMixin:
             if self.timeline_container.expanded != desired_timeline_state:
                 # Pass save_prefs=False because we don't need to save settings *during* loading 
                 self.toggle_timeline_menu(save_prefs=False) # Let the toggle function handle the visual change
+                if hasattr(self.timeline_container, "set_restore_height"):
+                    self.timeline_container.set_restore_height(saved_timeline_restore_height)
 
 
 

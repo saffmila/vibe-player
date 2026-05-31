@@ -244,7 +244,19 @@ class VtpWindowLayoutMixin:
                 left_panes = self.left_split.panes()
                 if len(left_panes) > 1:
                     frac = frac_left if frac_left is not None else top_fraction
-                    y_sash_left = int(eff_left_h * frac)
+                    info_panel = getattr(self, "info_panel_container", None)
+                    if (
+                        info_panel is not None
+                        and getattr(info_panel, "expanded", True)
+                        and hasattr(info_panel, "get_restore_height")
+                    ):
+                        restore_h = int(info_panel.get_restore_height())
+                        y_sash_left = max(24, min(eff_left_h - 24, eff_left_h - restore_h))
+                        logging.info(
+                            f"[SPLITTER APPLY] left: using restore_height={restore_h} -> y_sash={y_sash_left} (eff_h={eff_left_h})"
+                        )
+                    else:
+                        y_sash_left = int(eff_left_h * frac)
                     self.left_split.sash_place(0, 0, y_sash_left)
                     logging.info(f"[SPLITTER APPLY] left: frac={frac} -> y_sash={y_sash_left} (eff_h={eff_left_h})")
                     # Verify: read back actual sash coord after placement
@@ -260,7 +272,19 @@ class VtpWindowLayoutMixin:
                 right_panes = self.right_split.panes()
                 if len(right_panes) > 1:
                     frac = frac_right if frac_right is not None else top_fraction
-                    y_sash_right = int(eff_right_h * frac)
+                    timeline_panel = getattr(self, "timeline_container", None)
+                    if (
+                        timeline_panel is not None
+                        and getattr(timeline_panel, "expanded", True)
+                        and hasattr(timeline_panel, "get_restore_height")
+                    ):
+                        restore_h = int(timeline_panel.get_restore_height())
+                        y_sash_right = max(24, min(eff_right_h - 24, eff_right_h - restore_h))
+                        logging.info(
+                            f"[SPLITTER APPLY] right: using restore_height={restore_h} -> y_sash={y_sash_right} (eff_h={eff_right_h})"
+                        )
+                    else:
+                        y_sash_right = int(eff_right_h * frac)
                     self.right_split.sash_place(0, 0, y_sash_right)
                     logging.info(f"[SPLITTER APPLY] right: frac={frac} -> y_sash={y_sash_right} (eff_h={eff_right_h})")
                     # Verify: read back actual sash coord after placement
@@ -271,9 +295,20 @@ class VtpWindowLayoutMixin:
             except Exception as e:
                 logging.error(f"[ERROR] Failed to place *right* sash: {e}")
 
+            self._enforce_collapsed_panel_heights()
+
         except Exception as e:
             logging.error(f"[ERROR] set_initial_split_heights (outer) failed: {e}")
 
+    def _enforce_collapsed_panel_heights(self):
+        """Keep minimized panel headers compact after splitter/DPI layout passes."""
+        for attr in ("info_panel_container", "timeline_container"):
+            panel = getattr(self, attr, None)
+            if panel is not None and hasattr(panel, "enforce_collapsed_height"):
+                try:
+                    panel.enforce_collapsed_height()
+                except Exception as e:
+                    logging.debug("[SPLITTER APPLY] enforce collapsed %s failed: %s", attr, e)
 
     def set_default_window_geometry(self, scale=0.9):
         """Set window size based on screen resolution and DPI scaling."""

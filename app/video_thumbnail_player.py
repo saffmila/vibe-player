@@ -3164,9 +3164,13 @@ class VideoThumbnailPlayer(
     def update_panel_flags(self, title, expanded):
         if title == "Info Panel":
             self.preview_on = expanded
+            if hasattr(self, "show_infopanel_var"):
+                self.show_infopanel_var.set(expanded)
             logging.info(f"[TOGGLE][InfoPanel] preview_on set to {expanded}")
         elif title == "Timeline":
             self.ShowTWidget = expanded
+            if hasattr(self, "show_timeline_var"):
+                self.show_timeline_var.set(expanded)
             logging.info(f"[TOGGLE][Timeline] ShowTWidget set to {expanded}")
 
 

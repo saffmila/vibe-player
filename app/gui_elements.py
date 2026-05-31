@@ -32,16 +32,18 @@ class TogglePanelFrame(ctk.CTkFrame):
         self.expanded = True
         self.parent_paned = None
         self.default_height = default_height
+        self.collapsed_height = 24
         self.title = title
         self.app = app
         self.pack_propagate(False)
         self.preferences_window = None
+        self._collapsed_proxy = None
 
-        header_frame = ctk.CTkFrame(self, fg_color="transparent")
-        header_frame.pack(side="top", fill="x", pady=(0, 0), padx=3)
+        self.header_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.header_frame.pack(side="top", fill="x", pady=(0, 0), padx=3)
 
         self.title_label = ctk.CTkLabel(
-            header_frame,
+            self.header_frame,
             text=self.title,
             font=ctk.CTkFont(size=10, weight="bold"),
             height=16  
@@ -49,7 +51,7 @@ class TogglePanelFrame(ctk.CTkFrame):
         self.title_label.pack(side="left", padx=(5, 0), pady=1)
 
         self.toggle_button = ctk.CTkButton(
-            header_frame,
+            self.header_frame,
             text="▼",
             width=14,
             height=10,
@@ -65,6 +67,149 @@ class TogglePanelFrame(ctk.CTkFrame):
         self.content_widget = widget
         self.content_widget.pack(in_=self, fill="both", expand=True)
 
+    def _pane_neighbors(self, widget_path):
+        panes = self._pane_paths()
+        idx = panes.index(str(widget_path))
+        before = panes[idx + 1] if idx + 1 < len(panes) else None
+        after = panes[idx - 1] if idx > 0 else None
+        return before, after
+
+    def _pane_paths(self):
+        return [str(p) for p in self.parent_paned.panes()]
+
+    @staticmethod
+    def _tk_int(value, default=0):
+        try:
+            return int(str(value))
+        except (TypeError, ValueError):
+            return default
+
+    def _log_paned_state(self, phase):
+        try:
+            panes = self._pane_paths()
+            sizes = []
+            root = self.winfo_toplevel()
+            for pane in panes:
+                try:
+                    w = root.nametowidget(pane)
+                    sizes.append(f"{pane}:h={w.winfo_height()} req={w.winfo_reqheight()}")
+                except Exception as e:
+                    sizes.append(f"{pane}:<missing {e}>")
+            sashes = []
+            for idx in range(max(0, len(panes) - 1)):
+                try:
+                    sashes.append(f"{idx}:{self.parent_paned.sash_coord(idx)}")
+                except Exception as e:
+                    sashes.append(f"{idx}:<err {e}>")
+            logging.info(
+                "[PANEL_DEBUG] %s title=%s expanded=%s paned_h=%s panes=%s sizes=%s sashes=%s",
+                phase,
+                self.title,
+                self.expanded,
+                self.parent_paned.winfo_height(),
+                panes,
+                sizes,
+                sashes,
+            )
+        except Exception as e:
+            logging.info("[PANEL_DEBUG] %s title=%s failed: %s", phase, self.title, e)
+
+    def _add_pane_at_saved_position(self, widget, height, minsize, before=None, after=None):
+        options = {"minsize": minsize, "height": height}
+        panes = set(self._pane_paths())
+        if before is not None and str(before) in panes:
+            options["before"] = before
+        elif after is not None and str(after) in panes:
+            options["after"] = after
+        self.parent_paned.add(widget, **options)
+        self._force_pane_height(str(widget), height, minsize)
+
+    def _force_pane_height(self, widget_path, height, minsize):
+        try:
+            self.parent_paned.paneconfig(widget_path, minsize=minsize, height=height)
+            self.parent_paned.update_idletasks()
+            self._place_sash_for_pane_height(widget_path, height)
+            self.after(20, lambda p=widget_path, h=height: self._place_sash_for_pane_height(p, h))
+            self.after(120, lambda p=widget_path, h=height: self._place_sash_for_pane_height(p, h))
+        except tk.TclError as e:
+            logging.info("Error forcing pane height for %s/%s: %s", self.title, widget_path, e)
+
+    def _place_sash_for_pane_height(self, widget_path, height):
+        try:
+            if str(self.parent_paned.cget("orient")) != str(tk.VERTICAL):
+                return
+            panes = self._pane_paths()
+            idx = panes.index(str(widget_path))
+            if len(panes) <= 1:
+                return
+            sash_thickness = self._tk_int(self.parent_paned.cget("sashwidth"), 0)
+            total_h = max(1, int(self.parent_paned.winfo_height()))
+            if idx == len(panes) - 1 and idx > 0:
+                sash_index = idx - 1
+                x, _ = self.parent_paned.sash_coord(sash_index)
+                y = max(0, total_h - int(height) - sash_thickness)
+                self.parent_paned.sash_place(sash_index, x, y)
+            elif idx < len(panes) - 1:
+                sash_index = idx
+                root = self.winfo_toplevel()
+                widget = root.nametowidget(str(widget_path))
+                x, _ = self.parent_paned.sash_coord(sash_index)
+                y = max(0, int(widget.winfo_y()) + int(height))
+                self.parent_paned.sash_place(sash_index, x, y)
+            self.after_idle(lambda phase=f"force_height:{self.title}": self._log_paned_state(phase))
+        except (tk.TclError, ValueError) as e:
+            logging.info("Error placing sash for %s/%s: %s", self.title, widget_path, e)
+
+    def _create_collapsed_proxy(self):
+        proxy = ctk.CTkFrame(self.parent_paned, height=self.collapsed_height, fg_color=self.cget("fg_color"))
+        proxy.pack_propagate(False)
+        header = ctk.CTkFrame(proxy, fg_color="transparent")
+        header.pack(side="top", fill="x", pady=(0, 0), padx=3)
+        label = ctk.CTkLabel(
+            header,
+            text=self.title,
+            font=ctk.CTkFont(size=10, weight="bold"),
+            height=16,
+        )
+        label.pack(side="left", padx=(5, 0), pady=1)
+        btn = ctk.CTkButton(
+            header,
+            text="▲",
+            width=14,
+            height=10,
+            font=ctk.CTkFont(size=9),
+            command=self.toggle_panel,
+        )
+        btn.pack(side="right", padx=2, pady=1)
+        return proxy
+
+    def enforce_collapsed_height(self):
+        """Reapply collapsed pane height after startup/splitter layout recalculations."""
+        proxy = self._collapsed_proxy
+        if self.expanded or proxy is None:
+            return
+        try:
+            if proxy.winfo_exists():
+                self._force_pane_height(str(proxy), self.collapsed_height, self.collapsed_height)
+                self._log_paned_state("enforce_collapsed_height")
+        except tk.TclError as e:
+            logging.info("Error enforcing collapsed panel height for %s: %s", self.title, e)
+
+    def get_restore_height(self):
+        """Height to restore to after collapsed proxy is expanded."""
+        try:
+            return max(80, int(self.default_height))
+        except (TypeError, ValueError):
+            return 150
+
+    def set_restore_height(self, height):
+        try:
+            h = int(height)
+        except (TypeError, ValueError):
+            return
+        if h > self.collapsed_height:
+            self.default_height = max(80, h)
+
 
 
     def toggle_panel(self):
@@ -78,14 +223,52 @@ class TogglePanelFrame(ctk.CTkFrame):
                 return
 
         if self.expanded:
-            logging.info(f"[TOGGLE] Hiding panel '{self.title}'")
-            self.parent_paned.forget(self)
+            logging.info(f"[TOGGLE] Collapsing panel '{self.title}'")
+            self._log_paned_state("before_collapse")
+            try:
+                current_h = int(self.winfo_height())
+                if current_h > self.collapsed_height:
+                    self.set_restore_height(current_h)
+            except Exception:
+                pass
+            try:
+                before, after = self._pane_neighbors(str(self))
+                self.parent_paned.forget(self)
+                self._collapsed_proxy = self._create_collapsed_proxy()
+                self._add_pane_at_saved_position(
+                    self._collapsed_proxy,
+                    self.collapsed_height,
+                    self.collapsed_height,
+                    before=before,
+                    after=after,
+                )
+                self._log_paned_state("after_collapse_proxy_add")
+            except (tk.TclError, ValueError) as e:
+                logging.info("Error collapsing panel '%s': %s", self.title, e)
             self.expanded = False
         else:
-            logging.info(f"[TOGGLE] Showing panel '{self.title}'")
-            self.parent_paned.add(self)
-            self.configure(height=self.default_height)
-            self.parent_paned.paneconfig(self, minsize=80, height=self.default_height)
+            logging.info(f"[TOGGLE] Expanding panel '{self.title}'")
+            self._log_paned_state("before_expand")
+            try:
+                proxy = self._collapsed_proxy
+                before = after = None
+                if proxy is not None and proxy.winfo_exists():
+                    before, after = self._pane_neighbors(str(proxy))
+                    self.parent_paned.forget(proxy)
+                    proxy.destroy()
+                self._collapsed_proxy = None
+                restore_h = self.get_restore_height()
+                self.configure(height=restore_h)
+                self._add_pane_at_saved_position(
+                    self,
+                    restore_h,
+                    80,
+                    before=before,
+                    after=after,
+                )
+                self._log_paned_state("after_expand_panel_add")
+            except (tk.TclError, ValueError) as e:
+                logging.info("Error expanding panel '%s': %s", self.title, e)
             self.expanded = True
 
         if hasattr(self, "app"):
@@ -93,7 +276,6 @@ class TogglePanelFrame(ctk.CTkFrame):
                 self.app.update_panel_flags(self.title, self.expanded)
             except Exception as e:
                 logging.info("Error calling update_panel_flags via self.app: %s", e)
-
 
         self.toggle_button.configure(text="▼" if self.expanded else "▲")
 
@@ -1348,6 +1530,16 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
         "tree_font_size": app.base_font_size,
         "info_panel_expanded": app.info_panel_container.expanded if app.info_panel_container else True,
         "timeline_widget_expanded": app.timeline_container.expanded if app.timeline_container else True,
+        "info_panel_restore_height": (
+            app.info_panel_container.get_restore_height()
+            if app.info_panel_container and hasattr(app.info_panel_container, "get_restore_height")
+            else 150
+        ),
+        "timeline_widget_restore_height": (
+            app.timeline_container.get_restore_height()
+            if app.timeline_container and hasattr(app.timeline_container, "get_restore_height")
+            else 150
+        ),
         "video_show_hud": getattr(app, "video_show_hud", True),
         "gpu_upscale": getattr(app, "gpu_upscale", False),
         "vlc_enable_postproc": getattr(app, "vlc_enable_postproc", False),
