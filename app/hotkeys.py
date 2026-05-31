@@ -111,6 +111,33 @@ DEFAULT_HOTKEYS = {
     'debug_thumb': '<Control-Shift-S>'
 }
 
+DOCUMENTED_EXTRA_HOTKEYS = {
+    # Hardcoded aliases/context-local bindings that should appear in help, but
+    # must not be part of the runtime hotkeys map consumed by viewers.
+    'video_fullscreen_shift': '<Shift-F>',
+    'video_fullscreen_alt_enter': '<Alt-Return>',
+    'video_fullscreen_alt_numpad_enter': '<Alt-KP_Enter>',
+    'video_close_player': '<Control-w>',
+    'video_generate_thumbnail': '<Shift-T>',
+    'video_capture_frame': '<Shift-C>',
+    'video_add_bookmark': '<Shift-B>',
+    'image_zoom_in_ctrl': '<Control-plus>',
+    'image_zoom_out_ctrl': '<Control-minus>',
+    'image_fullscreen_f': 'f',
+    'image_fullscreen_alt_enter': '<Alt-Return>',
+    'image_debug_monitor': '<F10>',
+    'thumbnail_move_up': '<Up>',
+    'thumbnail_move_down': '<Down>',
+    'thumbnail_move_left': '<Left>',
+    'thumbnail_move_right': '<Right>',
+    'timeline_zoom': '<Shift-MouseWheel>',
+    'timeline_play_pause': '<space>',
+    'timeline_toggle_magnet': 'm',
+    'timeline_toggle_magnet_alt': 'M',
+    'debug_toggle_overlay': '<Control-d>',
+    'debug_thumb_focused': '<Shift-S>',
+}
+
 # Ordered groups for the Keyboard Shortcuts help window (all keys should appear once;
 # anything missing here is listed under "Other").
 HOTKEY_HELP_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -118,6 +145,10 @@ HOTKEY_HELP_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "play_pause", "skip_next", "skip_back", "enter_action",
         "bookmark_next", "bookmark_prev", "long_seek_forward", "long_seek_backward",
         "add_to_playlist", "new_playlist", "toggle_fullscreen", "parent_dir", "refresh",
+    )),
+    ("Thumbnail grid", (
+        "thumbnail_move_up", "thumbnail_move_down", "thumbnail_move_left",
+        "thumbnail_move_right", "zoom_thumb",
     )),
     ("File & clipboard", (
         "delete", "rename", "rename_secondary", "select_all",
@@ -135,18 +166,128 @@ HOTKEY_HELP_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "video_seek_forward", "video_seek_backward", "video_volume_up", "video_volume_down",
         "video_mute", "video_fullscreen", "video_windowed_mode", "loop_start",
         "loop_end", "loop_toggle", "video_speed_up", "video_speed_down",
+        "video_close_player", "video_generate_thumbnail", "video_capture_frame",
+        "video_add_bookmark", "video_fullscreen_shift", "video_fullscreen_alt_enter",
+        "video_fullscreen_alt_numpad_enter",
+    )),
+    ("Timeline widget", (
+        "timeline_zoom", "timeline_play_pause", "timeline_toggle_magnet",
+        "timeline_toggle_magnet_alt",
     )),
     ("Image viewer window", (
         "image_next", "image_prev", "image_copy", "image_save", "image_delete",
         "close_window", "image_fullscreen", "image_rotate_left", "image_rotate_right",
         "image_flip_h", "image_flip_v", "image_toggle_bg", "image_toggle_info",
         "image_actual_size", "image_fit_best", "image_fit_width",
-        "image_zoom_in", "image_zoom_out",
+        "image_zoom_in", "image_zoom_out", "image_zoom_in_ctrl", "image_zoom_out_ctrl",
+        "image_fullscreen_f", "image_fullscreen_alt_enter", "image_debug_monitor",
     )),
     ("Developer", (
-        "run_plugin", "show_debug", "hide_debug", "toggle_log", "view_catalog", "debug_thumb",
+        "run_plugin", "show_debug", "hide_debug", "toggle_log", "view_catalog",
+        "debug_toggle_overlay", "debug_thumb_focused", "debug_thumb",
     )),
 )
+
+
+HOTKEY_LABELS: dict[str, str] = {
+    "play_pause": "Play / pause",
+    "skip_next": "Next item",
+    "skip_back": "Previous item",
+    "enter_action": "Open selected item",
+    "video_seek_forward": "Next cut / seek forward",
+    "video_seek_backward": "Previous cut / seek backward",
+    "video_volume_up": "Volume up",
+    "video_volume_down": "Volume down",
+    "video_mute": "Mute",
+    "video_fullscreen": "Video fullscreen",
+    "video_fullscreen_shift": "Video fullscreen alternate",
+    "video_fullscreen_alt_enter": "Video fullscreen alternate",
+    "video_fullscreen_alt_numpad_enter": "Video fullscreen alternate",
+    "video_windowed_mode": "Exit fullscreen / close overlay",
+    "video_close_player": "Close video player",
+    "video_generate_thumbnail": "Generate thumbnail",
+    "video_capture_frame": "Capture current frame",
+    "video_add_bookmark": "Add bookmark",
+    "image_next": "Next image",
+    "image_prev": "Previous image",
+    "image_copy": "Copy image",
+    "image_save": "Save image as",
+    "image_delete": "Delete image",
+    "close_window": "Close window",
+    "image_fullscreen": "Image fullscreen",
+    "image_fullscreen_f": "Image fullscreen alternate",
+    "image_fullscreen_alt_enter": "Image fullscreen alternate",
+    "image_rotate_left": "Rotate left",
+    "image_rotate_right": "Rotate right",
+    "image_flip_h": "Flip horizontal",
+    "image_flip_v": "Flip vertical",
+    "image_toggle_bg": "Cycle background",
+    "image_toggle_info": "Toggle info HUD",
+    "image_actual_size": "Actual size",
+    "image_fit_best": "Best fit",
+    "image_fit_width": "Fit width",
+    "image_zoom_in": "Zoom in",
+    "image_zoom_out": "Zoom out",
+    "image_zoom_in_ctrl": "Zoom in alternate",
+    "image_zoom_out_ctrl": "Zoom out alternate",
+    "image_debug_monitor": "Print monitor debug",
+    "add_to_playlist": "Add to playlist",
+    "new_playlist": "Add to new playlist",
+    "toggle_fullscreen": "Toggle app fullscreen",
+    "zoom_thumb": "Zoom thumbnails",
+    "select_all": "Select all",
+    "thumbnail_move_up": "Move selection up",
+    "thumbnail_move_down": "Move selection down",
+    "thumbnail_move_left": "Move selection left",
+    "thumbnail_move_right": "Move selection right",
+    "delete": "Delete selected",
+    "search": "Search",
+    "metadata": "Edit metadata",
+    "keywords": "Edit keywords",
+    "files_clipboard_copy": "Copy file paths",
+    "files_clipboard_cut": "Cut file paths",
+    "files_clipboard_paste_copy": "Paste copied files",
+    "files_clipboard_paste_move": "Paste moved files",
+    "refresh": "Refresh",
+    "rename": "Rename",
+    "rename_secondary": "Rename alternate",
+    "parent_dir": "Parent directory",
+    "open_preferences": "Preferences",
+    "toggle_info_panel": "Toggle info panel",
+    "toggle_timeline": "Toggle timeline",
+    "timeline_zoom": "Timeline zoom",
+    "timeline_play_pause": "Timeline play / pause",
+    "timeline_toggle_magnet": "Timeline magnet toggle",
+    "timeline_toggle_magnet_alt": "Timeline magnet toggle alternate",
+    "rate_0": "Set rating 0",
+    "rate_1": "Set rating 1",
+    "rate_2": "Set rating 2",
+    "rate_3": "Set rating 3",
+    "rate_4": "Set rating 4",
+    "rate_5": "Set rating 5",
+    "loop_start": "Set loop start",
+    "loop_end": "Set loop end",
+    "loop_toggle": "Toggle loop",
+    "bookmark_next": "Next bookmark",
+    "bookmark_prev": "Previous bookmark",
+    "long_seek_forward": "Long seek forward",
+    "long_seek_backward": "Long seek backward",
+    "video_speed_up": "Speed up",
+    "video_speed_down": "Speed down",
+    "run_plugin": "Run timeline plugin",
+    "show_debug": "Show debug overlay",
+    "hide_debug": "Hide debug overlay",
+    "debug_toggle_overlay": "Toggle debug overlay",
+    "toggle_log": "Show debug console",
+    "view_catalog": "View catalog",
+    "debug_thumb_focused": "Debug focused thumbnail",
+    "debug_thumb": "Debug selected thumbnail",
+}
+
+
+def action_label(action: str) -> str:
+    """Human readable label for a hotkey action."""
+    return HOTKEY_LABELS.get(action, action.replace("_", " ").title())
 
 
 def format_accelerator_menu(seq: str) -> str:
@@ -168,9 +309,12 @@ def format_accelerator_menu(seq: str) -> str:
         "delete": "Del",
         "comma": ",",
         "period": ".",
+        "plus": "+",
+        "minus": "-",
         "greater": ">",
         "less": "<",
         "mousewheel": "Mouse wheel",
+        "kp_enter": "Numpad Enter",
     }
     out: list[str] = []
     for p in parts:
@@ -211,16 +355,17 @@ def rename_accelerators_label(hotkeys: dict[str, str]) -> str | None:
 def iter_help_sections(hotkeys_map: dict[str, Any]) -> list[tuple[str, list[tuple[str, str]]]]:
     """
     Build (section_title, [(action_key, display_sequence), ...]) for the help UI.
-    Uses string values from ``hotkeys_map`` (same shape as DEFAULT_HOTKEYS).
+    Uses runtime string values from ``hotkeys_map`` plus documented local aliases.
     """
+    help_hotkeys: dict[str, Any] = {**DOCUMENTED_EXTRA_HOTKEYS, **hotkeys_map}
     seen: set[str] = set()
     rows: list[tuple[str, list[tuple[str, str]]]] = []
     for title, keys in HOTKEY_HELP_SECTIONS:
         chunk: list[tuple[str, str]] = []
         for k in keys:
-            if k not in hotkeys_map:
+            if k not in help_hotkeys:
                 continue
-            seq = hotkeys_map[k]
+            seq = help_hotkeys[k]
             if not isinstance(seq, str):
                 continue
             chunk.append((k, seq))
@@ -228,10 +373,10 @@ def iter_help_sections(hotkeys_map: dict[str, Any]) -> list[tuple[str, list[tupl
         if chunk:
             rows.append((title, chunk))
     other: list[tuple[str, str]] = []
-    for k in sorted(hotkeys_map.keys()):
+    for k in sorted(help_hotkeys.keys()):
         if k in seen:
             continue
-        v = hotkeys_map[k]
+        v = help_hotkeys[k]
         if isinstance(v, str):
             other.append((k, v))
     if other:

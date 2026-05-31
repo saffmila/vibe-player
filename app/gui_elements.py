@@ -21,7 +21,7 @@ import customtkinter as ctk
 from app_settings import TaggingSettings
 from utils import create_menu
 import logging
-from hotkeys import DEFAULT_HOTKEYS, format_accelerator_menu, iter_help_sections, menu_accel
+from hotkeys import DEFAULT_HOTKEYS, action_label, format_accelerator_menu, iter_help_sections, menu_accel
 
 # .app calls video_thumbnail_player, so no need to import it
 
@@ -444,7 +444,8 @@ def show_hotkeys_window(app):
     Displays a read-only table of current hotkeys (grouped by category).
     Uses ``app.hotkeys_map`` when set, otherwise defaults from ``hotkeys.DEFAULT_HOTKEYS``.
     """
-    hm = getattr(app, "hotkeys_map", None) or DEFAULT_HOTKEYS
+    current_hotkeys = getattr(app, "hotkeys_map", None) or {}
+    hm = {**DEFAULT_HOTKEYS, **current_hotkeys}
     if not hm:
         logging.warning("Hotkeys map empty.")
         return
@@ -455,7 +456,7 @@ def show_hotkeys_window(app):
 
     hk_window = ctk.CTkToplevel(app)
     hk_window.title("Keyboard Shortcuts")
-    hk_window.geometry("580x640")
+    hk_window.geometry("620x680")
     hk_window.attributes('-topmost', True) 
     
     app.hotkeys_window = hk_window
@@ -468,36 +469,94 @@ def show_hotkeys_window(app):
         text_color="gray70",
     ).pack(pady=(0, 8))
 
+    filter_var = tk.StringVar()
+    filter_frame = ctk.CTkFrame(hk_window, fg_color="transparent")
+    filter_frame.pack(fill="x", padx=12, pady=(0, 6))
+    ctk.CTkLabel(filter_frame, text="Filter:", anchor="w").pack(side="left", padx=(0, 8))
+    filter_entry = ctk.CTkEntry(
+        filter_frame,
+        textvariable=filter_var,
+        placeholder_text="Type action or key...",
+        height=30,
+    )
+    filter_entry.pack(side="left", fill="x", expand=True)
+
     scroll_frame = ctk.CTkScrollableFrame(hk_window)
     scroll_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
-    row = 0
-    for section_title, items in iter_help_sections(hm):
-        ctk.CTkLabel(
-            scroll_frame,
-            text=section_title,
-            font=("Helvetica", 13, "bold"),
-            anchor="w",
-        ).grid(row=row, column=0, columnspan=2, sticky="ew", padx=8, pady=(14, 6))
-        row += 1
-        for action, seq in items:
-            readable_action = action.replace("_", " ").title()
-            readable_key = format_accelerator_menu(seq) if isinstance(seq, str) else str(seq)
-            ctk.CTkLabel(scroll_frame, text=readable_action, anchor="w").grid(
-                row=row, column=0, sticky="w", padx=14, pady=4
-            )
-            key_label = ctk.CTkLabel(
+    sections = iter_help_sections(hm)
+
+    def render_shortcuts(*_):
+        for child in scroll_frame.winfo_children():
+            child.destroy()
+
+        needle = filter_var.get().strip().casefold()
+        row = 0
+        visible_count = 0
+
+        for section_title, items in sections:
+            visible_items = []
+            for action, seq in items:
+                readable_action = action_label(action)
+                readable_key = format_accelerator_menu(seq) if isinstance(seq, str) else str(seq)
+                searchable_text = f"{section_title} {readable_action} {readable_key} {action} {seq}".casefold()
+                if not needle or needle in searchable_text:
+                    visible_items.append((readable_action, readable_key))
+
+            if not visible_items:
+                continue
+
+            ctk.CTkLabel(
                 scroll_frame,
-                text=f" {readable_key} ",
-                font=("Consolas", 12, "bold"),
-                fg_color="#3a3a3a",
-                corner_radius=4,
-            )
-            key_label.grid(row=row, column=1, sticky="e", padx=10, pady=4)
+                text=section_title,
+                font=("Helvetica", 13, "bold"),
+                anchor="w",
+            ).grid(row=row, column=0, columnspan=2, sticky="ew", padx=8, pady=(14, 6))
             row += 1
 
-    scroll_frame.grid_columnconfigure(0, weight=1)
-    scroll_frame.grid_columnconfigure(1, weight=0)
+            for readable_action, readable_key in visible_items:
+                ctk.CTkLabel(scroll_frame, text=readable_action, anchor="w").grid(
+                    row=row, column=0, sticky="w", padx=14, pady=4
+                )
+                key_label = ctk.CTkLabel(
+                    scroll_frame,
+                    text=f" {readable_key} ",
+                    font=("Consolas", 12, "bold"),
+                    fg_color="#3a3a3a",
+                    corner_radius=4,
+                )
+                key_label.grid(row=row, column=1, sticky="e", padx=10, pady=4)
+                row += 1
+                visible_count += 1
+
+        if visible_count == 0:
+            ctk.CTkLabel(
+                scroll_frame,
+                text="No shortcuts match the current filter.",
+                text_color="gray70",
+                anchor="center",
+            ).grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=30)
+
+        scroll_frame.grid_columnconfigure(0, weight=1)
+        scroll_frame.grid_columnconfigure(1, weight=0)
+
+    filter_var.trace_add("write", render_shortcuts)
+    render_shortcuts()
+
+    def clear_filter_or_close(_event=None):
+        if filter_var.get():
+            filter_var.set("")
+            return "break"
+        close_win()
+        return "break"
+
+    filter_entry.bind("<Escape>", clear_filter_or_close)
+
+    def focus_filter(_event=None):
+        filter_entry.focus_set()
+        return "break"
+
+    hk_window.bind("<Control-f>", focus_filter)
 
     def close_win():
         app.hotkeys_window = None
@@ -505,6 +564,7 @@ def show_hotkeys_window(app):
 
     hk_window.protocol("WM_DELETE_WINDOW", close_win)
     ctk.CTkButton(hk_window, text="Close", command=close_win).pack(pady=15)
+    filter_entry.focus_set()
 
 
 # Helper: Show menu below button
