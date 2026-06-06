@@ -13,9 +13,10 @@ import tkinter as tk
 from tkinter import PhotoImage, ttk
 
 import chardet
+import customtkinter as ctk
 import vlc
 from pynput import mouse
-from PIL import Image, ImageTk
+from PIL import Image, ImageGrab, ImageOps, ImageTk
 from screeninfo import get_monitors
 
 from file_operations import *
@@ -1928,11 +1929,48 @@ class VideoPlayer:
                 logging.info(
                     "[DEBUG] Saved thumbnail timestamp: %.2fs", float(thumbnail_time)
                 )
-            self.controller.refresh_single_thumbnail(
-                current_video, overwrite=True, at_time=float(thumbnail_time)
+
+            thumbnail = create_video_thumbnail(
+                video_path=current_video,
+                thumbnail_size=self.controller.thumbnail_size,
+                thumbnail_format=thumbnail_format,
+                capture_method=self.controller.capture_method_var.get(),
+                thumbnail_time=thumbnail_time,
+                cache_enabled=self.controller.cache_enabled,
+                overwrite=True,
+                cache_dir=self.controller.thumbnail_cache_path,
+                database=getattr(self.controller, "database", None),
             )
-            if hasattr(self.controller, "_demo_toast"):
-                self.controller._demo_toast("demo_thumbs")
+
+            if thumbnail:
+                thumbnail_cache.set(
+                    current_video,
+                    thumbnail,
+                    memory_cache=bool(getattr(self.controller, "memory_cache", True)),
+                )
+                self.controller._vg_apply_generated_thumb(current_video)
+                try:
+                    self.controller._vg_refresh_file_labels(current_video)
+                except Exception:
+                    pass
+                if hasattr(self.controller, "_demo_toast"):
+                    self.controller._demo_toast("demo_thumbs")
+            elif self._manual_thumbnail_screenshot_fallback(
+                current_video=current_video,
+                thumbnail_time=thumbnail_time,
+                thumbnail_info=thumbnail_info,
+                row=row,
+                col=col,
+                index=index,
+            ):
+                if hasattr(self.controller, "_demo_toast"):
+                    self.controller._demo_toast("demo_thumbs")
+            else:
+                logging.info(
+                    "Failed to generate thumbnail for %s. Format: %s",
+                    self.video_name,
+                    thumbnail_format,
+                )
             return
 
         thumbnail = create_video_thumbnail(
@@ -1972,11 +2010,135 @@ class VideoPlayer:
                 self.controller._demo_toast("demo_thumbs")
         else:
             logging.info(f"Failed to generate thumbnail for {self.video_name}. Format: {thumbnail_format}")
+            if self._manual_thumbnail_screenshot_fallback(
+                current_video=current_video,
+                thumbnail_time=thumbnail_time,
+                thumbnail_info=thumbnail_info,
+                row=row,
+                col=col,
+                index=index,
+            ):
+                if hasattr(self.controller, "_demo_toast"):
+                    self.controller._demo_toast("demo_thumbs")
 
 
 
         
     
+    def _manual_thumbnail_screenshot_fallback(
+        self,
+        current_video,
+        thumbnail_time,
+        thumbnail_info,
+        row,
+        col,
+        index,
+    ) -> bool:
+        """Manual Shift+T fallback: save the visible video pixels as the thumbnail cache."""
+        logging.info("[ManualThumb ScreenshotFallback] Trying visible-player screenshot fallback.")
+        try:
+            label = getattr(self, "video_label", None)
+            if label is None or not label.winfo_exists():
+                logging.info("[ManualThumb ScreenshotFallback] video_label is not available.")
+                return False
+
+            label.update_idletasks()
+            x = int(label.winfo_rootx())
+            y = int(label.winfo_rooty())
+            w = int(label.winfo_width())
+            h = int(label.winfo_height())
+            if w <= 4 or h <= 4:
+                logging.info(
+                    "[ManualThumb ScreenshotFallback] invalid capture rect: %sx%s", w, h
+                )
+                return False
+
+            bbox = (x, y, x + w, y + h)
+            try:
+                screen_img = ImageGrab.grab(bbox=bbox, all_screens=True)
+            except TypeError:
+                screen_img = ImageGrab.grab(bbox=bbox)
+
+            target_size = tuple(self.controller.thumbnail_size)
+            screen_img = screen_img.convert("RGB")
+            screen_img = ImageOps.contain(screen_img, target_size, Image.LANCZOS)
+            bg = Image.new("RGB", target_size, (71, 71, 71))
+            bg.paste(
+                screen_img,
+                (
+                    (target_size[0] - screen_img.size[0]) // 2,
+                    (target_size[1] - screen_img.size[1]) // 2,
+                ),
+            )
+
+            cache_dir_path, _ = get_cache_dir_path(
+                current_video, os.path.abspath(self.controller.thumbnail_cache_path)
+            )
+            os.makedirs(cache_dir_path, exist_ok=True)
+            cache_key = (
+                f"{os.path.basename(current_video)}_"
+                f"{target_size[0]}x{target_size[1]}.jpg"
+            )
+            cache_path = os.path.join(cache_dir_path, cache_key)
+            bg.save(cache_path, format="JPEG")
+
+            thumbnail = ctk.CTkImage(light_image=bg, dark_image=bg)
+            thumbnail_cache.set(
+                current_video,
+                thumbnail,
+                memory_cache=bool(getattr(self.controller, "memory_cache", True)),
+            )
+
+            database = getattr(self.controller, "database", None)
+            if database is not None:
+                try:
+                    database.add_entry(os.path.basename(current_video), current_video, 0, 0)
+                    database.set_thumbnail_timestamp(current_video, float(thumbnail_time))
+                    logging.info(
+                        "[DEBUG] Saved thumbnail timestamp: %.2fs",
+                        float(thumbnail_time),
+                    )
+                except Exception as db_exc:
+                    logging.info(
+                        "[ManualThumb ScreenshotFallback] DB update failed for %s: %s",
+                        current_video,
+                        db_exc,
+                    )
+
+            if getattr(self.controller, "_vg_active", False):
+                self.controller._vg_apply_generated_thumb(current_video)
+                try:
+                    self.controller._vg_refresh_file_labels(current_video)
+                except Exception:
+                    pass
+            else:
+                self.controller.create_file_thumbnail(
+                    file_path=current_video,
+                    file_name=self.video_name,
+                    row=row,
+                    col=col,
+                    index=index,
+                    thumbnail_time=thumbnail_time,
+                    overwrite=False,
+                    target_frame=self.controller.regular_thumbnails_frame,
+                    is_refresh=True,
+                )
+
+            logging.info(
+                "[ManualThumb ScreenshotFallback] Saved visible frame thumbnail: %s",
+                cache_path,
+            )
+            return True
+        except Exception as e:
+            logging.info(
+                "[ManualThumb ScreenshotFallback] Failed for %s: %s",
+                current_video,
+                e,
+                exc_info=True,
+            )
+            return False
+
+
     # def generate_thumbnail(self, event=None):
         # current_time = self.player.get_time() // 1000  # Get current playback time in seconds
         # thumbnail = create_video_thumbnail(self.video_path, self.parent.thumbnail_size, thumbnail_time=current_time, overwrite=True)
