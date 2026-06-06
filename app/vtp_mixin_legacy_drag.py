@@ -14,7 +14,7 @@ from clipboard_file_list import (
     get_clipboard_file_paths,
     set_clipboard_file_paths,
 )
-from gui_elements import open_conflict_dialog
+from gui_elements import get_conflict_rename_path, open_conflict_dialog
 from hotkeys import DEFAULT_HOTKEYS, format_accelerator_menu
 
 
@@ -474,7 +474,9 @@ class VtpLegacyDragMixin:
                 action, _apply_all = self._legacy_prompt_conflict_choice(new_path)
                 if action == "cancel" or action == "skip":
                     return
-                if action == "replace" and not self._legacy_delete_existing_target(new_path):
+                if action == "rename":
+                    new_path = get_conflict_rename_path(new_path)
+                elif action == "replace" and not self._legacy_delete_existing_target(new_path):
                     return
 
             # Perform the move or copy
@@ -503,6 +505,7 @@ class VtpLegacyDragMixin:
             return
 
         replace_all = False
+        rename_all = False
         skip_all = False
         target_norm = os.path.normcase(os.path.normpath(target_path))
 
@@ -521,8 +524,8 @@ class VtpLegacyDragMixin:
                 if os.path.exists(new_path):
                     if skip_all:
                         continue
-                    should_replace = replace_all
-                    if not should_replace:
+                    conflict_action = "replace" if replace_all else "rename" if rename_all else None
+                    if conflict_action is None:
                         action, apply_all = self._legacy_prompt_conflict_choice(new_path)
                         if action == "cancel":
                             break
@@ -530,10 +533,14 @@ class VtpLegacyDragMixin:
                             if apply_all:
                                 skip_all = True
                             continue
-                        should_replace = action == "replace"
-                        if should_replace and apply_all:
+                        conflict_action = action
+                        if action == "replace" and apply_all:
                             replace_all = True
-                    if should_replace and not self._legacy_delete_existing_target(new_path):
+                        elif action == "rename" and apply_all:
+                            rename_all = True
+                    if conflict_action == "rename":
+                        new_path = get_conflict_rename_path(new_path)
+                    elif conflict_action == "replace" and not self._legacy_delete_existing_target(new_path):
                         continue
 
                 is_dir = os.path.isdir(source_path)
@@ -563,6 +570,7 @@ class VtpLegacyDragMixin:
         """Handle dragging multiple items from the thumbnail view."""
         logging.info("**************HANDLE MULTIPLE DRAG!!!")
         replace_all = False
+        rename_all = False
         skip_all = False
 
         for file_path, _, _ in self.selected_thumbnails:
@@ -576,8 +584,8 @@ class VtpLegacyDragMixin:
                 if os.path.exists(new_path):
                     if skip_all:
                         continue
-                    should_replace = replace_all
-                    if not should_replace:
+                    conflict_action = "replace" if replace_all else "rename" if rename_all else None
+                    if conflict_action is None:
                         action, apply_all = self._legacy_prompt_conflict_choice(new_path)
                         if action == "cancel":
                             break
@@ -585,10 +593,14 @@ class VtpLegacyDragMixin:
                             if apply_all:
                                 skip_all = True
                             continue
-                        should_replace = action == "replace"
-                        if should_replace and apply_all:
+                        conflict_action = action
+                        if action == "replace" and apply_all:
                             replace_all = True
-                    if should_replace and not self._legacy_delete_existing_target(new_path):
+                        elif action == "rename" and apply_all:
+                            rename_all = True
+                    if conflict_action == "rename":
+                        new_path = get_conflict_rename_path(new_path)
+                    elif conflict_action == "replace" and not self._legacy_delete_existing_target(new_path):
                         continue
 
                 # No conflict; perform the move/copy
@@ -971,6 +983,7 @@ class VtpLegacyDragMixin:
 
             moved_sources: list = []
             replace_all = False
+            rename_all = False
             skip_all = False
 
             for file_path in sources:
@@ -988,8 +1001,8 @@ class VtpLegacyDragMixin:
                     if os.path.exists(new_path):
                         if skip_all:
                             continue
-                        should_replace = replace_all
-                        if not should_replace:
+                        conflict_action = "replace" if replace_all else "rename" if rename_all else None
+                        if conflict_action is None:
                             action, apply_all = self._legacy_prompt_conflict_choice(new_path)
                             if action == "cancel":
                                 break
@@ -997,10 +1010,14 @@ class VtpLegacyDragMixin:
                                 if apply_all:
                                     skip_all = True
                                 continue
-                            should_replace = action == "replace"
-                            if should_replace and apply_all:
+                            conflict_action = action
+                            if action == "replace" and apply_all:
                                 replace_all = True
-                        if should_replace and not self._legacy_delete_existing_target(new_path):
+                            elif action == "rename" and apply_all:
+                                rename_all = True
+                        if conflict_action == "rename":
+                            new_path = get_conflict_rename_path(new_path)
+                        elif conflict_action == "replace" and not self._legacy_delete_existing_target(new_path):
                             continue
 
                     is_dir = os.path.isdir(file_path)

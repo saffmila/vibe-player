@@ -286,7 +286,7 @@ class ConflictDialog(ctk.CTkToplevel):
     def __init__(self, parent, file_name: str):
         super().__init__(parent)
         self.title("File already exists")
-        self.geometry("420x200")
+        self.geometry("540x200")
         self.resizable(False, False)
         self.attributes("-topmost", True)
         self.result: tuple[str, bool] = ("cancel", False)
@@ -313,6 +313,7 @@ class ConflictDialog(ctk.CTkToplevel):
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(fill="x", padx=14, pady=(0, 12))
         ctk.CTkButton(btn_row, text="Replace", command=self._on_replace).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btn_row, text="Rename", command=self._on_rename).pack(side="left", padx=(0, 8))
         ctk.CTkButton(btn_row, text="Skip", command=self._on_skip).pack(side="left", padx=(0, 8))
         ctk.CTkButton(btn_row, text="Cancel", command=self._on_cancel).pack(side="right")
 
@@ -324,6 +325,9 @@ class ConflictDialog(ctk.CTkToplevel):
 
     def _on_replace(self):
         self._close_with("replace")
+
+    def _on_rename(self):
+        self._close_with("rename")
 
     def _on_skip(self):
         self._close_with("skip")
@@ -343,6 +347,23 @@ def open_conflict_dialog(parent, file_name: str) -> tuple[str, bool]:
     """Show conflict dialog and return (action, apply_to_all)."""
     dialog = ConflictDialog(parent, file_name)
     return dialog.show_modal()
+
+
+def get_conflict_rename_path(dst_path: str) -> str:
+    """Return a non-existing sibling path for a conflict target."""
+    directory = os.path.dirname(dst_path)
+    name = os.path.basename(dst_path)
+    if os.path.isdir(dst_path):
+        stem, ext = name, ""
+    else:
+        stem, ext = os.path.splitext(name)
+
+    counter = 1
+    while True:
+        candidate = os.path.join(directory, f"{stem} ({counter}){ext}")
+        if not os.path.exists(candidate):
+            return candidate
+        counter += 1
 
 
 

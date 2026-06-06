@@ -11,7 +11,7 @@ import time
 import tkinter as tk
 
 import tkinterdnd2 as dnd
-from gui_elements import open_conflict_dialog
+from gui_elements import get_conflict_rename_path, open_conflict_dialog
 from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS
 
 
@@ -564,6 +564,7 @@ class VtpDndMixin:
         ok, fail = [], []
         changed_cache_folders = []
         replace_all = False
+        rename_all = False
         skip_all = False
 
         for src in sources:
@@ -592,8 +593,8 @@ class VtpDndMixin:
                         logging.info("[DnD] conflict skip-all: %s", dst)
                         continue
 
-                    should_replace = replace_all
-                    if not should_replace:
+                    conflict_action = "replace" if replace_all else "rename" if rename_all else None
+                    if conflict_action is None:
                         choice, apply_all = self._dnd_prompt_conflict_choice(dst)
                         if choice == "cancel":
                             logging.info("[DnD] conflict canceled by user: %s", dst)
@@ -602,11 +603,15 @@ class VtpDndMixin:
                             if apply_all:
                                 skip_all = True
                             continue
-                        should_replace = choice == "replace"
-                        if apply_all and should_replace:
+                        conflict_action = choice
+                        if apply_all and choice == "replace":
                             replace_all = True
+                        elif apply_all and choice == "rename":
+                            rename_all = True
 
-                    if should_replace and not self._dnd_delete_existing_target(dst):
+                    if conflict_action == "rename":
+                        dst = get_conflict_rename_path(dst)
+                    elif conflict_action == "replace" and not self._dnd_delete_existing_target(dst):
                         fail.append(src)
                         logging.error("[DnD] replace failed (cannot remove target): %s", dst)
                         continue
