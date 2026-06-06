@@ -835,6 +835,9 @@ class VtpGridMixin:
         """Calculates and sets the canvas scrollregion based on total content height."""
         if getattr(self, "_vg_active", False):
             return
+        if getattr(self, "search_results_active", False):
+            self._adjust_search_scrollregion_to_widgets()
+            return
 
         # self.update_idletasks() # Ensure frame sizes are current
 
@@ -999,6 +1002,7 @@ class VtpGridMixin:
     def _start_search_progressive_render(self, sorted_data, force_refresh=False, thumbnail_time=None):
         """Render search results in small Tk chunks so the window stays responsive."""
         try:
+            self._search_legacy_render_active = True
             num_folders = len(sorted_data['folders'])
             num_files = len(sorted_data['files'])
             logging.info("Rendering search results in chunks: %d folders and %d files...", num_folders, num_files)
@@ -1050,10 +1054,10 @@ class VtpGridMixin:
         total = len(render_plan)
         chunk_started = time.perf_counter()
         processed = 0
-        max_items = 18
-        time_budget_s = 0.018
+        max_items = 4
+        time_budget_s = 0.008
 
-        while idx < total and (processed < max_items or (time.perf_counter() - chunk_started) < time_budget_s):
+        while idx < total and processed < max_items and (time.perf_counter() - chunk_started) < time_budget_s:
             item_info, row, col, global_index, target_frame = render_plan[idx]
             if target_frame and target_frame.winfo_exists():
                 self.queue_thumbnail(
@@ -1073,7 +1077,8 @@ class VtpGridMixin:
         if total > 0 and hasattr(self, "status_bar") and self.status_bar:
             queued_pct = 90 + (idx / total) * 10
             self.status_bar.update_progress(min(99, queued_pct))
-            self.status_bar.set_action_message(f"Queueing search results: {idx}/{total}")
+            found_total = self._search_total_available(total)
+            self.status_bar.set_action_message(f"Found {found_total} | Queue {idx}/{total}")
 
         if idx < total:
             self.after(
@@ -1090,8 +1095,74 @@ class VtpGridMixin:
 
         self._is_loading = False
         if hasattr(self, "status_bar") and self.status_bar:
-            self.status_bar.set_action_message(f"Search results queued: {total}")
-        self.after_idle(self.adjust_scroll_region_and_filler)
+            shown_count = int(getattr(self, "_search_loaded_count", 0) or len(getattr(self, "current_search_results", []) or []))
+            self.status_bar.set_action_message(self._format_search_status_detail(shown_count))
+        self._schedule_search_scrollregion_refresh()
+
+    def _append_search_results_render(self, new_results, start_index, force_refresh=False, thumbnail_time=None):
+        """Append one page of search results without rebuilding already visible widgets."""
+        if not new_results:
+            return
+        try:
+            if not getattr(self, "search_results_active", False):
+                return
+            self.update_status_bar()
+            self.calculate_grid()
+
+            if not self.regular_thumbnails_frame.winfo_ismapped():
+                self.regular_thumbnails_frame.pack(side="top", fill="both", expand=True, padx=5, pady=5)
+
+            render_plan = []
+            for offset, item_info in enumerate(new_results):
+                global_index = start_index + offset
+                row, col = divmod(global_index, self.columns)
+                render_plan.append((item_info, row, col, global_index, self.regular_thumbnails_frame))
+
+            self._render_search_results_chunk(
+                render_plan,
+                0,
+                force_refresh,
+                thumbnail_time,
+                getattr(self, "_search_request_id", None),
+            )
+        except Exception as e:
+            logging.error("Search append render failed: %s", e, exc_info=True)
+
+    def _schedule_search_scrollregion_refresh(self):
+        for delay in (0, 120, 350, 800):
+            try:
+                self.after(delay, self._adjust_search_scrollregion_to_widgets)
+            except Exception:
+                pass
+
+    def _request_search_scrollregion_refresh(self):
+        if getattr(self, "_search_scrollregion_after_id", None):
+            return
+        try:
+            self._search_scrollregion_after_id = self.after(120, self._run_search_scrollregion_refresh)
+        except Exception:
+            self._search_scrollregion_after_id = None
+
+    def _run_search_scrollregion_refresh(self):
+        self._search_scrollregion_after_id = None
+        self._adjust_search_scrollregion_to_widgets()
+
+    def _adjust_search_scrollregion_to_widgets(self):
+        if not getattr(self, "search_results_active", False):
+            return
+        if getattr(self, "_vg_active", False):
+            return
+        try:
+            self.update_idletasks()
+            bbox = self.canvas.bbox("all")
+            if bbox:
+                self.canvas.configure(scrollregion=bbox)
+            else:
+                canvas_w = max(1, self.canvas.winfo_width())
+                canvas_h = max(1, self.canvas.winfo_height())
+                self.canvas.configure(scrollregion=(0, 0, canvas_w, canvas_h))
+        except Exception as e:
+            logging.debug("[Search] scrollregion refresh failed: %s", e)
 
 
     def _render_remaining(self, start_index, force_refresh=False, thumbnail_time=None):
@@ -1760,6 +1831,8 @@ class VtpGridMixin:
                         self.add_thumbnail_to_grid(thumbnail, file_path, file_name, row, col, is_folder=False, index=index, target_frame=target_frame)
                         if is_refresh:
                             self._restore_selection_visual()  # refresh replaced thumbnail, re-apply selection border
+                        if getattr(self, "search_results_active", False):
+                            self._request_search_scrollregion_refresh()
                     
                     self.finalize_thread()
                     
@@ -2533,7 +2606,7 @@ class VtpGridMixin:
             self.thumb_queue_running = True
             count = 0
             
-            batch_limit = 24 
+            batch_limit = 4 if getattr(self, "search_results_active", False) else 24
             
             while not self.thumb_queue.empty() and count < batch_limit:
                 file_path, file_name, row, col, index, is_folder, thumbnail_time, force_refresh, target_frame, render_id = self.thumb_queue.get()
@@ -5999,6 +6072,12 @@ class VtpGridMixin:
         )
 
     def _format_search_results_detail(self, query_text, new_count, total_count):
+        total_available = self._search_total_available(total_count)
+        if total_available > total_count:
+            return (
+                f"Showing {total_count} of {total_available} file(s) for {query_text}. "
+                "Use Load more for additional results."
+            )
         if total_count <= 0:
             return f"No files found for {query_text}."
         if new_count == total_count:
@@ -6006,6 +6085,26 @@ class VtpGridMixin:
         if new_count == 0:
             return f"No new files found for {query_text}. Showing {total_count} accumulated result(s)."
         return f"{new_count} new file(s) found for {query_text}. Showing {total_count} accumulated result(s)."
+
+    def _search_total_available(self, fallback=0):
+        total_available = int(getattr(self, "search_results_total_available", fallback) or fallback)
+        all_results = getattr(self, "_search_all_results", None)
+        if all_results:
+            total_available = max(total_available, len(all_results))
+        return total_available
+
+    def _format_search_status_detail(self, total_count):
+        total_available = self._search_total_available(total_count)
+        if total_available > total_count:
+            return f"Found {total_available} | Shown {total_count}"
+        return f"Found {total_count}"
+
+    def _search_pending_count(self):
+        all_results = getattr(self, "_search_all_results", None)
+        if all_results:
+            loaded_count = int(getattr(self, "_search_loaded_count", 0) or 0)
+            return max(0, len(all_results) - loaded_count)
+        return len(getattr(self, "_search_pending_results", []) or [])
 
     def _set_search_results_view(self, query_text, new_count, total_count):
         if getattr(self, "search_results_banner", None) is None:
@@ -6026,7 +6125,7 @@ class VtpGridMixin:
         self._pack_search_results_banner()
 
         if hasattr(self, "status_bar") and self.status_bar:
-            self.status_bar.set_action_message(detail)
+            self.status_bar.set_action_message(self._format_search_status_detail(total_count))
             if hasattr(self.status_bar, "clear_action_button"):
                 self.status_bar.clear_action_button()
         self._update_search_restore_button_state()
@@ -6035,15 +6134,105 @@ class VtpGridMixin:
         was_search_view = getattr(self, "search_results_active", False)
         if clear_results:
             self.current_search_results = []
+            self._search_pending_results = []
+            self._search_all_results = []
+            self._search_loaded_count = 0
             self.search_results_query = ""
             self.search_results_count = 0
+            self.search_results_total_available = 0
         else:
             self.search_results_count = len(getattr(self, "current_search_results", []) or [])
+            all_results = getattr(self, "_search_all_results", None)
+            self.search_results_total_available = (
+                len(all_results)
+                if all_results
+                else self.search_results_count + len(getattr(self, "_search_pending_results", []) or [])
+            )
         self.search_results_active = False
         self._hide_search_results_banner()
         if clear_action and was_search_view and hasattr(self, "status_bar") and self.status_bar:
             self.status_bar.clear_action_message()
         self._update_search_restore_button_state()
+
+    def _search_page_size(self):
+        try:
+            return max(1, int(getattr(self, "search_results_page_size", 250) or 250))
+        except (TypeError, ValueError):
+            return 250
+
+    def _search_load_more_batch_size(self):
+        return self._search_page_size()
+
+    def _update_search_load_more_action(self):
+        if not hasattr(self, "status_bar") or not self.status_bar:
+            return
+        pending = self._search_pending_count()
+        if pending <= 0:
+            if hasattr(self.status_bar, "clear_action_button"):
+                self.status_bar.clear_action_button()
+            return
+        page_size = self._search_page_size()
+        batch_size = self._search_load_more_batch_size()
+        count = min(batch_size, pending)
+        logging.debug(
+            "[SearchPaging] button page_size=%d batch_size=%d shown=%d total=%d pending=%d count=%d",
+            page_size,
+            batch_size,
+            int(getattr(self, "_search_loaded_count", 0) or 0),
+            len(getattr(self, "_search_all_results", []) or []),
+            pending,
+            count,
+        )
+        if hasattr(self.status_bar, "set_action_button"):
+            self.status_bar.set_action_button(f"Load {count} more", self.load_more_search_results)
+
+    def load_more_search_results(self):
+        page_size = self._search_page_size()
+        batch_size = self._search_load_more_batch_size()
+        all_results = list(getattr(self, "_search_all_results", []) or [])
+        start_index = int(getattr(self, "_search_loaded_count", 0) or 0)
+        logging.info(
+            "[SearchPaging] load_more page_size=%d batch_size=%d start=%d total=%d legacy_pending=%d",
+            page_size,
+            batch_size,
+            start_index,
+            len(all_results),
+            len(getattr(self, "_search_pending_results", []) or []),
+        )
+
+        if all_results:
+            if start_index >= len(all_results):
+                self._search_pending_results = []
+                self._update_search_load_more_action()
+                return
+            end_index = min(start_index + batch_size, len(all_results))
+            next_results = all_results[start_index:end_index]
+            self._search_pending_results = all_results[end_index:]
+            self._search_loaded_count = end_index
+        else:
+            pending = list(getattr(self, "_search_pending_results", []) or [])
+            if not pending:
+                self._update_search_load_more_action()
+                return
+            next_results = pending[:batch_size]
+            self._search_pending_results = pending[batch_size:]
+            all_results = list(self.current_search_results) + next_results + self._search_pending_results
+            self._search_all_results = all_results
+            self._search_loaded_count = len(self.current_search_results) + len(next_results)
+
+        self.current_search_results.extend(next_results)
+        self.search_results_total_available = len(all_results)
+
+        query_text = getattr(self, "search_results_query", None) or "last search"
+        self._set_search_results_view(
+            query_text,
+            new_count=len(next_results),
+            total_count=len(self.current_search_results),
+        )
+        self._update_search_load_more_action()
+        self.total_files_to_process = 0
+        self.processed_files_count = 0
+        self._append_search_results_render(next_results, start_index, force_refresh=False)
 
     def clear_search_results_view(self):
         """Leave search results and restore the folder that was active before search."""
@@ -6073,15 +6262,20 @@ class VtpGridMixin:
 
         query_text = getattr(self, "search_results_query", None) or "last search"
         self.clear_thumbnails()
+        pending_results = list(getattr(self, "_search_pending_results", []) or [])
+        self._search_all_results = results + pending_results
+        self._search_loaded_count = len(results)
         formatted_data = {
             'folders': [f for f in results if f.get('is_folder', False)],
             'files': [f for f in results if not f.get('is_folder', False)]
         }
+        self.search_results_total_available = len(self._search_all_results)
         self._set_search_results_view(
             query_text,
             new_count=len(results),
             total_count=len(results),
         )
+        self._update_search_load_more_action()
         # Restoring search results must not regenerate thumbnail cache. A forced
         # render here overwrote user-refreshed thumbnails on the next app start.
         self._start_search_progressive_render(formatted_data, force_refresh=False)
@@ -6167,6 +6361,10 @@ class VtpGridMixin:
                 self.clear_thumbnails()
                 # And also clear our internal list of results
                 self.current_search_results = []
+                self._search_pending_results = []
+                self._search_all_results = []
+                self._search_loaded_count = 0
+                self.search_results_total_available = 0
 
             def _worker():
                 try:
@@ -6236,24 +6434,79 @@ class VtpGridMixin:
                 logging.info("No new search results to display.")
                 if not self.current_search_results:
                     self.clear_thumbnails()
+                self.search_results_total_available = len(self.current_search_results) + len(
+                    getattr(self, "_search_pending_results", []) or []
+                )
+                self._search_all_results = list(self.current_search_results) + list(
+                    getattr(self, "_search_pending_results", []) or []
+                )
+                self._search_loaded_count = len(self.current_search_results)
                 self._set_search_results_view(
                     query_text,
                     new_count=0,
                     total_count=len(self.current_search_results),
                 )
+                self._update_search_load_more_action()
                 self.adjust_scroll_region_and_filler()
                 if hasattr(self, "status_bar") and self.status_bar:
                     self.status_bar.update_progress(100)
                 return
 
             # Convert the new database results into the format expected by the renderer.
-            new_files_to_render = [
+            all_new_files = [
                 {'path': r['file_path'], 'name': r['filename'], 'is_folder': False}
                 for r in new_results
             ]
+            if not clear_previous:
+                seen_paths = {
+                    os.path.normcase(os.path.normpath(f.get('path', '')))
+                    for f in (
+                        list(getattr(self, "_search_all_results", []) or [])
+                        or list(getattr(self, "current_search_results", []) or [])
+                    )
+                    if f.get('path')
+                }
+                seen_paths.update(
+                    os.path.normcase(os.path.normpath(f.get('path', '')))
+                    for f in getattr(self, "_search_pending_results", [])
+                    if f.get('path')
+                )
+                unique_new_files = []
+                for item in all_new_files:
+                    norm_path = os.path.normcase(os.path.normpath(item.get('path', '')))
+                    if norm_path in seen_paths:
+                        continue
+                    seen_paths.add(norm_path)
+                    unique_new_files.append(item)
+                all_new_files = unique_new_files
+                if not all_new_files:
+                    self.search_results_total_available = len(self.current_search_results) + len(
+                        getattr(self, "_search_pending_results", []) or []
+                    )
+                    self._search_all_results = list(self.current_search_results) + list(
+                        getattr(self, "_search_pending_results", []) or []
+                    )
+                    self._search_loaded_count = len(self.current_search_results)
+                    self._set_search_results_view(
+                        query_text,
+                        new_count=0,
+                        total_count=len(self.current_search_results),
+                    )
+                    self._update_search_load_more_action()
+                    if hasattr(self, "status_bar") and self.status_bar:
+                        self.status_bar.update_progress(100)
+                    return
+            page_size = self._search_page_size()
+            new_files_to_render = all_new_files[:page_size]
+            pending_new = all_new_files[page_size:]
+            existing_pending = [] if clear_previous else list(getattr(self, "_search_pending_results", []) or [])
+            self._search_pending_results = existing_pending + pending_new
 
             # Add the new results to our persistent list.
             self.current_search_results.extend(new_files_to_render)
+            self._search_all_results = list(self.current_search_results) + list(self._search_pending_results)
+            self._search_loaded_count = len(self.current_search_results)
+            self.search_results_total_available = len(self._search_all_results)
 
             # If we didn't clear the thumbnails at the start, we need to do it now.
             if not clear_previous:
@@ -6269,6 +6522,7 @@ class VtpGridMixin:
                 new_count=len(new_files_to_render),
                 total_count=len(self.current_search_results),
             )
+            self._update_search_load_more_action()
 
             # Search progress tracks DB + queueing. Thumbnail decode continues in
             # the existing background queue and should not reset the bar downward.

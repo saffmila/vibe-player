@@ -19,11 +19,6 @@ class StatusBar(ctk.CTkFrame):
         self.main_frame = ctk.CTkFrame(self)
         self.main_frame.pack(side=ctk.BOTTOM, fill=ctk.X)
 
-        # Status label
-        self.status_var = ctk.StringVar()
-        self.status_label = ctk.CTkLabel(self.main_frame, textvariable=self.status_var, anchor="w")
-        self.status_label.pack(side=ctk.LEFT, fill=ctk.X, expand=True)
-
         # Blue action label TEXTS INFO (for tasks like tagging)
         self.action_var = ctk.StringVar()
         self._action_info_color = "skyblue"
@@ -34,7 +29,12 @@ class StatusBar(ctk.CTkFrame):
             anchor="w",
             text_color=self._action_info_color,
         )
-        self.action_label.pack(side=ctk.LEFT, padx=(10, 20))
+        self.action_label.pack(side=ctk.LEFT, padx=(10, 12))
+
+        # Status label
+        self.status_var = ctk.StringVar()
+        self.status_label = ctk.CTkLabel(self.main_frame, textvariable=self.status_var, anchor="w")
+        self.status_label.pack(side=ctk.LEFT, fill=ctk.X, expand=True)
 
         self.action_button = ctk.CTkButton(
             self.main_frame,
@@ -163,7 +163,8 @@ class StatusBar(ctk.CTkFrame):
         self.action_var.set(text)
 
     def set_action_button(self, text: str, command):
-        self.action_button.configure(text=text, command=command)
+        button_width = max(58, min(150, len(str(text)) * 8 + 18))
+        self.action_button.configure(text=text, command=command, width=button_width)
         if not self.action_button.winfo_ismapped():
             self.action_button.pack(side=ctk.LEFT, padx=(0, 8), before=self.stop_button)
 

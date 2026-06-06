@@ -239,6 +239,10 @@ class VtpPreferencesMixin:
                 # Load thumbnail time
                 self.thumbnail_time = settings.get("thumbnail_time", 0.1)  # Default to 10% if not set
                 self.thumbnail_time_var.set(int(self.thumbnail_time * 100))  # Set slider value
+                try:
+                    self.search_results_page_size = max(1, int(settings.get("search_results_page_size", 250)))
+                except (TypeError, ValueError):
+                    self.search_results_page_size = 250
                 # New additions
                 self.numwidefolders_in_col = settings.get("numwidefolders_in_col", 2)  # Default to 2
                 # 1. Load value under the new settings key
@@ -331,6 +335,7 @@ class VtpPreferencesMixin:
             # self.audio_device_var.set(sd.query_devices()[0]['name'])  # Default to first audio device
             self.thumbnail_time = 0.1  # Default to 10% for thumbnail creation time
             self.thumbnail_time_var.set(10)
+            self.search_results_page_size = 250
             self.numwidefolders_in_col = 2  # Default
             # self.wide_folders_var.set(settings.get("wide_folders_var", True))  # Default
             # self.folder_view_mode.set("Wide" if settings.get("wide_folders_var") else "Standard")

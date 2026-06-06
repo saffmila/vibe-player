@@ -1556,6 +1556,19 @@ def create_preferences_window(app):
     )
     thumbnail_time_slider.pack(fill="both", expand=True, padx=5, pady=5)
 
+    _add_preferences_separator(thumbnail_options_frame)
+    search_page_size_frame = ctk.CTkFrame(thumbnail_options_frame, **pref_group_kwargs)
+    search_page_size_frame.pack(fill="x", padx=10, pady=(0, 6))
+    ctk.CTkLabel(search_page_size_frame, text="Search results page size").pack(anchor="w", padx=5)
+    search_results_page_size_var = ctk.StringVar(
+        value=str(getattr(app, "search_results_page_size", 250))
+    )
+    search_page_size_entry = ctk.CTkEntry(
+        search_page_size_frame,
+        textvariable=search_results_page_size_var
+    )
+    search_page_size_entry.pack(fill="both", expand=True, padx=5, pady=(2, 5))
+
     # === CACHE PATH ===
     _add_preferences_separator(thumbnail_options_frame)
     cache_path_frame = ctk.CTkFrame(thumbnail_options_frame, **pref_group_kwargs)
@@ -1749,6 +1762,10 @@ def create_preferences_window(app):
         app.vlc_enable_gradfun = vlc_gradfun_var.get()
         app.vlc_enable_deinterlace = vlc_deinterlace_var.get()
         app.vlc_skiploopfilter_disable = vlc_skiploopfilter_var.get()
+        try:
+            app.search_results_page_size = max(1, int(search_results_page_size_var.get()))
+        except (TypeError, ValueError):
+            app.search_results_page_size = 250
         # 1. Call the original save_preferences function (defined elsewhere)
         save_preferences(
             app,
@@ -1844,6 +1861,7 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
         "play_broken_videos": bool(getattr(app, "play_broken_videos", True)),
         "timeline_strip_count": getattr(app, "timeline_strip_count", 20),
         "preview_window_strip_limit": bool(getattr(app, "preview_window_strip_limit", True)),
+        "search_results_page_size": int(getattr(app, "search_results_page_size", 250)),
         "dnd_confirm_dialogs": getattr(app, "dnd_confirm_dialogs", False),
         "delete_to_trash": bool(getattr(app, "delete_to_trash", True)),
         "image_viewer_use_pyglet": bool(getattr(app, "image_viewer_use_pyglet", False)),
@@ -1914,6 +1932,9 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
     app.wide_folders_check_var.set(preferences["wide_folders_check_var"])
     app.widefolder_size = app.parse_thumbnail_size(preferences["widefolder_size"])  # Parse new tuple
     app.thumbnail_time = preferences["thumbnail_time"]
+    app.search_results_page_size = int(preferences.get("search_results_page_size", 250))
+    if getattr(app, "search_results_active", False) and hasattr(app, "_update_search_load_more_action"):
+        app._update_search_load_more_action()
     app.play_broken_videos = bool(preferences.get("play_broken_videos", True))
     app.preview_window_strip_limit = bool(preferences.get("preview_window_strip_limit", True))
     if getattr(app, "info_panel", None) and hasattr(app.info_panel, "multiTimeline_limit_var"):
@@ -1963,7 +1984,7 @@ def perform_search(app, search_param, keyword, operator, media_scope="All"):
         return
 
     # Validate operator to ensure it's one of the allowed ones
-    valid_operators = ['<', '<=', '>', '>=', 'AND', 'OR']
+    valid_operators = ['<', '<=', '>', '>=', '=', '!=', 'AND', 'OR']
     if operator not in valid_operators:
         logging.info(f"Invalid operator: {operator}. Expected one of {valid_operators}")
         return

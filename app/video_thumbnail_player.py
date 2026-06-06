@@ -547,6 +547,10 @@ class VideoThumbnailPlayer(
         self.search_results_active = False
         self.search_results_query = ""
         self.search_results_count = 0
+        self.search_results_page_size = 250
+        self._search_all_results = []
+        self._search_loaded_count = 0
+        self._search_pending_results = []
         self.search_results_return_directory = self.current_directory
 
         # Folder icons for grid (yellow placeholders if load fails)

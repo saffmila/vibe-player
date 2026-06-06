@@ -575,9 +575,83 @@ class Database:
         # Query the database to get valid columns
         valid_columns = self.db.query("PRAGMA table_info(files)")
         return [col['name'] for col in valid_columns]
+
+    def _parse_file_size_query_bytes(self, value):
+        """Parse file-size search values. Bare numbers are treated as MB."""
+        text = str(value or "").strip().lower().replace(",", ".")
+        if not text:
+            raise ValueError("empty file size")
+
+        units = (
+            ("bytes", 1),
+            ("byte", 1),
+            ("gb", 1024 ** 3),
+            ("g", 1024 ** 3),
+            ("mb", 1024 ** 2),
+            ("m", 1024 ** 2),
+            ("kb", 1024),
+            ("k", 1024),
+            ("b", 1),
+        )
+        multiplier = 1024 ** 2
+        for suffix, factor in units:
+            if text.endswith(suffix):
+                multiplier = factor
+                text = text[: -len(suffix)].strip()
+                break
+
+        return float(text) * multiplier
+
+    @staticmethod
+    def _compare_numeric(left, operator, right):
+        if operator == "<":
+            return left < right
+        if operator == "<=":
+            return left <= right
+        if operator == ">":
+            return left > right
+        if operator == ">=":
+            return left >= right
+        if operator == "=":
+            return left == right
+        if operator == "!=":
+            return left != right
+        return False
+
+    def _search_by_file_size(self, keyword, operator):
+        try:
+            target_bytes = self._parse_file_size_query_bytes(keyword)
+        except ValueError:
+            logging.info("[Error] Invalid file size value: %s", keyword)
+            return []
+
+        rows = list(self.db.query("SELECT * FROM files WHERE file_path IS NOT NULL"))
+        matched = []
+        for row in rows:
+            file_path = row.get("file_path")
+            if not file_path:
+                continue
+            try:
+                size_bytes = float(os.path.getsize(file_path))
+            except OSError:
+                continue
+            if self._compare_numeric(size_bytes, operator, target_bytes):
+                matched.append(row)
+        logging.debug(
+            "file_size search matched %d/%d rows operator=%s target_bytes=%s",
+            len(matched),
+            len(rows),
+            operator,
+            target_bytes,
+        )
+        return matched
     
     def search_entries(self, search_param, keyword, and_or=None, operator=None):
         try:
+            search_param = {
+                "name": "filename",
+                "path": "file_path",
+            }.get(search_param, search_param)
             logging.debug(
                 "search_entries: param=%s keyword=%s operator=%s and_or=%s",
                 search_param,
@@ -587,7 +661,10 @@ class Database:
             )
 
             # Handle numeric comparisons
-            if operator in ('<=', '>=', '<', '>') and search_param in ['rating', 'width', 'height']:
+            if operator in ('<=', '>=', '<', '>', '=', '!=') and search_param == 'file_size':
+                return self._search_by_file_size(keyword, operator)
+
+            if operator in ('<=', '>=', '<', '>', '=', '!=') and search_param in ['rating', 'width', 'height', 'duration']:
                 try:
                     value = float(keyword)  # Ensure the keyword is numeric
                 except ValueError:
@@ -607,6 +684,7 @@ class Database:
             # Validate the search columns
             search_columns = (
                 valid_columns if search_param == "all_fields" 
+                else [] if search_param == "file_size"
                 else [search_param] if search_param in valid_columns 
                 else []
             )
@@ -618,11 +696,18 @@ class Database:
             query_parts = []
             params = {}
             for i, kw in enumerate(keywords):
-                subquery = " OR ".join([f"{col} LIKE :term_{i}" for col in search_columns])
+                if operator == "!=":
+                    subquery = " AND ".join([
+                        f"({col} IS NULL OR {col} NOT LIKE :term_{i})"
+                        for col in search_columns
+                    ])
+                else:
+                    subquery = " OR ".join([f"{col} LIKE :term_{i}" for col in search_columns])
                 query_parts.append(f"({subquery})")
                 params[f"term_{i}"] = f"%{kw}%"
 
-            query = f"SELECT * FROM files WHERE {' AND '.join(query_parts) if and_or == 'AND' else ' OR '.join(query_parts)}"
+            joiner = " AND " if and_or == 'AND' or operator in ("=", "!=") else " OR "
+            query = f"SELECT * FROM files WHERE {joiner.join(query_parts)}"
             logging.debug("search_entries query: %s params=%s", query, params)
             return self.db.query(query, **params)
 
