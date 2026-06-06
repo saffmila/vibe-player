@@ -2257,8 +2257,8 @@ class VideoPlayer:
 
         self.volume_label = ctk.CTkLabel(
             volume_frame,
-            text="",
-            image=self.volume_icon,
+            text="" if getattr(self, "volume_icon", None) else "vol",
+            image=getattr(self, "volume_icon", None),
             cursor="hand2",
             text_color=self.on_surface,
         )
@@ -2381,6 +2381,21 @@ class VideoPlayer:
             Loads player control icons from the /icons subdirectory using the parent's default directory.
             NOTE: overwrites original paths to look into the new icons folder.
             """
+            for attr in (
+                "play_button_icon", "play_button_icon_hover",
+                "stop_button_icon", "stop_button_icon_hover",
+                "rewind_start_button_icon", "rewind_start_button_icon_hover",
+                "rewind_end_button_icon", "rewind_end_button_icon_hover",
+                "skip_next_button_icon", "skip_next_button_icon_hover",
+                "skip_back_button_icon", "skip_back_button_icon_hover",
+                "fullscreen_button_icon", "fullscreen_button_icon_hover",
+                "repeat_icon", "repeat_icon_hover",
+                "settings_icon", "settings_icon_hover",
+                "loop_menu_icon", "loop_menu_icon_hover",
+                "playlist_icon", "subtitles_icon",
+                "volume_icon", "volume_icon_hover",
+            ):
+                setattr(self, attr, None)
             try:
                 # Sestavíme cestu k icons adresáři
                 # self.parent je hlavní VideoThumbnailPlayer, který má nastavenou cestu v default_directory
@@ -2509,6 +2524,19 @@ class VideoPlayer:
             image=_settings_ico,
             command=self.show_video_menu
         )
+        self.open_library_button = None
+        if callable(getattr(self.controller, "open_library", None)):
+            self.open_library_button = ctk.CTkButton(
+                self.controls_frame,
+                width=72,
+                height=28,
+                fg_color=buttonFG_color,
+                hover_color=icon_hover,
+                text_color=button_text,
+                corner_radius=4,
+                text="library",
+                command=self.controller.open_library,
+            )
 
         # )
         _loop_ico = getattr(self, "loop_menu_icon", None)
@@ -2540,6 +2568,8 @@ class VideoPlayer:
         # self.playlist_button.pack(side=ctk.LEFT, padx=5)
         # self.subtitles_button.pack(side=ctk.LEFT, padx=5)
         self.video_menu_button.pack(side=ctk.RIGHT, padx=btn_padx, pady=controls_pady)
+        if self.open_library_button is not None:
+            self.open_library_button.pack(side=ctk.RIGHT, padx=btn_padx, pady=controls_pady)
         self.loop_menu_button.pack(side=ctk.RIGHT, padx=btn_padx, pady=controls_pady)
         
 

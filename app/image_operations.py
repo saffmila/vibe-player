@@ -137,6 +137,9 @@ class ImageViewerLegacy:
         
         self.image_window.bind(hk('image_copy', '<Control-c>'), consume(lambda e: self.copy_image_to_clipboard()))
         self.image_window.bind(hk('image_save', '<Control-s>'), consume(lambda e: self.save_image_to_folder()))
+        if callable(getattr(self.controller, "open_library", None)):
+            self.image_window.bind("<Control-l>", consume(lambda e: self.controller.open_library()))
+            self.image_window.bind("<Control-L>", consume(lambda e: self.controller.open_library()))
         
         # 4. Fullscreen
         self.image_window.bind(hk('image_fullscreen', '<F11>'), consume(self.toggle_fullscreen))
@@ -742,6 +745,9 @@ class ImageViewerLegacy:
         menu.add_separator()
         menu.add_command(label=f"Delete ({hk_label('image_delete', 'Del')})", command=self.delete_current_image)
         menu.add_separator()
+        if callable(getattr(self.controller, "open_library", None)):
+            menu.add_command(label="Open Library (Ctrl+L)", command=self.controller.open_library)
+            menu.add_separator()
         menu.add_command(label="Toggle Fullscreen (F11)", command=self.toggle_fullscreen)
         
         menu.tk_popup(event.x_root, event.y_root)
@@ -1540,6 +1546,9 @@ class ImageViewerGPU:
         if not ctrl and symbol in (k.F,):
             self._do_toggle_fullscreen()
             return
+        if ctrl and symbol in (k.L,) and callable(getattr(self.controller, "open_library", None)):
+            self.parent.after(0, self.controller.open_library)
+            return
 
         # Also handle zoom keys that have no simple Tkinter string equivalent
         if symbol in (k.PLUS, k.EQUAL, k.NUM_ADD):
@@ -1830,6 +1839,9 @@ class ImageViewerGPU:
         menu.add_separator()
         menu.add_command(label="Delete", accelerator=hk('image_delete', 'Del'), command=self.delete_current_image)
         menu.add_separator()
+        if callable(getattr(self.controller, "open_library", None)):
+            menu.add_command(label="Open Library", accelerator="Ctrl+L", command=self.controller.open_library)
+            menu.add_separator()
         menu.add_command(label="Toggle Fullscreen", accelerator="F11", command=self.toggle_fullscreen)
         menu.tk_popup(int(screen_x), int(screen_y))
 

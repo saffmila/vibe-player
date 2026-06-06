@@ -24,6 +24,9 @@ _datas = [
     ("tools/ffmpeg/bin", "tools/ffmpeg/bin"),
     # Splash screen (pokud je uvnitr app)
     ("app/splash_image.py", "."),
+    # Windows file-association helpers for the portable build
+    ("register_file_associations.bat", "."),
+    ("unregister_file_associations.bat", "."),
 ]
 
 # Required for CLIP runtime: ships open_clip BPE vocabulary file

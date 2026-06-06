@@ -15,6 +15,9 @@ A **no-nonsense, comfortable, and easy-to-use media player based on the famous V
 Download the latest **VibePlayer.zip** from the [Releases](https://github.com/saffmila/vibe-player/releases/) section.
 1. Extract the ZIP to any folder.
 2. Run **`VibePlayer.exe`**. No installation or Python setup is required.
+3. Optional Windows file associations: run **`register_file_associations.bat`**
+   from the extracted folder, then choose **Vibe Player** in Windows Default apps
+   or via **Open with** for your image/video extensions.
 
 #### 2. Development Version (From Source)
 1. **Installation**: Run `run install.bat`. This sets up a Python 3.11 virtual environment and installs all dependencies.

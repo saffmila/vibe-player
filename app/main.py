@@ -18,12 +18,14 @@ if __name__ == "__main__" and getattr(sys, "frozen", False):
             raise SystemExit(0)
 
 from logging_setup import setup_logging
+from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS
 import json
 import os
 import logging
 import faulthandler
 import signal
 import multiprocessing
+import subprocess
 
 # --- Step 1: Save original stderr (console) before setup_logging replaces it with StreamToLogger ---
 original_stderr = sys.stderr
@@ -37,11 +39,16 @@ log_path = setup_logging(debug=debug_mode)
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 _SUPERFAST_SKIP_ARGS = frozenset({"--debug"})
-_SUPERFAST_IMAGE_EXT = frozenset(
-    {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
-)
-_SUPERFAST_VIDEO_EXT = frozenset(
-    {".mp4", ".avi", ".mkv", ".mov", ".webm", ".wmv"}
+_SUPERFAST_IMAGE_EXT = frozenset(IMAGE_FORMATS)
+_SUPERFAST_VIDEO_EXT = frozenset(VIDEO_FORMATS)
+_FILE_ASSOC_APP_NAME = "Vibe Player"
+_FILE_ASSOC_APP_KEY = "VibePlayer.exe"
+_FILE_ASSOC_DESCRIPTION = "Vibe Player media viewer"
+_FILE_ASSOC_IMAGE_PROGID = "VibePlayer.Image"
+_FILE_ASSOC_VIDEO_PROGID = "VibePlayer.Video"
+_FILE_ASSOC_GROUPS = (
+    (_FILE_ASSOC_IMAGE_PROGID, "Vibe Player Image", _SUPERFAST_IMAGE_EXT),
+    (_FILE_ASSOC_VIDEO_PROGID, "Vibe Player Video", _SUPERFAST_VIDEO_EXT),
 )
 
 _WANTS_SUPERFAST_MEDIA = os.environ.get("VIBE_SUPERFAST_MEDIA", "1").strip().lower() not in (
@@ -102,13 +109,31 @@ def _prepare_lightweight_env():
     except ImportError:
         pass
 
-    project_root = os.path.dirname(APP_DIR)
-    ffmpeg_bin_path = os.path.join(project_root, "tools", "ffmpeg", "bin")
+    ffmpeg_bin_path = os.path.join(_runtime_tools_base_dir(), "tools", "ffmpeg", "bin")
     if os.path.isdir(ffmpeg_bin_path):
         os.environ["PATH"] = ffmpeg_bin_path + os.pathsep + os.environ["PATH"]
         logging.info("FFmpeg path successfully added to PATH: %s", ffmpeg_bin_path)
     else:
         logging.warning("FFmpeg path not found at: %s", ffmpeg_bin_path)
+
+
+def _runtime_base_dir() -> str:
+    """Directory containing bundled runtime assets such as icons and tools."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return APP_DIR
+
+
+def _source_project_root() -> str:
+    """Repository root when running from source."""
+    return os.path.dirname(APP_DIR)
+
+
+def _runtime_tools_base_dir() -> str:
+    """Directory containing bundled external tools."""
+    if getattr(sys, "frozen", False):
+        return _runtime_base_dir()
+    return _source_project_root()
 
 
 def _load_fast_media_prefs():
@@ -147,6 +172,237 @@ def _parse_cli_media_path(argv):
     """Return first non-flag argument after ``argv[0]``, if any."""
     args = [a for a in argv[1:] if a not in _SUPERFAST_SKIP_ARGS]
     return args[0] if args else None
+
+
+def _windows_quote(value: str) -> str:
+    """Quote one Windows command argument for registry open commands."""
+    return '"' + value.replace('"', '\\"') + '"'
+
+
+def _file_association_command() -> tuple[str, str]:
+    """
+    Return ``(open_command, icon_target)`` for the current runtime.
+
+    Frozen builds register ``VibePlayer.exe``. Source runs register ``run.bat`` so
+    development builds can be tested from Explorer without changing the final path.
+    """
+    if getattr(sys, "frozen", False):
+        target = os.path.abspath(sys.executable)
+        return f"{_windows_quote(target)} \"%1\"", target
+
+    project_root = _source_project_root()
+    run_bat = os.path.join(project_root, "run.bat")
+    if os.path.isfile(run_bat):
+        target = os.path.abspath(run_bat)
+        return f"{_windows_quote(target)} \"%1\"", target
+
+    main_py = os.path.join(APP_DIR, "main.py")
+    target = os.path.abspath(sys.executable)
+    return f"{_windows_quote(target)} {_windows_quote(main_py)} \"%1\"", target
+
+
+def _reg_set_sz(winreg, root, path: str, name: str, value: str) -> None:
+    with winreg.CreateKeyEx(root, path, 0, winreg.KEY_WRITE) as key:
+        winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
+
+
+def _reg_create_key(winreg, root, path: str) -> None:
+    with winreg.CreateKeyEx(root, path, 0, winreg.KEY_WRITE):
+        pass
+
+
+def _reg_delete_value(winreg, root, path: str, name: str) -> None:
+    try:
+        with winreg.OpenKey(root, path, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.DeleteValue(key, name)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def _reg_delete_tree(winreg, root, path: str) -> None:
+    try:
+        with winreg.OpenKey(root, path, 0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
+            while True:
+                try:
+                    child = winreg.EnumKey(key, 0)
+                except OSError:
+                    break
+                _reg_delete_tree(winreg, root, path + "\\" + child)
+        winreg.DeleteKey(root, path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def _register_windows_file_associations() -> int:
+    """Register Vibe Player as an Open With/default-app candidate for media files."""
+    if os.name != "nt":
+        print("File association registration is only supported on Windows.")
+        return 1
+
+    import winreg
+
+    classes_root = r"Software\Classes"
+    app_path = classes_root + r"\Applications" + "\\" + _FILE_ASSOC_APP_KEY
+    capabilities_path = app_path + r"\Capabilities"
+    command, icon_target = _file_association_command()
+    icon_value = f"{_windows_quote(icon_target)},0"
+
+    try:
+        _reg_set_sz(winreg, winreg.HKEY_CURRENT_USER, app_path, "FriendlyAppName", _FILE_ASSOC_APP_NAME)
+        _reg_set_sz(
+            winreg,
+            winreg.HKEY_CURRENT_USER,
+            app_path + r"\shell\open\command",
+            "",
+            command,
+        )
+        _reg_set_sz(
+            winreg,
+            winreg.HKEY_CURRENT_USER,
+            capabilities_path,
+            "ApplicationName",
+            _FILE_ASSOC_APP_NAME,
+        )
+        _reg_set_sz(
+            winreg,
+            winreg.HKEY_CURRENT_USER,
+            capabilities_path,
+            "ApplicationDescription",
+            _FILE_ASSOC_DESCRIPTION,
+        )
+        _reg_set_sz(
+            winreg,
+            winreg.HKEY_CURRENT_USER,
+            capabilities_path,
+            "ApplicationIcon",
+            icon_value,
+        )
+
+        for progid, label, extensions in _FILE_ASSOC_GROUPS:
+            progid_path = classes_root + "\\" + progid
+            _reg_set_sz(winreg, winreg.HKEY_CURRENT_USER, progid_path, "", label)
+            _reg_set_sz(
+                winreg,
+                winreg.HKEY_CURRENT_USER,
+                progid_path + r"\DefaultIcon",
+                "",
+                icon_value,
+            )
+            _reg_set_sz(
+                winreg,
+                winreg.HKEY_CURRENT_USER,
+                progid_path + r"\shell\open\command",
+                "",
+                command,
+            )
+
+            for ext in sorted(extensions):
+                _reg_set_sz(
+                    winreg,
+                    winreg.HKEY_CURRENT_USER,
+                    capabilities_path + r"\FileAssociations",
+                    ext,
+                    progid,
+                )
+                _reg_set_sz(
+                    winreg,
+                    winreg.HKEY_CURRENT_USER,
+                    app_path + r"\SupportedTypes",
+                    ext,
+                    "",
+                )
+                _reg_set_sz(
+                    winreg,
+                    winreg.HKEY_CURRENT_USER,
+                    progid_path + r"\SupportedTypes",
+                    ext,
+                    "",
+                )
+                _reg_set_sz(
+                    winreg,
+                    winreg.HKEY_CURRENT_USER,
+                    classes_root + "\\" + ext + r"\OpenWithProgids",
+                    progid,
+                    "",
+                )
+                _reg_create_key(
+                    winreg,
+                    winreg.HKEY_CURRENT_USER,
+                    classes_root + "\\" + ext + r"\OpenWithList" + "\\" + _FILE_ASSOC_APP_KEY,
+                )
+
+        _reg_set_sz(
+            winreg,
+            winreg.HKEY_CURRENT_USER,
+            r"Software\RegisteredApplications",
+            _FILE_ASSOC_APP_NAME,
+            r"Software\Classes\Applications" + "\\" + _FILE_ASSOC_APP_KEY + r"\Capabilities",
+        )
+    except OSError as exc:
+        logging.exception("Failed to register Windows file associations.")
+        print(f"Failed to register Windows file associations: {exc}")
+        return 1
+
+    print("Vibe Player file associations registered.")
+    return 0
+
+
+def _unregister_windows_file_associations() -> int:
+    """Remove registry keys written by ``_register_windows_file_associations``."""
+    if os.name != "nt":
+        print("File association unregistration is only supported on Windows.")
+        return 1
+
+    import winreg
+
+    classes_root = r"Software\Classes"
+    try:
+        for progid, _, extensions in _FILE_ASSOC_GROUPS:
+            for ext in sorted(extensions):
+                ext_path = classes_root + "\\" + ext
+                _reg_delete_value(
+                    winreg,
+                    winreg.HKEY_CURRENT_USER,
+                    ext_path + r"\OpenWithProgids",
+                    progid,
+                )
+                _reg_delete_tree(
+                    winreg,
+                    winreg.HKEY_CURRENT_USER,
+                    ext_path + r"\OpenWithList" + "\\" + _FILE_ASSOC_APP_KEY,
+                )
+            _reg_delete_tree(winreg, winreg.HKEY_CURRENT_USER, classes_root + "\\" + progid)
+
+        _reg_delete_tree(
+            winreg,
+            winreg.HKEY_CURRENT_USER,
+            classes_root + r"\Applications" + "\\" + _FILE_ASSOC_APP_KEY,
+        )
+        _reg_delete_value(
+            winreg,
+            winreg.HKEY_CURRENT_USER,
+            r"Software\RegisteredApplications",
+            _FILE_ASSOC_APP_NAME,
+        )
+    except OSError as exc:
+        logging.exception("Failed to unregister Windows file associations.")
+        print(f"Failed to unregister Windows file associations: {exc}")
+        return 1
+
+    print("Vibe Player file associations removed.")
+    return 0
+
+
+def _handle_file_association_cli() -> None:
+    """Handle maintenance commands before media/open-app startup logic runs."""
+    if "--register-file-associations" in sys.argv:
+        raise SystemExit(_register_windows_file_associations())
+    if "--unregister-file-associations" in sys.argv:
+        raise SystemExit(_unregister_windows_file_associations())
 
 
 class _FastVideoController:
@@ -199,6 +455,34 @@ class _FastVideoController:
 
     def add_selected_to_playlist(self, new_playlist=False):
         pass
+
+    def open_library(self):
+        """Launch the full browser app from a lightweight file-association viewer."""
+        env = os.environ.copy()
+        env["VIBE_SUPERFAST_MEDIA"] = "0"
+        project_root = _source_project_root()
+
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable]
+            cwd = os.path.dirname(os.path.abspath(sys.executable))
+        else:
+            run_bat = os.path.join(project_root, "run.bat")
+            if os.path.isfile(run_bat):
+                cmd = [run_bat]
+                cwd = project_root
+            else:
+                cmd = [sys.executable, os.path.join(APP_DIR, "main.py")]
+                cwd = APP_DIR
+
+        try:
+            subprocess.Popen(cmd, cwd=cwd, env=env)
+        except Exception as exc:
+            logging.exception("Could not launch full Vibe Player library.")
+            self.universal_dialog(
+                "Open Library",
+                f"Could not open the full Vibe Player library:\n\n{exc}",
+                show_cancel=False,
+            )
 
     def universal_dialog(
         self,
@@ -292,6 +576,7 @@ def _run_superfast_video(media_path: str) -> None:
 
     prefs = _load_fast_media_prefs()
     root = ctk.CTk()
+    root.default_directory = _runtime_base_dir()
     root.withdraw()
     stub = _FastVideoController(root, prefs)
     vp = VideoPlayer(
@@ -312,7 +597,17 @@ def _run_superfast_video(media_path: str) -> None:
         use_gpu_upscale=bool(prefs.get("gpu_upscale", False)),
     )
     stub.current_video_window = vp
-    root.after(1, vp.show_and_play)
+
+    def start_player():
+        # VLC needs a real mapped HWND; starting too early can leave a black surface.
+        try:
+            vp.video_window.update_idletasks()
+            vp.video_window.update()
+        except Exception:
+            pass
+        vp.show_and_play()
+
+    root.after(180, start_player)
     root.mainloop()
 
 
@@ -330,6 +625,7 @@ def _try_superfast_media_mode():
     if not os.path.isfile(abs_path):
         return False
     ext = os.path.splitext(abs_path)[1].lower()
+    handled_media_ext = ext in _SUPERFAST_IMAGE_EXT or ext in _SUPERFAST_VIDEO_EXT
     try:
         if ext in _SUPERFAST_IMAGE_EXT:
             logging.info("Superfast Media Mode (image): %s", abs_path)
@@ -340,7 +636,19 @@ def _try_superfast_media_mode():
             _run_superfast_video(abs_path)
             return True
     except Exception:
-        logging.exception("Superfast Media Mode failed; starting full application.")
+        logging.exception("Superfast Media Mode failed; not starting full browser fallback.")
+        if handled_media_ext:
+            try:
+                from tkinter import messagebox
+
+                messagebox.showerror(
+                    "Vibe Player",
+                    "Could not open this media file in the lightweight viewer.\n\n"
+                    "The full library was not started automatically.",
+                )
+            except Exception:
+                pass
+            return True
         return False
     return False
 
@@ -365,6 +673,7 @@ def run_application():
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
+    _handle_file_association_cli()
     if _try_superfast_media_mode():
         sys.exit(0)
     run_application()
