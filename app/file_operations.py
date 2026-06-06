@@ -774,6 +774,13 @@ def create_video_thumbnail(video_path, thumbnail_size, thumbnail_format, capture
         bg = Image.new('RGB', thumbnail_size, (71, 71, 71))
         bg.paste(image, ((thumbnail_size[0] - image.size[0]) // 2, (thumbnail_size[1] - image.size[1]) // 2))
         bg.save(cache_path, format="JPEG")
+        if overwrite:
+            logging.info(
+                "[ThumbCache] saved overwrite path=%s time=%s cache=%s",
+                os.path.basename(video_path),
+                thumbnail_time,
+                cache_path,
+            )
 
         thumbnail = ctk.CTkImage(light_image=bg, dark_image=bg)
         thumbnail_cache.set(video_path, thumbnail)

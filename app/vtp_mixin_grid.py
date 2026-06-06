@@ -982,7 +982,7 @@ class VtpGridMixin:
                 global_index = num_folders + index  if self.folder_view_mode.get() == "Wide" else index
 
                 final_time_for_video = None
-                if thumbnail_time is not None and item_info['path'].lower().endswith(VIDEO_FORMATS):
+                if item_info['path'].lower().endswith(VIDEO_FORMATS):
                     final_time_for_video = self.calculate_thumbnail_time(item_info['path'])
                 
                 self.queue_thumbnail(
@@ -1016,7 +1016,7 @@ class VtpGridMixin:
             file_info = self.video_files[index]
             row, col = divmod(index, self.columns)
             final_time_for_video = None
-            if thumbnail_time is not None and file_info['path'].lower().endswith(VIDEO_FORMATS):
+            if file_info['path'].lower().endswith(VIDEO_FORMATS):
                  final_time_for_video = self.calculate_thumbnail_time(file_info['path'])
                 
             self.queue_thumbnail(
@@ -5993,7 +5993,9 @@ class VtpGridMixin:
             new_count=len(results),
             total_count=len(results),
         )
-        self._start_progressive_render(formatted_data, force_refresh=True)
+        # Restoring search results must not regenerate thumbnail cache. A forced
+        # render here overwrote user-refreshed thumbnails on the next app start.
+        self._start_progressive_render(formatted_data, force_refresh=False)
 
     def _describe_search_query(self, search_param, keyword, and_or, operator=None):
         field = search_param or "all_fields"
@@ -6077,7 +6079,9 @@ class VtpGridMixin:
             )
 
             # Call the progressive render function with the formatted dictionary
-            self._start_progressive_render(formatted_data, force_refresh=True)
+            # Search display should read existing thumbnails and only generate
+            # missing ones; it must not overwrite cache for every result.
+            self._start_progressive_render(formatted_data, force_refresh=False)
 
 
             

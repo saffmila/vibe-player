@@ -3592,6 +3592,7 @@ class VideoThumbnailPlayer(
         Fetches directory contents and sorts them case-insensitively 
         to ensure consistency with the grid view sorting.
         """
+        started = time.perf_counter()
         # Normalize path and ensure it's a directory
         path = os.path.normcase(os.path.normpath(path))
         # logging.info(f"[PROCESS] Attempting to list: {path}")
@@ -3605,9 +3606,16 @@ class VideoThumbnailPlayer(
             return
 
         try:
+            logging.debug("[TreeProcess] START listdir path=%s parent=%s", path, parent)
             entries = os.listdir(path)
             # Case-insensitive sort (match grid view)
             entries.sort(key=lambda x: x.lower())
+            logging.debug(
+                "[TreeProcess] DONE listdir path=%s entries=%d elapsed=%.3fs",
+                path,
+                len(entries),
+                time.perf_counter() - started,
+            )
         except Exception as e:
             logging.info(f"[ERROR] Cannot list directory: {path} → {e}")
             return
@@ -3666,6 +3674,16 @@ class VideoThumbnailPlayer(
                                 self.tree.insert(node, 'end', text='', values=('dummy',))
                         except Exception as e:
                             logging.warning(f"Could not check children for: {full_path} → {e}")
+
+            elapsed = time.perf_counter() - started
+            if elapsed >= 0.20:
+                logging.info(
+                    "[TreeProcess] SLOW path=%s entries=%d children=%d elapsed=%.3fs",
+                    path,
+                    len(entries),
+                    len(self.tree.get_children(parent)),
+                    elapsed,
+                )
 
         except Exception as e:
             logging.error(f"Unexpected error in process_directory for {path}: {e}")
@@ -4491,8 +4509,11 @@ class VideoThumbnailPlayer(
         Repair occasional stale 'dummy' placeholders under already-open nodes.
         These placeholders render as one empty row in the left tree.
         """
+        started = time.perf_counter()
+        logging.debug("[TreeHeal] START")
         max_scan = 1000
         scanned = 0
+        repaired = 0
         queue = list(self.tree.get_children(""))
 
         while queue and scanned < max_scan:
@@ -4516,9 +4537,28 @@ class VideoThumbnailPlayer(
                     for ch in children
                 )
                 if has_dummy:
+                    repaired += 1
                     self.process_directory(item_id, vals[0])
             except Exception:
                 continue
+
+        elapsed = time.perf_counter() - started
+        if elapsed >= 0.20 or repaired:
+            logging.info(
+                "[TreeHeal] DONE scanned=%d repaired=%d remaining=%d elapsed=%.3fs",
+                scanned,
+                repaired,
+                len(queue),
+                elapsed,
+            )
+        else:
+            logging.debug(
+                "[TreeHeal] DONE scanned=%d repaired=%d remaining=%d elapsed=%.3fs",
+                scanned,
+                repaired,
+                len(queue),
+                elapsed,
+            )
 
     
     def get_full_path(self, node):
@@ -4817,6 +4857,8 @@ class VideoThumbnailPlayer(
         self._tree_sync_after_id = None
         # Ensure the current_directory is a directory
         if os.path.isdir(self.current_directory):
+            sync_started = time.perf_counter()
+            logging.debug("[TreeSync] START path=%s", self.current_directory)
             # Block <<TreeviewSelect>> from treating programmatic sync as user navigation.
             self._suppress_tree_select_navigation = True
             try:
@@ -4839,6 +4881,21 @@ class VideoThumbnailPlayer(
                 # Programmatic open=True often does not fire <<TreeviewOpen>>, so dummy
                 # placeholder rows (expand chevrons) never get replaced — visible as a gap.
                 self._heal_open_tree_dummy_rows()
+                elapsed = time.perf_counter() - sync_started
+                if elapsed >= 0.20:
+                    logging.info(
+                        "[TreeSync] SLOW path=%s item=%s elapsed=%.3fs",
+                        self.current_directory,
+                        item,
+                        elapsed,
+                    )
+                else:
+                    logging.debug(
+                        "[TreeSync] DONE path=%s item=%s elapsed=%.3fs",
+                        self.current_directory,
+                        item,
+                        elapsed,
+                    )
             finally:
                 self.after_idle(lambda: setattr(self, "_suppress_tree_select_navigation", False))
         else:
