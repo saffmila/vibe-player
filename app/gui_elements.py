@@ -1957,7 +1957,7 @@ def open_cache_folder(app):
         messagebox.showinfo("Cache Folder Not Found", "The thumbnail cache folder does not exist.")
 
 
-def perform_search(app, search_param, keyword, operator):
+def perform_search(app, search_param, keyword, operator, media_scope="All"):
     if not keyword.strip():  # Check if the keyword is empty or just spaces
         logging.info("Empty search keyword. Please provide a valid keyword.")
         return
@@ -1971,11 +1971,11 @@ def perform_search(app, search_param, keyword, operator):
     # If operator is AND/OR, assume a non-comparison search
     if operator in ['AND', 'OR']:
         logging.info(f"Performing non-comparison search with AND/OR operator: {operator}")
-        app.search_database(search_param, keyword, operator)
+        app.search_database(search_param, keyword, operator, media_scope=media_scope)
         
     else:
         logging.info(f"Performing comparison search with operator: {operator}")
-        app.search_database(search_param, keyword, "AND", operator)  # Default AND for comparisons
+        app.search_database(search_param, keyword, "AND", operator, media_scope=media_scope)  # Default AND for comparisons
 
     
     
@@ -2018,12 +2018,29 @@ def create_search_window(app):
     and_or_combobox.set('AND')  # Default to AND
     and_or_combobox.pack(side=ctk.LEFT, padx=(10, 10))
 
+    scope_label = ctk.CTkLabel(search_frame, text="Type:")
+    scope_label.pack(side=ctk.LEFT, padx=(0, 6))
+
+    media_scope_combobox = ctk.CTkComboBox(
+        search_frame,
+        values=["All", "Videos", "Images"],
+        width=88,
+    )
+    media_scope_combobox.set("All")
+    media_scope_combobox.pack(side=ctk.LEFT, padx=(0, 10))
+
     # Add the search button
     search_button = ctk.CTkButton(
         search_frame,
         text="Search",
         width=90,
-        command=lambda: perform_search(app, search_param_combobox.get(), search_entry.get(), and_or_combobox.get()),
+        command=lambda: perform_search(
+            app,
+            search_param_combobox.get(),
+            search_entry.get(),
+            and_or_combobox.get(),
+            media_scope_combobox.get(),
+        ),
     )
     search_button.pack(side=ctk.LEFT, padx=(0, 0))
 
@@ -2046,7 +2063,8 @@ def create_search_window(app):
         text="Instructions:\n"
              "1. Use 'AND' or 'OR' for combining multiple terms.\n"
              "2. Use '=', '!=', '<=', '>=', '<', or '>' to compare numerical fields (e.g., rating).\n"
-             "3. Double-click a keyword to add it to the search field.",
+             "3. Type filters results to All, Videos, or Images.\n"
+             "4. Double-click a keyword to add it to the search field.",
         wraplength=720, justify="left"
     )
     instructions_label.pack(fill=ctk.X, padx=10, pady=5)

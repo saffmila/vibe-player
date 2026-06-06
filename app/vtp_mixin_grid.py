@@ -981,16 +981,12 @@ class VtpGridMixin:
                 # e.g. 10 wide folders → first file index 10, not 0
                 global_index = num_folders + index  if self.folder_view_mode.get() == "Wide" else index
 
-                final_time_for_video = None
-                if item_info['path'].lower().endswith(VIDEO_FORMATS):
-                    final_time_for_video = self.calculate_thumbnail_time(item_info['path'])
-                
                 self.queue_thumbnail(
                     item_info['path'], item_info['name'],
                     row, col, global_index,
                     is_folder=item_info.get('is_folder', False),
                     target_frame=self.regular_thumbnails_frame,
-                    force_refresh=force_refresh, thumbnail_time=final_time_for_video
+                    force_refresh=force_refresh, thumbnail_time=thumbnail_time
                 )
             if not getattr(self, "_vg_active", False):
                 self.update_idletasks()
@@ -1000,8 +996,102 @@ class VtpGridMixin:
              self._is_loading = False
 
 
+    def _start_search_progressive_render(self, sorted_data, force_refresh=False, thumbnail_time=None):
+        """Render search results in small Tk chunks so the window stays responsive."""
+        try:
+            num_folders = len(sorted_data['folders'])
+            num_files = len(sorted_data['files'])
+            logging.info("Rendering search results in chunks: %d folders and %d files...", num_folders, num_files)
 
+            self.video_files = sorted_data['folders'] + sorted_data['files']
+            self.update_status_bar()
+            self.calculate_grid()
 
+            self.wide_folders_frame.pack_forget()
+            self.regular_thumbnails_frame.pack_forget()
+            show_wide = self.folder_view_mode.get() == "Wide" and num_folders > 0
+            if show_wide:
+                self.wide_folders_frame.pack(side="top", fill="x", expand=False, padx=5, pady=5)
+            self.regular_thumbnails_frame.pack(side="top", fill="both", expand=True, padx=5, pady=5)
+
+            render_plan = []
+            if show_wide:
+                for index, folder_info in enumerate(sorted_data['folders']):
+                    row, col = divmod(index, self.numwidefolders_in_col)
+                    render_plan.append((folder_info, row, col, index, self.wide_folders_frame))
+                for index, item_info in enumerate(sorted_data['files']):
+                    row, col = divmod(index, self.columns)
+                    render_plan.append((item_info, row, col, num_folders + index, self.regular_thumbnails_frame))
+            else:
+                for index, item_info in enumerate(self.video_files):
+                    row, col = divmod(index, self.columns)
+                    render_plan.append((item_info, row, col, index, self.regular_thumbnails_frame))
+
+            try:
+                self.canvas.yview_moveto(0)
+            except Exception:
+                pass
+            self._render_search_results_chunk(
+                render_plan,
+                0,
+                force_refresh,
+                thumbnail_time,
+                getattr(self, "_search_request_id", None),
+            )
+        except Exception as e:
+            logging.error("Search chunked render failed: %s", e, exc_info=True)
+            self._is_loading = False
+
+    def _render_search_results_chunk(self, render_plan, start_index, force_refresh, thumbnail_time, search_id):
+        if search_id is not None and search_id != getattr(self, "_search_request_id", None):
+            return
+
+        idx = start_index
+        total = len(render_plan)
+        chunk_started = time.perf_counter()
+        processed = 0
+        max_items = 18
+        time_budget_s = 0.018
+
+        while idx < total and (processed < max_items or (time.perf_counter() - chunk_started) < time_budget_s):
+            item_info, row, col, global_index, target_frame = render_plan[idx]
+            if target_frame and target_frame.winfo_exists():
+                self.queue_thumbnail(
+                    item_info['path'],
+                    item_info['name'],
+                    row,
+                    col,
+                    global_index,
+                    is_folder=item_info.get('is_folder', False),
+                    target_frame=target_frame,
+                    force_refresh=force_refresh,
+                    thumbnail_time=thumbnail_time,
+                )
+            idx += 1
+            processed += 1
+
+        if total > 0 and hasattr(self, "status_bar") and self.status_bar:
+            queued_pct = 90 + (idx / total) * 10
+            self.status_bar.update_progress(min(99, queued_pct))
+            self.status_bar.set_action_message(f"Queueing search results: {idx}/{total}")
+
+        if idx < total:
+            self.after(
+                10,
+                lambda nxt=idx: self._render_search_results_chunk(
+                    render_plan,
+                    nxt,
+                    force_refresh,
+                    thumbnail_time,
+                    search_id,
+                ),
+            )
+            return
+
+        self._is_loading = False
+        if hasattr(self, "status_bar") and self.status_bar:
+            self.status_bar.set_action_message(f"Search results queued: {total}")
+        self.after_idle(self.adjust_scroll_region_and_filler)
 
 
     def _render_remaining(self, start_index, force_refresh=False, thumbnail_time=None):
@@ -1015,16 +1105,12 @@ class VtpGridMixin:
         for index in range(start_index, len(self.video_files)):
             file_info = self.video_files[index]
             row, col = divmod(index, self.columns)
-            final_time_for_video = None
-            if file_info['path'].lower().endswith(VIDEO_FORMATS):
-                 final_time_for_video = self.calculate_thumbnail_time(file_info['path'])
-                
             self.queue_thumbnail(
                 file_info['path'], file_info['name'], row, col, index,
                 is_folder=file_info.get('is_folder', False),
                 target_frame=self.regular_thumbnails_frame,
                 force_refresh=force_refresh,
-                thumbnail_time=final_time_for_video
+                thumbnail_time=thumbnail_time
             )
 
 
@@ -1625,9 +1711,12 @@ class VtpGridMixin:
                         ):
                             thumbnail = self._create_corrupted_thumbnail_image()
                         else:
+                            actual_thumbnail_time = thumbnail_time
+                            if actual_thumbnail_time is None:
+                                actual_thumbnail_time = self.calculate_thumbnail_time(file_path)
                             thumbnail = create_video_thumbnail(
                                 file_path, self.thumbnail_size, self.thumbnail_format,
-                                self.capture_method_var.get(), thumbnail_time=thumbnail_time,
+                                self.capture_method_var.get(), thumbnail_time=actual_thumbnail_time,
                                 cache_enabled=self.cache_enabled, overwrite=overwrite,
                                 cache_dir=self.thumbnail_cache_path,
                                 database=self.database
@@ -5985,8 +6074,8 @@ class VtpGridMixin:
         query_text = getattr(self, "search_results_query", None) or "last search"
         self.clear_thumbnails()
         formatted_data = {
-            'folders': [f for f in results if os.path.isdir(f['path'])],
-            'files': [f for f in results if not os.path.isdir(f['path'])]
+            'folders': [f for f in results if f.get('is_folder', False)],
+            'files': [f for f in results if not f.get('is_folder', False)]
         }
         self._set_search_results_view(
             query_text,
@@ -5995,7 +6084,7 @@ class VtpGridMixin:
         )
         # Restoring search results must not regenerate thumbnail cache. A forced
         # render here overwrote user-refreshed thumbnails on the next app start.
-        self._start_progressive_render(formatted_data, force_refresh=False)
+        self._start_search_progressive_render(formatted_data, force_refresh=False)
 
     def _describe_search_query(self, search_param, keyword, and_or, operator=None):
         field = search_param or "all_fields"
@@ -6004,6 +6093,30 @@ class VtpGridMixin:
         if operator:
             return f"{field} {operator} {term}"
         return f"{field} {joiner} {term}"
+
+    def _normalize_search_media_scope(self, media_scope):
+        scope = (media_scope or "All").strip().lower()
+        if scope in ("video", "videos"):
+            return "Videos"
+        if scope in ("image", "images"):
+            return "Images"
+        return "All"
+
+    def _filter_search_results_by_media_scope(self, rows, media_scope):
+        scope = self._normalize_search_media_scope(media_scope)
+        if scope == "All":
+            return list(rows)
+
+        extensions = VIDEO_FORMATS if scope == "Videos" else IMAGE_FORMATS
+        filtered = []
+        for row in rows:
+            try:
+                path = str(row.get("file_path") or "")
+            except AttributeError:
+                path = ""
+            if path.lower().endswith(extensions):
+                filtered.append(row)
+        return filtered
 
     def open_search_window(self):
         """
@@ -6022,26 +6135,102 @@ class VtpGridMixin:
             
  
 
-    def search_database(self, search_param, keyword, and_or, operator=None):
+    def search_database(self, search_param, keyword, and_or, operator=None, media_scope="All"):
             """
             Executes a search query and formats results for the progressive renderer.
             Ensures that results are split into folders and files to prevent UI crashes.
             """
             query_text = self._describe_search_query(search_param, keyword, and_or, operator)
-            if not getattr(self, "search_results_active", False) or self.clear_search_var.get():
+            media_scope = self._normalize_search_media_scope(media_scope)
+            if media_scope != "All":
+                query_text = f"{query_text} [{media_scope}]"
+            clear_previous = bool(self.clear_search_var.get())
+            if not getattr(self, "search_results_active", False) or clear_previous:
                 self.search_results_return_directory = getattr(self, "current_directory", None)
-            
-            # Check the state of the checkbox at the beginning of the search
-            if self.clear_search_var.get():
+
+            search_id = int(getattr(self, "_search_request_id", 0) or 0) + 1
+            self._search_request_id = search_id
+            self._search_in_progress = True
+
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.reset_progress()
+                self.status_bar.update_progress(5)
+                self.status_bar.set_action_message(f"Searching: {query_text}")
+                if hasattr(self.status_bar, "clear_action_button"):
+                    self.status_bar.clear_action_button()
+
+            self._pulse_search_progress(search_id, 12)
+
+            # Check the state of the checkbox at the beginning of the search.
+            if clear_previous:
                 # If checked, clear the UI
                 self.clear_thumbnails()
                 # And also clear our internal list of results
                 self.current_search_results = []
 
-            # Perform the database search to get NEW results
-            new_results = self.database.search_entries(search_param, keyword, and_or, operator)
-            new_results = list(new_results)
-            logging.info(f"Search found {len(new_results)} new results.")
+            def _worker():
+                try:
+                    started = time.perf_counter()
+                    raw_results = list(
+                        self.database.search_entries(search_param, keyword, and_or, operator)
+                    )
+                    new_results = self._filter_search_results_by_media_scope(raw_results, media_scope)
+                    logging.info(
+                        "Search found %d/%d new results in %.3fs (scope=%s).",
+                        len(new_results),
+                        len(raw_results),
+                        time.perf_counter() - started,
+                        media_scope,
+                    )
+                    self.after(
+                        0,
+                        lambda sid=search_id, rows=new_results: self._apply_search_results(
+                            sid,
+                            query_text,
+                            rows,
+                            clear_previous,
+                        ),
+                    )
+                except Exception as exc:
+                    logging.error("Search failed: %s", exc, exc_info=True)
+                    self.after(
+                        0,
+                        lambda sid=search_id, err=exc: self._finish_search_with_error(sid, err),
+                    )
+
+            try:
+                self.io_executor.submit(_worker)
+            except Exception:
+                threading.Thread(target=_worker, daemon=True).start()
+
+    def _pulse_search_progress(self, search_id, value):
+            if search_id != getattr(self, "_search_request_id", None):
+                return
+            if not getattr(self, "_search_in_progress", False):
+                return
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.update_progress(min(85, value))
+            if value < 85:
+                self.after(180, lambda sid=search_id, v=value + 7: self._pulse_search_progress(sid, v))
+
+    def _finish_search_with_error(self, search_id, error):
+            if search_id != getattr(self, "_search_request_id", None):
+                return
+            self._search_in_progress = False
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.update_progress(0)
+                self.status_bar.set_action_message(f"Search failed: {error}", color="#ff6b6b")
+                self.after(4500, self.status_bar.clear_action_message)
+
+    def _apply_search_results(self, search_id, query_text, new_results, clear_previous):
+            if search_id != getattr(self, "_search_request_id", None):
+                logging.debug("Discarding stale search results for request %s", search_id)
+                return
+
+            self._search_in_progress = False
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.update_progress(90)
+                self.status_bar.set_action_message(f"Rendering search results: {len(new_results)} found")
 
             if not new_results:
                 logging.info("No new search results to display.")
@@ -6053,23 +6242,26 @@ class VtpGridMixin:
                     total_count=len(self.current_search_results),
                 )
                 self.adjust_scroll_region_and_filler()
+                if hasattr(self, "status_bar") and self.status_bar:
+                    self.status_bar.update_progress(100)
                 return
 
-            # Convert the new database results into the format expected by the renderer
-            new_files_to_render = [{'path': r['file_path'], 'name': r['filename']} for r in new_results]
-            
-            # Add the new results to our persistent list
+            # Convert the new database results into the format expected by the renderer.
+            new_files_to_render = [
+                {'path': r['file_path'], 'name': r['filename'], 'is_folder': False}
+                for r in new_results
+            ]
+
+            # Add the new results to our persistent list.
             self.current_search_results.extend(new_files_to_render)
-            
-            # If we didn't clear the thumbnails at the start, we need to do it now
-            if not self.clear_search_var.get():
+
+            # If we didn't clear the thumbnails at the start, we need to do it now.
+            if not clear_previous:
                 self.clear_thumbnails()
 
-            # --- FIX: Format data for _start_progressive_render ---
-            # The renderer expects a dictionary with 'folders' and 'files' keys
             formatted_data = {
-                'folders': [f for f in self.current_search_results if os.path.isdir(f['path'])],
-                'files': [f for f in self.current_search_results if not os.path.isdir(f['path'])]
+                'folders': [f for f in self.current_search_results if f.get('is_folder', False)],
+                'files': [f for f in self.current_search_results if not f.get('is_folder', False)]
             }
 
             self._set_search_results_view(
@@ -6078,10 +6270,14 @@ class VtpGridMixin:
                 total_count=len(self.current_search_results),
             )
 
-            # Call the progressive render function with the formatted dictionary
+            # Search progress tracks DB + queueing. Thumbnail decode continues in
+            # the existing background queue and should not reset the bar downward.
+            self.total_files_to_process = 0
+            self.processed_files_count = 0
+
             # Search display should read existing thumbnails and only generate
             # missing ones; it must not overwrite cache for every result.
-            self._start_progressive_render(formatted_data, force_refresh=False)
+            self._start_search_progressive_render(formatted_data, force_refresh=False)
 
 
             
