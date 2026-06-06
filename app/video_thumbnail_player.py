@@ -2008,10 +2008,6 @@ class VideoThumbnailPlayer(
         )
         
         menu.add_command(label="Refresh Thumbnails", command=lambda: self.refresh_thumbnails_in_subtree(file_path))
-        menu.add_command(
-            label="Clear Thumbnails",
-            command=lambda: self.remove_thumbnails_in_subtree(file_path),
-        )
 
         try:
             _wide = bool(self.wide_folders_check_var.get())
@@ -2067,7 +2063,11 @@ class VideoThumbnailPlayer(
         menu.add_command(**_del_opts)
         
 
-
+        menu.add_separator()
+        menu.add_command(
+            label="Remove Thumbnails from Tree...",
+            command=lambda: self.remove_thumbnails_in_subtree(file_path),
+        )
         menu.add_command(label="Create New Virtual Library", command=self.create_virtual_library)
         # === Optional plugin tagging ===
         if hasattr(self, "plugin_manager") and self.plugin_manager.plugins:
@@ -2338,7 +2338,91 @@ class VideoThumbnailPlayer(
             preserve_scroll=True,
         )
 
-    def remove_thumbnails_in_subtree(self, folder_path):
+    def _show_remove_thumbnails_dialog(self, folder_path):
+        folder_name = os.path.basename(os.path.normpath(folder_path)) or folder_path
+
+        dialog_window = ctk.CTkToplevel(self)
+        dialog_window.title("Remove Thumbnails")
+        self._center_toplevel_window(dialog_window, 620, 280)
+        dialog_window.resizable(False, False)
+        try:
+            dialog_window.transient(self)
+        except Exception:
+            pass
+        dialog_window.attributes("-topmost", True)
+        dialog_window.grab_set()
+
+        body = ctk.CTkFrame(dialog_window, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=22, pady=(18, 14))
+
+        ctk.CTkLabel(
+            body,
+            text="Remove thumbnail cache and thumbnail database entries for:",
+            anchor="w",
+            justify="left",
+        ).pack(fill="x", anchor="w")
+
+        ctk.CTkLabel(
+            body,
+            text=folder_name,
+            font=ctk.CTkFont(size=17, weight="bold"),
+            anchor="w",
+            justify="left",
+        ).pack(fill="x", anchor="w", pady=(8, 0))
+
+        ctk.CTkLabel(
+            body,
+            text=folder_path,
+            text_color="#a8a8a8",
+            wraplength=560,
+            anchor="w",
+            justify="left",
+        ).pack(fill="x", anchor="w", pady=(2, 14))
+
+        ctk.CTkLabel(
+            body,
+            text="Includes all subfolders.",
+            anchor="w",
+            justify="left",
+        ).pack(fill="x", anchor="w")
+
+        ctk.CTkLabel(
+            body,
+            text="Original media files will not be touched.",
+            text_color="#9fd18b",
+            anchor="w",
+            justify="left",
+        ).pack(fill="x", anchor="w", pady=(4, 0))
+
+        button_row = ctk.CTkFrame(body, fg_color="transparent")
+        button_row.pack(side="bottom", fill="x", pady=(22, 0))
+        button_row.grid_columnconfigure((0, 1), weight=1)
+
+        def on_remove():
+            if dialog_window.winfo_exists():
+                dialog_window.destroy()
+            self.remove_thumbnails_in_subtree(folder_path, confirm=False)
+
+        def on_cancel():
+            if dialog_window.winfo_exists():
+                dialog_window.destroy()
+
+        ctk.CTkButton(
+            button_row,
+            text="Remove",
+            command=on_remove,
+            width=220,
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(
+            button_row,
+            text="Cancel",
+            command=on_cancel,
+            width=220,
+        ).grid(row=0, column=1, sticky="e")
+
+        dialog_window.bind("<Escape>", lambda _event: on_cancel())
+
+    def remove_thumbnails_in_subtree(self, folder_path, confirm=True):
         """
         Remove on-disk thumbnail cache, wide-folder preview PNGs, and catalog rows for
         folder_path and all descendants; reset folder tree icons. Does not rescan.
@@ -2349,6 +2433,10 @@ class VideoThumbnailPlayer(
             return
         if not os.path.isdir(folder_path):
             logging.info("remove_thumbnails_in_subtree: not a directory: %s", folder_path)
+            return
+
+        if confirm:
+            self._show_remove_thumbnails_dialog(folder_path)
             return
 
         logging.info("Remove thumbnails in subtree: %s", folder_path)
