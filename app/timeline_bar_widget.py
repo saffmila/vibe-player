@@ -1257,6 +1257,11 @@ class TimelineBarWidget(ctk.CTkFrame):
         Tooltip(self.magnet_btn, "Toggle Magnet (M)")
         self._apply_magnet_button_style()
 
+        self.zoom_menu_btn = tk.Button(self.right_controls_frame, text="🔍", command=self.show_zoom_menu, **magnet_btn_style)
+        self.zoom_menu_btn.pack(side="left", padx=(0, 2))
+        self.zoom_menu_btn.bind("<Button-3>", self.show_zoom_menu)
+        Tooltip(self.zoom_menu_btn, "Zoom options (Shift+Wheel)")
+
         # Separator after Snap+Magnet, before Options/Export.
         self.right_pair_separator = tk.Frame(self.right_controls_frame, bg="#666666", width=1)
         self.right_pair_separator.pack(side="left", fill="y", pady=3, padx=(4, 4))
@@ -2233,8 +2238,8 @@ class TimelineBarWidget(ctk.CTkFrame):
 
 
     
-    def on_ctrl_mousewheel(self, event):
-        if event.delta > 0:
+    def _apply_zoom_step(self, direction):
+        if direction > 0:
             self.zoom_factor = min(self.zoom_factor * 1.2, self.max_zoom)
         else:
             self.zoom_factor = max(self.zoom_factor / 1.2, self.min_zoom)
@@ -2242,10 +2247,42 @@ class TimelineBarWidget(ctk.CTkFrame):
         self._update_zoom_label()
         self.redraw_timeline()
 
+    def zoom_in(self):
+        self._apply_zoom_step(1)
+
+    def zoom_out(self):
+        self._apply_zoom_step(-1)
+
+    def on_ctrl_mousewheel(self, event):
+        self._apply_zoom_step(1 if event.delta > 0 else -1)
+
     def reset_zoom(self):
         self.zoom_factor = 1.0
         self._update_zoom_label()
         self.redraw_timeline()
+
+    def show_zoom_menu(self, event=None):
+        menu = tk.Menu(
+            self,
+            tearoff=0,
+            bg="#2b2b2b",
+            fg="white",
+            activebackground="#444",
+            selectcolor="#d0d0d0",
+        )
+        menu.add_command(label="Zoom In", command=self.zoom_in)
+        menu.add_command(label="Zoom Out", command=self.zoom_out)
+        menu.add_separator()
+        menu.add_command(label="Reset Zoom", command=self.reset_zoom)
+        try:
+            if event is not None:
+                x, y = event.x_root, event.y_root
+            else:
+                x = self.zoom_menu_btn.winfo_rootx()
+                y = self.zoom_menu_btn.winfo_rooty() + self.zoom_menu_btn.winfo_height()
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
 
     def toggle_marker_type(self, marker_type):
         self.update_bookmarks()

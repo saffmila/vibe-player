@@ -263,10 +263,16 @@ class VtpPreferencesMixin:
                 self.vlc_enable_deinterlace = settings.get("vlc_enable_deinterlace", False)
                 self.vlc_skiploopfilter_disable = settings.get("vlc_skiploopfilter_disable", False)
                 self.timeline_strip_count = settings.get("timeline_strip_count", 20)
+                self.preview_window_strip_limit = bool(
+                    settings.get(
+                        "preview_window_strip_limit",
+                        settings.get("multiTimeline_limit", True)
+                    )
+                )
                 if getattr(self, "info_panel", None) and \
                         hasattr(self.info_panel, "multiTimeline_limit_var"):
                     self.info_panel.multiTimeline_limit_var.set(
-                        settings.get("multiTimeline_limit", True)
+                        self.preview_window_strip_limit
                     )
                 self.dnd_confirm_dialogs = bool(settings.get("dnd_confirm_dialogs", False))
                 self.delete_to_trash = bool(settings.get("delete_to_trash", True))

@@ -1412,6 +1412,14 @@ def create_preferences_window(app):
 
     auto_play_var = tk.BooleanVar(value=app.auto_play)
     ctk.CTkCheckBox(general_options_frame, text="Start Play Video Automatically", variable=auto_play_var).pack(anchor="w", padx=5, pady=5)
+    preview_window_strip_limit_var = ctk.BooleanVar(
+        value=bool(getattr(app, "preview_window_strip_limit", True))
+    )
+    ctk.CTkCheckBox(
+        general_options_frame,
+        text="Preview window strip limit",
+        variable=preview_window_strip_limit_var,
+    ).pack(anchor="w", padx=5, pady=5)
     play_broken_videos_var = ctk.BooleanVar(
         value=bool(getattr(app, "play_broken_videos", True))
     )
@@ -1510,6 +1518,9 @@ def create_preferences_window(app):
         app.dnd_confirm_dialogs = dnd_confirm_var.get()
         app.delete_to_trash = bool(delete_to_trash_var.get())
         app.play_broken_videos = bool(play_broken_videos_var.get())
+        app.preview_window_strip_limit = bool(preview_window_strip_limit_var.get())
+        if getattr(app, "info_panel", None) and hasattr(app.info_panel, "multiTimeline_limit_var"):
+            app.info_panel.multiTimeline_limit_var.set(app.preview_window_strip_limit)
         if hasattr(app, "play_broken_videos_var"):
             app.play_broken_videos_var.set(app.play_broken_videos)
         app.image_viewer_use_pyglet = image_viewer_pyglet_var.get()
@@ -1614,11 +1625,7 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
         ),
         "play_broken_videos": bool(getattr(app, "play_broken_videos", True)),
         "timeline_strip_count": getattr(app, "timeline_strip_count", 20),
-        "multiTimeline_limit": (
-            app.info_panel.multiTimeline_limit_var.get()
-            if getattr(app, "info_panel", None) and hasattr(app.info_panel, "multiTimeline_limit_var")
-            else True
-        ),
+        "preview_window_strip_limit": bool(getattr(app, "preview_window_strip_limit", True)),
         "dnd_confirm_dialogs": getattr(app, "dnd_confirm_dialogs", False),
         "delete_to_trash": bool(getattr(app, "delete_to_trash", True)),
         "image_viewer_use_pyglet": bool(getattr(app, "image_viewer_use_pyglet", False)),
@@ -1668,6 +1675,7 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
     # Update the preferences in the settings dictionary
     settings.update(preferences)
     settings.pop("force_gpu_on_windows", None)  # legacy key no longer used
+    settings.pop("multiTimeline_limit", None)  # renamed to preview_window_strip_limit
 
     # Save the updated settings
     with open("settings.json", "w") as pref_file:
@@ -1689,6 +1697,9 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
     app.widefolder_size = app.parse_thumbnail_size(preferences["widefolder_size"])  # Parse new tuple
     app.thumbnail_time = preferences["thumbnail_time"]
     app.play_broken_videos = bool(preferences.get("play_broken_videos", True))
+    app.preview_window_strip_limit = bool(preferences.get("preview_window_strip_limit", True))
+    if getattr(app, "info_panel", None) and hasattr(app.info_panel, "multiTimeline_limit_var"):
+        app.info_panel.multiTimeline_limit_var.set(app.preview_window_strip_limit)
     if hasattr(app, "play_broken_videos_var"):
         app.play_broken_videos_var.set(app.play_broken_videos)
 

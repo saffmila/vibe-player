@@ -40,42 +40,10 @@ class InfoPanelFrame(ctk.CTkFrame):
 
         self.preview_player = None
 
-        # Bottom bar: Auto Play + VIDEO/STRIPS toggle
+        # Bottom bar: VIDEO/STRIPS toggle + Auto Play + zoom menu
         self._preview_bottom_bar = ctk.CTkFrame(self.tab_preview, fg_color="transparent", height=28)
         self._preview_bottom_bar.pack(side="bottom", fill="x", pady=(2, 4), padx=6)
         self._preview_bottom_bar.pack_propagate(False)
-
-        # Initialize Auto Play checkbox
-        self.preview_auto_play_var = ctk.BooleanVar(value=True)
-        self.auto_play_checkbox = ctk.CTkCheckBox(
-            self._preview_bottom_bar,
-            text="Auto Play",
-            variable=self.preview_auto_play_var,
-            checkbox_width=14,
-            checkbox_height=14,
-            border_width=2,
-            font=("Arial", 11),
-            text_color="gray"
-        )
-        self.auto_play_checkbox.pack(side="left", padx=(4, 0))
-
-        self.multiTimeline_limit_var = ctk.BooleanVar(value=True)
-        self.multiTimeline_limit_checkbox = ctk.CTkCheckBox(
-            self._preview_bottom_bar,
-            text="Limit",
-            variable=self.multiTimeline_limit_var,
-            checkbox_width=14,
-            checkbox_height=14,
-            border_width=2,
-            font=("Arial", 11),
-            text_color="gray",
-        )
-        self.multiTimeline_limit_checkbox.pack(side="left", padx=(10, 0))
-        self.multiTimeline_limit_checkbox.configure(
-            state="disabled",
-            text_color=("#3d3d3d", "#3d3d3d"),
-            border_color=("#3d3d3d", "#3d3d3d"),
-        )
 
         # VIDEO / STRIPS mode toggle
         self.preview_mode_var = ctk.StringVar(value="Video")
@@ -92,7 +60,54 @@ class InfoPanelFrame(ctk.CTkFrame):
             unselected_color=("gray75", "gray25"),
             text_color=("gray20", "gray80"),
         )
-        self.preview_mode_switch.pack(side="right", padx=(0, 4))
+        self.preview_mode_switch.pack(side="left", padx=(4, 8))
+
+        # Initialize Auto Play checkbox
+        self.preview_auto_play_var = ctk.BooleanVar(value=True)
+        self.auto_play_frame = ctk.CTkFrame(self._preview_bottom_bar, fg_color="transparent")
+        self.auto_play_frame.pack(side="left", padx=(14, 0))
+        self.auto_play_label = ctk.CTkLabel(
+            self.auto_play_frame,
+            text="Auto Play",
+            font=("Arial", 11),
+            text_color="gray",
+        )
+        self.auto_play_label.pack(side="left", padx=(0, 6))
+        self.auto_play_checkbox = ctk.CTkCheckBox(
+            self.auto_play_frame,
+            text="",
+            variable=self.preview_auto_play_var,
+            checkbox_width=14,
+            checkbox_height=14,
+            border_width=2,
+            width=14,
+        )
+        self.auto_play_checkbox.pack(side="left", padx=(0, 0))
+
+        # Stored in Preferences as "Preview window strip limit"; no inline checkbox in preview.
+        self.multiTimeline_limit_var = ctk.BooleanVar(value=True)
+        self.preview_zoom_button = tk.Button(
+            self._preview_bottom_bar,
+            text="🔍",
+            font=("Segoe UI", 13),
+            fg="#5C5C5C",
+            bg="#2b2b2b",
+            activebackground="#333333",
+            activeforeground="#b0b0b0",
+            disabledforeground="#666666",
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            padx=0,
+            pady=0,
+            width=3,
+            cursor="hand2",
+            command=self.show_preview_zoom_menu,
+        )
+        self.preview_zoom_button.pack(side="right", padx=(0, 4))
+        self.preview_zoom_button.bind("<Button-3>", self.show_preview_zoom_menu)
+        self.preview_mode_var.trace_add("write", lambda *_: self._update_preview_zoom_button_state())
+        self._update_preview_zoom_button_state()
         
         self.tab_database = self.tabs.add("Database")
         self.database_labels = []
@@ -154,6 +169,79 @@ class InfoPanelFrame(ctk.CTkFrame):
         self.label_scan_type         = _row("Scan Type: ?")
         self.label_encoder_library   = _row("Encoder: ?")
         self.label_compression_ratio = _row("Comp. Ratio: ?")
+
+    def _app_controller(self):
+        container = getattr(self, "master", None)
+        return getattr(container, "app", None) or self._preview_controller()
+
+    def _preview_strips_viewer(self):
+        controller = self._app_controller()
+        viewer = getattr(controller, "multi_viewer", None) if controller else None
+        if viewer is None:
+            return None
+        try:
+            if not viewer.winfo_exists():
+                return None
+        except Exception:
+            return None
+        return viewer
+
+    def _preview_zoom_action(self, action):
+        if getattr(self.preview_mode_var, "get", lambda: "Video")() != "Strips":
+            return
+        viewer = self._preview_strips_viewer()
+        if viewer is None:
+            return
+        fn = getattr(viewer, action, None)
+        if callable(fn):
+            fn()
+
+    def _update_preview_zoom_button_state(self):
+        in_strips = getattr(self.preview_mode_var, "get", lambda: "Video")() == "Strips"
+        viewer_ready = self._preview_strips_viewer() is not None
+        if in_strips and viewer_ready:
+            self.preview_zoom_button.configure(
+                state="normal",
+                fg="#5C5C5C",
+                bg="#2b2b2b",
+                activebackground="#333333",
+                activeforeground="#b0b0b0",
+            )
+        else:
+            self.preview_zoom_button.configure(
+                state="disabled",
+                fg="#666666",
+                bg="#2b2b2b",
+                activebackground="#2b2b2b",
+            )
+
+    def show_preview_zoom_menu(self, event=None):
+        self._update_preview_zoom_button_state()
+        if self.preview_zoom_button is None or self.preview_zoom_button.cget("state") == "disabled":
+            return
+        menu = tk.Menu(
+            self,
+            tearoff=0,
+            bg="#2b2b2b",
+            fg="white",
+            activebackground="#444",
+            selectcolor="#d0d0d0",
+        )
+        in_strips = getattr(self.preview_mode_var, "get", lambda: "Video")() == "Strips"
+        state = "normal" if in_strips and self._preview_strips_viewer() is not None else "disabled"
+        menu.add_command(label="Zoom In", command=lambda: self._preview_zoom_action("zoom_in"), state=state)
+        menu.add_command(label="Zoom Out", command=lambda: self._preview_zoom_action("zoom_out"), state=state)
+        menu.add_separator()
+        menu.add_command(label="Reset Zoom", command=lambda: self._preview_zoom_action("reset_zoom"), state=state)
+        try:
+            if event is not None:
+                x, y = event.x_root, event.y_root
+            else:
+                x = self.preview_zoom_button.winfo_rootx()
+                y = self.preview_zoom_button.winfo_rooty() + self.preview_zoom_button.winfo_height()
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
 
     def show_image_preview(self, image_path):
         # Stop video preview

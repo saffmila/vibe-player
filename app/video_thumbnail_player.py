@@ -639,6 +639,7 @@ class VideoThumbnailPlayer(
         )
         self.multi_viewer = None          # lazy init – created on first multi-select
         self.timeline_strip_count = 20    # max strips (safety cap)
+        self.preview_window_strip_limit = True
         # VLC quality/post-processing options (overridable from Preferences)
         self.vlc_enable_postproc = False
         self.vlc_postproc_quality = 6
@@ -4184,32 +4185,8 @@ class VideoThumbnailPlayer(
             self.info_panel.preview_mode_switch.configure(command=self._on_preview_mode_change)
 
     def _set_limit_checkbox_enabled(self, enabled: bool):
-        """Enable/disable Limit checkbox visually (CustomTkinter needs explicit colors)."""
-        if not getattr(self, "info_panel", None):
-            logging.info("[LimitCB] info_panel missing")
-            return
-        cb = getattr(self.info_panel, "multiTimeline_limit_checkbox", None)
-        if not cb:
-            logging.info("[LimitCB] checkbox missing")
-            return
-        logging.info("[LimitCB] setting enabled=%s", enabled)
-        if enabled:
-            cb.configure(
-                state="normal",
-                text_color="gray",
-                fg_color=("#2CC985", "#2FA572"),       # default CTK green/blue
-                border_color=("gray50", "gray50"),
-                checkmark_color=("gray10", "gray90"),
-            )
-        else:
-            DARK = ("#3a3a3a", "#3a3a3a")
-            cb.configure(
-                state="disabled",
-                text_color=DARK,
-                fg_color=DARK,
-                border_color=DARK,
-                checkmark_color=DARK,
-            )
+        """Legacy no-op: strip limit moved from preview bar to Preferences."""
+        return
 
     def _on_preview_mode_change(self, mode):
         """VIDEO / Strips mode switch callback from info panel."""
@@ -4234,12 +4211,8 @@ class VideoThumbnailPlayer(
                 self._handle_thumbnail_single_click(self.selected_file_path)
 
     def _apply_strip_limit(self, video_paths):
-        """Cap strip count when limit is enabled in info panel."""
-        limit_on = (
-            getattr(self, "info_panel", None) and
-            hasattr(self.info_panel, "multiTimeline_limit_var") and
-            self.info_panel.multiTimeline_limit_var.get()
-        )
+        """Cap strip count when the Preferences strip limit is enabled."""
+        limit_on = bool(getattr(self, "preview_window_strip_limit", True))
         if limit_on and len(video_paths) > self.timeline_strip_count:
             logging.info(
                 "[MultiTimeline] Limit on: showing %d of %d videos.",
@@ -4295,6 +4268,8 @@ class VideoThumbnailPlayer(
         # Sync mode switch and Limit checkbox
         if hasattr(self.info_panel, "preview_mode_var"):
             self.info_panel.preview_mode_var.set("Strips")
+        if hasattr(self.info_panel, "_update_preview_zoom_button_state"):
+            self.info_panel._update_preview_zoom_button_state()
         self._set_limit_checkbox_enabled(True)
 
     def _show_single_preview(self):
@@ -4309,6 +4284,8 @@ class VideoThumbnailPlayer(
         # Switch back to Video and dim Limit checkbox
         if getattr(self, "info_panel", None) and hasattr(self.info_panel, "preview_mode_var"):
             self.info_panel.preview_mode_var.set("Video")
+        if getattr(self, "info_panel", None) and hasattr(self.info_panel, "_update_preview_zoom_button_state"):
+            self.info_panel._update_preview_zoom_button_state()
         self._set_limit_checkbox_enabled(False)
 
     

@@ -261,19 +261,34 @@ class MultiTimelineViewer(ctk.CTkFrame):
     #  RESIZE (Shift+Scroll)                                               #
     # ------------------------------------------------------------------ #
 
-    def _on_resize_scroll(self, event):
-        delta = 1 if event.delta > 0 else -1
-        new_w = max(60, min(320, self.thumb_w + delta * 12))
+    def _set_zoom_width(self, new_w, *, show_overlay=True):
+        new_w = max(60, min(320, int(new_w)))
         new_h = new_w * 56 // 100
         if new_w == self.thumb_w:
             return
         self._user_zoomed = True   # uživatel explicitně zoomoval → auto-fit se přeskočí
         self.thumb_w = new_w
         self.thumb_h = new_h
-        self._show_zoom_overlay_temporarily()
+        if show_overlay:
+            self._show_zoom_overlay_temporarily()
         if self._current_video_paths:
             self.load_videos(self._current_video_paths)
         self.after(120, self._update_hscroll_visibility)
+
+    def _apply_zoom_step(self, direction):
+        self._set_zoom_width(self.thumb_w + (12 if direction > 0 else -12))
+
+    def zoom_in(self):
+        self._apply_zoom_step(1)
+
+    def zoom_out(self):
+        self._apply_zoom_step(-1)
+
+    def reset_zoom(self):
+        self._set_zoom_width(self.THUMB_W_DEFAULT)
+
+    def _on_resize_scroll(self, event):
+        self._apply_zoom_step(1 if event.delta > 0 else -1)
 
     # ------------------------------------------------------------------ #
     #  LOAD / RENDER                                                       #
