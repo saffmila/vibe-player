@@ -598,68 +598,68 @@ def get_cache_dir_path(file_path, cache_dir):
 
 
 
-def create_image_thumbnail(image_path, thumbnail_size, cache_enabled=True, database=None, cache_dir="thumbnail_cache"):
+def create_image_thumbnail(image_path, thumbnail_size, cache_enabled=True, database=None, cache_dir="thumbnail_cache", overwrite=False):
     """Generate or retrieve cached image thumbnail. Registers file in database if provided."""
-    cached_thumbnail = thumbnail_cache.get(image_path)
-    # print (f"IMAGE THUMB cached_thumbnail {cached_thumbnail}")
-    if cached_thumbnail:
-        # print (f"create_IMAGE_thumbnail : returning cached thumbnails   {cached_thumbnail}")
-        return cached_thumbnail
+    if not overwrite:
+        cached_thumbnail = thumbnail_cache.get(image_path)
+        # print (f"IMAGE THUMB cached_thumbnail {cached_thumbnail}")
+        if cached_thumbnail:
+            # print (f"create_IMAGE_thumbnail : returning cached thumbnails   {cached_thumbnail}")
+            return cached_thumbnail
     # Otherwise, generate and cache the thumbnail
-    else: 
-        try:
-            cache_dir_path, full_path = get_cache_dir_path(image_path, cache_dir)
-            os.makedirs(cache_dir_path, exist_ok=True)
+    try:
+        cache_dir_path, full_path = get_cache_dir_path(image_path, cache_dir)
+        os.makedirs(cache_dir_path, exist_ok=True)
             
-            thumbnail_format = "jpg"
-            # logging.info(f"IMAGE thumbnail_format: {thumbnail_format}")
+        thumbnail_format = "jpg"
+        # logging.info(f"IMAGE thumbnail_format: {thumbnail_format}")
 
-            cache_key = f"{os.path.basename(image_path)}_{thumbnail_size[0]}x{thumbnail_size[1]}.{thumbnail_format}"
-            cache_path = os.path.join(cache_dir_path, cache_key)
+        cache_key = f"{os.path.basename(image_path)}_{thumbnail_size[0]}x{thumbnail_size[1]}.{thumbnail_format}"
+        cache_path = os.path.join(cache_dir_path, cache_key)
             
-            # logging.info(f"create_image_thumbnail - cache_dir_path: {cache_dir_path}")
-            # logging.info(f"create_image_thumbnail - cache_key: {cache_key}")
-            # logging.info(f"create_image_thumbnail - final cache_path: {cache_path}")
+        # logging.info(f"create_image_thumbnail - cache_dir_path: {cache_dir_path}")
+        # logging.info(f"create_image_thumbnail - cache_key: {cache_key}")
+        # logging.info(f"create_image_thumbnail - final cache_path: {cache_path}")
 
-            if cache_enabled and os.path.exists(cache_path):
-                _cached_img = Image.open(cache_path)
-                _cached_img.load()
-                return ctk.CTkImage(light_image=_cached_img, dark_image=_cached_img)
+        if cache_enabled and not overwrite and os.path.exists(cache_path):
+            _cached_img = Image.open(cache_path)
+            _cached_img.load()
+            return ctk.CTkImage(light_image=_cached_img, dark_image=_cached_img)
 
-            image = Image.open(image_path)
-            
-            image.thumbnail(thumbnail_size, Image.LANCZOS)
+        image = Image.open(image_path)
+        
+        image.thumbnail(thumbnail_size, Image.LANCZOS)
 
-            save_format = "JPEG" if thumbnail_format.lower() == "jpg" else thumbnail_format.upper()
-            # bg = Image.new('RGB', thumbnail_size, (0, 0, 0, 0))  # Change background color as needed
-            #thumbBGColor = "gray28"  #should be imported from main PY, fix!!
-            # should be  self.thumbBGColor , need to fix!!
-            bg = Image.new('RGB', thumbnail_size, (71, 71, 71))
-            bg.paste(image, ((thumbnail_size[0] - image.size[0]) // 2, (thumbnail_size[1] - image.size[1]) // 2))
-            bg.save(cache_path, format=save_format)
-            
-            thumbnail = ctk.CTkImage(light_image=bg, dark_image=bg)  # Create the CTkImage object
-            
+        save_format = "JPEG" if thumbnail_format.lower() == "jpg" else thumbnail_format.upper()
+        # bg = Image.new('RGB', thumbnail_size, (0, 0, 0, 0))  # Change background color as needed
+        #thumbBGColor = "gray28"  #should be imported from main PY, fix!!
+        # should be  self.thumbBGColor , need to fix!!
+        bg = Image.new('RGB', thumbnail_size, (71, 71, 71))
+        bg.paste(image, ((thumbnail_size[0] - image.size[0]) // 2, (thumbnail_size[1] - image.size[1]) // 2))
+        bg.save(cache_path, format=save_format)
+        
+        thumbnail = ctk.CTkImage(light_image=bg, dark_image=bg)  # Create the CTkImage object
+        
 
-            if database:
-                width, height = image.size
-                database.add_entry(os.path.basename(image_path), image_path, width, height)
-            
-             # After generating the thumbnail
-            if thumbnail is not None:
-                thumbnail_cache.set(image_path, thumbnail)  # Save to cache
-            
-            # logging.info(f"Thumbnail created and saved at: {cache_path}")
-            return ctk.CTkImage(light_image=bg, dark_image=bg)
-        except UnidentifiedImageError as e:
-            logging.debug("create_image_thumbnail: not a valid image (skip): %s — %s", image_path, e)
-            return None
-        except OSError as e:
-            logging.debug("create_image_thumbnail: OS error (skip): %s — %s", image_path, e)
-            return None
-        except Exception as e:
-            logging.info(f"Error creating image thumbnail for {image_path}: {e}")
-            return None
+        if database:
+            width, height = image.size
+            database.add_entry(os.path.basename(image_path), image_path, width, height)
+        
+        # After generating the thumbnail
+        if thumbnail is not None:
+            thumbnail_cache.set(image_path, thumbnail)  # Save to cache
+        
+        # logging.info(f"Thumbnail created and saved at: {cache_path}")
+        return ctk.CTkImage(light_image=bg, dark_image=bg)
+    except UnidentifiedImageError as e:
+        logging.debug("create_image_thumbnail: not a valid image (skip): %s — %s", image_path, e)
+        return None
+    except OSError as e:
+        logging.debug("create_image_thumbnail: OS error (skip): %s — %s", image_path, e)
+        return None
+    except Exception as e:
+        logging.info(f"Error creating image thumbnail for {image_path}: {e}")
+        return None
 
 
 def create_video_thumbnail(video_path, thumbnail_size, thumbnail_format, capture_method, thumbnail_time=10, cache_enabled=True, overwrite=False, cache_dir="thumbnail_cache", database=None):

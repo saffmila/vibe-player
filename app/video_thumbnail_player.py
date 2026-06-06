@@ -2002,7 +2002,10 @@ class VideoThumbnailPlayer(
         # Add context menu options
         # menu.add_command(label="Add Keywords", command=lambda: self.open_keyword_window(file_path))
         # menu.add_command(label="Remove Keywords", command=lambda: self.open_remove_keyword_window(file_path))
-        menu.add_command(label="Scan Thumbnails", command=lambda: self.scan_subtree(file_path))
+        menu.add_command(
+            label="Scan Thumbnails",
+            command=lambda: self.scan_subtree(file_path, force_refresh=True),
+        )
         
         menu.add_command(label="Refresh Thumbnails", command=lambda: self.refresh_thumbnails_in_subtree(file_path))
         menu.add_command(

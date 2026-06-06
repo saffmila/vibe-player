@@ -1635,7 +1635,7 @@ class VtpGridMixin:
                     else:
                         thumbnail = create_image_thumbnail(
                             file_path, self.thumbnail_size, database=self.database, 
-                            cache_dir=self.thumbnail_cache_path
+                            cache_dir=self.thumbnail_cache_path, overwrite=overwrite
                         )
                     
                     if thumbnail is not None and memory_cache:
@@ -2421,7 +2421,7 @@ class VtpGridMixin:
 
     def queue_thumbnail(self, file_path, file_name, row, col, index, is_folder=False, thumbnail_time=None, force_refresh=False,overwrite=False, target_frame=None, render_id=None):
         """Add thumbnail task to queue."""
-        if render_id is None:
+        if render_id is None and target_frame is not None:
             render_id = self._render_id
         task = (file_path, file_name, row, col, index, is_folder, thumbnail_time, force_refresh, target_frame, render_id)
         self.thumb_queue.put(task)
@@ -2438,7 +2438,7 @@ class VtpGridMixin:
             
             while not self.thumb_queue.empty() and count < batch_limit:
                 file_path, file_name, row, col, index, is_folder, thumbnail_time, force_refresh, target_frame, render_id = self.thumb_queue.get()
-                if render_id != self._render_id:
+                if render_id is not None and render_id != self._render_id:
                     count += 1
                     continue
                 overwrite = force_refresh
@@ -4896,7 +4896,7 @@ class VtpGridMixin:
                     else:
                         thumb = create_image_thumbnail(
                             file_path, self.thumbnail_size, database=self.database,
-                            cache_dir=self.thumbnail_cache_path,
+                            cache_dir=self.thumbnail_cache_path, overwrite=overwrite,
                         )
                     if thumb is None:
                         if file_name.lower().endswith(VIDEO_FORMATS):

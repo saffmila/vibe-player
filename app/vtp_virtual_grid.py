@@ -2245,7 +2245,7 @@ class VtpVirtualGridMixin:
             else:
                 thumb = create_image_thumbnail(
                     file_path, self.thumbnail_size, database=self.database,
-                    cache_dir=self.thumbnail_cache_path,
+                    cache_dir=self.thumbnail_cache_path, overwrite=force_refresh,
                 )
             if thumb is None:
                 if file_name.lower().endswith(VIDEO_FORMATS):
