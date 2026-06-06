@@ -38,6 +38,17 @@ from bookmark_manager import BookmarkManager, DEFAULT_BOOKMARK_COLOR
 
 _audio_devices_cache = None
 
+_LEGACY_MPEG_PLAYBACK_EXTS = (
+    ".mpg",
+    ".mpeg",
+    ".vob",
+    ".m2v",
+    ".m1v",
+    ".ts",
+    ".mts",
+    ".m2ts",
+)
+
 
 def _dnd_tk_surface(widget):
     """Plain Tk widget for tkinterdnd2 (CustomTkinter hosts use ``_canvas``)."""
@@ -1400,15 +1411,28 @@ class VideoPlayer:
         NVIDIA Control Panel or AMD Software. A player restart is needed
         when this setting is toggled.
         """
+        legacy_mpeg_profile = (
+            os.path.splitext(str(self.video_path or ""))[1].lower()
+            in _LEGACY_MPEG_PLAYBACK_EXTS
+        )
+        effective_video_output = "direct3d9" if legacy_mpeg_profile else self.video_output
+        effective_hw_decoding = "none" if legacy_mpeg_profile else self.hardware_decoding
+        effective_gpu_upscale = bool(self.use_gpu_upscale) and not legacy_mpeg_profile
+
         logging.info("--- [VLC PRE-CHECK] ---")
-        logging.info(f"  > Video Output: {self.video_output}")
+        logging.info(f"  > Video Output: {effective_video_output}")
         logging.info(f"  > Audio Output: {self.audio_output}")
-        logging.info(f"  > HW Decoding: {self.hardware_decoding}")
+        logging.info(f"  > HW Decoding: {effective_hw_decoding}")
         logging.info(f"  > Audio Device: {self.audio_device}")
-        logging.info(f"  > GPU Upscale: {self.use_gpu_upscale}")
+        logging.info(f"  > GPU Upscale: {effective_gpu_upscale}")
+        if legacy_mpeg_profile:
+            logging.info(
+                "[VLC Legacy] Using stable MPEG profile for %s: direct3d9 + software decode, filters disabled.",
+                os.path.basename(str(self.video_path or "")),
+            )
         logging.info("-------------------------")
 
-        if self.use_gpu_upscale:
+        if effective_gpu_upscale:
             gpu_vendor = get_gpu_vendor()
             logging.info(f"[GPU Upscale] Detected vendor: {gpu_vendor}. Enabling GPU upscaling mode.")
             # RTX Video Super Resolution requires the D3D11VA hardware decoder specifically.
@@ -1425,8 +1449,8 @@ class VideoPlayer:
             logging.info(f"[GPU Upscale] Args: --vout=direct3d11 --avcodec-hw=d3d11va  (vendor={gpu_vendor})")
         else:
             vlc_options = [
-                f'--vout={self.video_output}',
-                f'--avcodec-hw={self.hardware_decoding}',
+                f'--vout={effective_video_output}',
+                f'--avcodec-hw={effective_hw_decoding}',
                 '--file-logging',
                 '--logfile=vlc-log.txt'
             ]
@@ -1434,16 +1458,16 @@ class VideoPlayer:
         # Optional video quality filters configured in app preferences.
         # VLC accepts multiple filters as a colon-separated chain.
         filter_chain = []
-        if getattr(self.controller, "vlc_enable_postproc", False):
+        if not legacy_mpeg_profile and getattr(self.controller, "vlc_enable_postproc", False):
             filter_chain.append("postproc")
             postproc_q = int(getattr(self.controller, "vlc_postproc_quality", 6))
             postproc_q = max(0, min(6, postproc_q))
             vlc_options.append(f'--postproc-q={postproc_q}')
-        if getattr(self.controller, "vlc_enable_gradfun", False):
+        if not legacy_mpeg_profile and getattr(self.controller, "vlc_enable_gradfun", False):
             filter_chain.append("gradfun")
         if filter_chain:
             vlc_options.append(f'--video-filter={":".join(filter_chain)}')
-        if getattr(self.controller, "vlc_enable_deinterlace", False):
+        if not legacy_mpeg_profile and getattr(self.controller, "vlc_enable_deinterlace", False):
             vlc_options.append('--deinterlace=1')
         if getattr(self.controller, "vlc_skiploopfilter_disable", False):
             vlc_options.append('--avcodec-skiploopfilter=0')
@@ -1501,11 +1525,11 @@ class VideoPlayer:
             raise RuntimeError("vlc.Instance() returned None")
         except Exception as e:
             logging.error(f"[VLC] Error creating instance: {e}")
-            if self.use_gpu_upscale:
+            if effective_gpu_upscale:
                 logging.warning("[GPU Upscale] GPU upscale instance failed. Falling back to standard VLC settings.")
                 fallback_options = [
-                    f'--vout={self.video_output}',
-                    f'--avcodec-hw={self.hardware_decoding}',
+                    f'--vout={effective_video_output}',
+                    f'--avcodec-hw={effective_hw_decoding}',
                     '--file-logging',
                     '--logfile=vlc-log.txt',
                     f'--aout=waveout',

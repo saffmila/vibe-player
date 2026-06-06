@@ -2249,7 +2249,9 @@ class VtpVirtualGridMixin:
                 )
             if thumb is None:
                 if file_name.lower().endswith(VIDEO_FORMATS):
-                    thumb = self._create_corrupted_thumbnail_image()
+                    thumb = self._create_corrupted_thumbnail_image(
+                        "Thumbnail could not be generated"
+                    )
                 else:
                     try:
                         img = Image.open("image_icon.png")

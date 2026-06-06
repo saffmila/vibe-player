@@ -18,6 +18,33 @@ from typing import Any, Callable
 import cv2
 from pymediainfo import MediaInfo
 
+_OPENCV_FRAGILE_VIDEO_EXTS = (
+    ".wmv",
+    ".avi",
+    ".mpg",
+    ".mpeg",
+    ".vob",
+    ".m2v",
+    ".m1v",
+    ".ts",
+    ".mts",
+    ".m2ts",
+)
+
+
+def _get_local_ffprobe_path() -> str:
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates = [
+        os.path.join(repo_root, "tools", "ffmpeg", "bin", "ffprobe.exe"),
+        os.path.join(repo_root, "tools", "ffmpeg", "ffprobe.exe"),
+        os.path.abspath(os.path.join("tools", "ffmpeg", "bin", "ffprobe.exe")),
+        os.path.abspath(os.path.join("tools", "ffmpeg", "ffprobe.exe")),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return "ffprobe"
+
 
 class ThumbnailCache:
     """Singleton in-memory cache for video/image thumbnails with hit/miss statistics."""
@@ -117,7 +144,7 @@ def get_video_size(video_path: str) -> tuple[int | None, int | None]:
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
         cmd = [
-            "ffprobe",
+            _get_local_ffprobe_path(),
             "-v",
             "error",
             "-select_streams",
@@ -147,6 +174,9 @@ def get_video_size(video_path: str) -> tuple[int | None, int | None]:
                     return width, height
     except Exception:
         pass
+
+    if os.path.splitext(video_path)[1].lower() in _OPENCV_FRAGILE_VIDEO_EXTS:
+        return None, None
 
     cap = None
     try:

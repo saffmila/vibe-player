@@ -38,6 +38,19 @@ thumbnail_cache = ThumbnailCache()
 
 _duration_cache = {}
 
+_OPENCV_FRAGILE_VIDEO_EXTS = (
+    ".wmv",
+    ".avi",
+    ".mpg",
+    ".mpeg",
+    ".vob",
+    ".m2v",
+    ".m1v",
+    ".ts",
+    ".mts",
+    ".m2ts",
+)
+
 
 
 
@@ -458,6 +471,13 @@ def get_video_duration_mediainfo(video_path):
     base_name = os.path.basename(video_path)
     duration = 0.0
     cap = None 
+    ext = os.path.splitext(video_path)[1].lower()
+
+    if ext in _OPENCV_FRAGILE_VIDEO_EXTS:
+        duration = get_duration_with_ffmpeg(video_path)
+        if duration > 0:
+            _duration_cache[video_path] = duration
+        return duration
 
     try:
         import cv2  # lazy import — only paid on first duration lookup
@@ -500,7 +520,7 @@ def get_duration_with_ffmpeg(video_path):
     Gets video duration using ffprobe. Version with timeout to prevent hangs.
     """
     command = [
-        "ffprobe",
+        get_ffprobe_path(),
         "-v", "error",
         "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1",
@@ -518,6 +538,13 @@ def get_duration_with_ffmpeg(video_path):
         duration_str = result.stdout.strip()
         
         if not duration_str:
+            stderr = (result.stderr or "").strip()
+            if stderr:
+                logging.info(
+                    "[FFmpeg Fallback] ffprobe returned no duration for %s: %s",
+                    os.path.basename(video_path),
+                    stderr[:800],
+                )
             return 0.0
 
         return float(duration_str)
@@ -713,8 +740,8 @@ def create_video_thumbnail(video_path, thumbnail_size, thumbnail_format, capture
     try:
         frame = None
         
-        # --- Protection: OpenCV hangs on WMV/AVI. Skip it ---
-        if capture_method == "OpenCV" and video_path.lower().endswith(('.wmv', '.avi')):
+        # --- Protection: OpenCV hangs/fails noisily on some legacy containers. Skip it. ---
+        if capture_method == "OpenCV" and video_path.lower().endswith(_OPENCV_FRAGILE_VIDEO_EXTS):
             logging.info(f"[⚠️] Skipping OpenCV for {os.path.basename(video_path)}, forcing FFmpeg to avoid lag.")
             capture_method = "FFmpeg"
 
@@ -1017,6 +1044,13 @@ def captureFrameFFmpeg(video_path, thumbnail_size, thumbnail_time=10, crop_to_fi
     _low = video_path.lower()
     _seek_sensitive = _low.endswith((".wmv", ".asf"))
 
+    def _stderr_text(data) -> str:
+        if data is None:
+            return ""
+        if isinstance(data, bytes):
+            return data.decode("utf-8", "replace").strip()
+        return str(data).strip()
+
     def _run_ffmpeg(t_time, seek_before_input: bool):
         head = [
             get_ffmpeg_path(),
@@ -1049,18 +1083,33 @@ def captureFrameFFmpeg(video_path, thumbnail_size, thumbnail_time=10, crop_to_fi
         try:
             # Added startupinfo to subprocess call
             proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, startupinfo=startupinfo)
-            return proc.stdout, proc.stderr
+            return proc.stdout, _stderr_text(proc.stderr)
+        except subprocess.CalledProcessError as e:
+            return None, _stderr_text(e.stderr)
         except Exception as e:
             return None, str(e)
 
-    def _try_time(t_time) -> bytes | None:
+    def _try_time(t_time) -> tuple[bytes | None, str]:
+        last_stderr = ""
         for seek_first in (True, False):
             if not seek_first and not _seek_sensitive:
                 break
-            stdout_data, _stderr_data = _run_ffmpeg(t_time, seek_before_input=seek_first)
+            stdout_data, stderr_data = _run_ffmpeg(t_time, seek_before_input=seek_first)
             if stdout_data:
-                return stdout_data
-        return None
+                return stdout_data, ""
+            if stderr_data:
+                last_stderr = stderr_data
+        return None, last_stderr
+
+    def _log_capture_failure(t_time, stderr_text):
+        if not stderr_text:
+            return
+        logging.info(
+            "[FFMPEG] Thumbnail capture failed for %s at %.3fs: %s",
+            os.path.basename(video_path),
+            float(t_time or 0.0),
+            stderr_text[:1200],
+        )
 
     def _decode_png(stdout_data: bytes):
         import numpy as np  # lazy import — only paid when FFmpeg capture method is used
@@ -1068,13 +1117,18 @@ def captureFrameFFmpeg(video_path, thumbnail_size, thumbnail_time=10, crop_to_fi
         return np.array(image)
 
     # 1. Optimistic attempt
-    stdout_data = _try_time(thumbnail_time)
+    stdout_data, stderr_text = _try_time(thumbnail_time)
 
     if stdout_data:
         try:
             return _decode_png(stdout_data)
-        except Exception:
-            pass 
+        except Exception as e:
+            logging.info(
+                "[FFMPEG] Thumbnail PNG decode failed for %s at %.3fs: %s",
+                os.path.basename(video_path),
+                float(thumbnail_time or 0.0),
+                e,
+            )
 
     # 2. Fallback
     if duration is None:
@@ -1083,9 +1137,10 @@ def captureFrameFFmpeg(video_path, thumbnail_size, thumbnail_time=10, crop_to_fi
     safe_time = sanitize_thumbnail_time(thumbnail_time, duration)
     
     if safe_time == thumbnail_time:
+        _log_capture_failure(thumbnail_time, stderr_text)
         return None 
 
-    stdout_data = _try_time(safe_time)
+    stdout_data, fallback_stderr = _try_time(safe_time)
     
     if stdout_data:
         try:
@@ -1094,6 +1149,7 @@ def captureFrameFFmpeg(video_path, thumbnail_size, thumbnail_time=10, crop_to_fi
             logging.info(f"[FFMPEG] Fallback parse error: {e}")
             return None
     else:
+        _log_capture_failure(safe_time, fallback_stderr or stderr_text)
         return None
 
 
@@ -1293,6 +1349,8 @@ def get_file_info(path):
             image = Image.open(path)
             width, height = image.size
             dimensions = f"{width}x{height}"
+        elif path.lower().endswith(_OPENCV_FRAGILE_VIDEO_EXTS):
+            dimensions = "Unknown"
         else:
             import cv2  # lazy import — only paid when file info for a video is requested
             cap = cv2.VideoCapture(path)
@@ -1331,6 +1389,8 @@ def get_file_metadata(path):
                         metadata["description"] = f"EXIF Error: {e}"
             elif ext.endswith(('.avi', '.mp4', '.mkv', '.mov', '.wmv', '.flv', '.mpeg', '.mpg', '.webm',
                                '.3gp', '.ogv', '.vob', '.asf', '.rm', '.qt')):
+                if ext.endswith(_OPENCV_FRAGILE_VIDEO_EXTS):
+                    return metadata
                 import cv2  # lazy import — only paid when video metadata is requested
                 cap = cv2.VideoCapture(path)
                 metadata["width"] = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))

@@ -17,6 +17,19 @@ from file_operations import (
     get_video_duration_mediainfo,
 )
 
+_OPENCV_FRAGILE_VIDEO_EXTS = (
+    ".wmv",
+    ".avi",
+    ".mpg",
+    ".mpeg",
+    ".vob",
+    ".m2v",
+    ".m1v",
+    ".ts",
+    ".mts",
+    ".m2ts",
+)
+
 class TimelineManager:
     def __init__(self, thumbnail_size=(320, 240), thumbnail_format="jpg", cache_dir="thumbnail_cache"):
         self.thumbnail_size = thumbnail_size
@@ -109,13 +122,27 @@ class TimelineManager:
             return cache_path
 
         os.makedirs(cache_dir_path, exist_ok=True)
-        # logging.debug(f"--> Calling captureFrameOpenCV with timestamp={timestamp}, duration={duration}")
-        # --- PART 2: CALLING AND CHECKING FFMPEG (THIS IS THE KEY FIX) ---
-        # frame = captureFrameFFmpeg(video_path, self.thumbnail_size, , thumbnail_time=timestamp, duration=duration)
-        frame = captureFrameOpenCV(video_path, self.thumbnail_size,  thumbnail_time=timestamp, duration=duration)
-        # IF FFMPEG FAILS, WE IMMEDIATELY RETURN AND DO NOT SAVE ANYTHING
+        if os.path.splitext(video_path)[1].lower() in _OPENCV_FRAGILE_VIDEO_EXTS:
+            frame = captureFrameFFmpeg(
+                video_path,
+                self.thumbnail_size,
+                thumbnail_time=timestamp,
+                duration=duration,
+            )
+        else:
+            frame = captureFrameOpenCV(
+                video_path,
+                self.thumbnail_size,
+                thumbnail_time=timestamp,
+                duration=duration,
+            )
+
         if frame is None:
-            logging.warning(f"captureFrameFFmpeg failed for {video_path} at {timestamp}s. Not creating a cache file.")
+            logging.warning(
+                "Timeline thumbnail capture failed for %s at %ss. Not creating a cache file.",
+                video_path,
+                timestamp,
+            )
             return None # <-- Important: we return None, nothing is saved
 
         # IF FFMPEG SUCCEEDS, WE PROCESS AND SAVE THE IMAGE

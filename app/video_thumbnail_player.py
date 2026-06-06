@@ -4792,6 +4792,10 @@ class VideoThumbnailPlayer(
 
  
     def get_video_dimensions(self, file_path):
+        if file_path.lower().endswith((
+            ".wmv", ".avi", ".mpg", ".mpeg", ".vob", ".m2v", ".m1v", ".ts", ".mts", ".m2ts"
+        )):
+            return 0, 0
         cap = None
         try:
             cap = cv2.VideoCapture(file_path)

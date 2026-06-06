@@ -1644,7 +1644,9 @@ class VtpGridMixin:
                 if thumbnail is None:
                     if file_name.lower().endswith(VIDEO_FORMATS):
                         # Metadata can look OK while every frame grab fails — show explicit placeholder.
-                        thumbnail = self._create_corrupted_thumbnail_image()
+                        thumbnail = self._create_corrupted_thumbnail_image(
+                            "Thumbnail could not be generated"
+                        )
                     else:
                         try:
                             default_image_path = "image_icon.png"
@@ -1858,6 +1860,14 @@ class VtpGridMixin:
 
     def _can_attempt_video_playback(self, video_path, for_preview=False):
         """Central playback policy used by preview and main player open."""
+        if bool(getattr(self, "play_broken_videos", True)):
+            try:
+                if os.path.getsize(video_path) <= 0:
+                    return False, "Cannot play empty video file (0 B)."
+            except OSError:
+                return False, "Cannot play inaccessible video file."
+            return True, ""
+
         health = self._get_video_health(video_path)
         if health == "empty":
             return False, "Cannot play empty video file (0 B)."
