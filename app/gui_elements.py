@@ -1160,7 +1160,7 @@ def create_preferences_window(app):
     preferences_window = ctk.CTkToplevel(app)
     app.preferences_window = preferences_window  # Store the reference in the main app object
     preferences_window.title("Preferences")
-    preferences_window.geometry("500x600")
+    preferences_window.geometry("620x500")
     preferences_window.attributes('-topmost', True) 
 
     # --- FIX 1: Close Handler (for 'X' button and Save button) ---
@@ -1172,32 +1172,203 @@ def create_preferences_window(app):
     # Bind the custom close function to the window's 'X' button (close protocol)
     preferences_window.protocol("WM_DELETE_WINDOW", on_close)
 
-    canvas = ctk.CTkCanvas(preferences_window)
-    canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    pref_scale = 0.69
 
-    scrollbar = ctk.CTkScrollbar(preferences_window, orientation=tk.VERTICAL, command=canvas.yview)
-    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-    canvas.configure(yscrollcommand=scrollbar.set)
+    def pref_px(value, minimum=1):
+        return max(minimum, int(round(value * pref_scale)))
 
-    content_frame = ctk.CTkFrame(canvas)
-    content_frame_id = canvas.create_window((0, 0), window=content_frame, anchor="nw")
+    pref_panel_bg = "#343434"
+    pref_separator_color = "#484848"
+    pref_group_kwargs = {
+        "fg_color": "transparent",
+    }
+    pref_body_font = ctk.CTkFont(family="Helvetica", size=pref_px(13, 8))
+    pref_heading_font = ctk.CTkFont(family="Helvetica", size=pref_px(16, 10), weight="bold")
+    pref_heading_texts = set()
 
-    def on_configure(event):
-        canvas.configure(scrollregion=canvas.bbox("all"))
-        canvas.itemconfig(content_frame_id, width=canvas.winfo_width())
+    main_frame = ctk.CTkFrame(preferences_window, fg_color="transparent")
+    main_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(8, 4))
+    main_frame.grid_columnconfigure(1, weight=1)
+    main_frame.grid_rowconfigure(0, weight=1)
 
-    content_frame.bind("<Configure>", on_configure)
-    canvas.bind("<Configure>", lambda e: canvas.itemconfig(content_frame_id, width=e.width))
+    nav_frame = ctk.CTkFrame(main_frame, width=150)
+    nav_frame.grid(row=0, column=0, sticky="nsw", padx=(0, 8))
+    nav_frame.grid_propagate(False)
+
+    content_shell = ctk.CTkFrame(main_frame, fg_color=pref_panel_bg)
+    content_shell.grid(row=0, column=1, sticky="nsew")
+    content_shell.grid_rowconfigure(0, weight=1)
+    content_shell.grid_columnconfigure(0, weight=1)
+
+    section_frames = {}
+    section_buttons = {}
+
+    def _show_preferences_section(name):
+        for section_name, frame in section_frames.items():
+            if section_name == name:
+                frame.grid(row=0, column=0, sticky="nsew")
+            else:
+                frame.grid_remove()
+        for section_name, button in section_buttons.items():
+            selected = section_name == name
+            button.configure(
+                fg_color=("#5f6f7f", "#37424d") if selected else ("gray75", "gray25"),
+                text_color=("white", "white") if selected else ("gray15", "gray85"),
+            )
+
+    def _add_preferences_section(name):
+        section_outer = ctk.CTkFrame(content_shell, fg_color=pref_panel_bg)
+        section_outer.grid_rowconfigure(0, weight=1)
+        section_outer.grid_columnconfigure(0, weight=1)
+
+        canvas = ctk.CTkCanvas(section_outer, bg=pref_panel_bg, highlightthickness=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ctk.CTkScrollbar(
+            section_outer,
+            orientation=tk.VERTICAL,
+            command=canvas.yview,
+            width=pref_px(16, 10),
+        )
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        section_content = ctk.CTkFrame(canvas, fg_color=pref_panel_bg)
+        section_content_id = canvas.create_window((0, 0), window=section_content, anchor="nw")
+
+        def _on_section_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.itemconfig(section_content_id, width=canvas.winfo_width())
+
+        section_content.bind("<Configure>", _on_section_configure)
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(section_content_id, width=e.width))
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            return "break"
+
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        section_content.bind("<MouseWheel>", _on_mousewheel)
+
+        section_frames[name] = section_outer
+        nav_button = ctk.CTkButton(
+            nav_frame,
+            text=name,
+            command=lambda n=name: _show_preferences_section(n),
+            anchor="w",
+            height=pref_px(30, 18),
+            font=pref_body_font,
+        )
+        nav_button.pack(fill="x", padx=6, pady=(6 if not section_buttons else 2, 2))
+        section_buttons[name] = nav_button
+        section_outer.grid_remove()
+        return section_content
+
+    def _safe_config(widget, **kwargs):
+        for key, value in kwargs.items():
+            try:
+                widget.configure(**{key: value})
+            except Exception:
+                pass
+
+    def _add_preferences_separator(parent):
+        separator = ctk.CTkFrame(
+            parent,
+            height=1,
+            fg_color=pref_separator_color,
+            corner_radius=0,
+        )
+        separator.pack(fill="x", padx=12, pady=(8, 4))
+        return separator
+
+    def _compact_preferences_tree(widget):
+        for child in widget.winfo_children():
+            if isinstance(child, ctk.CTkLabel):
+                try:
+                    label_text = child.cget("text")
+                except Exception:
+                    label_text = ""
+                label_font = pref_heading_font if label_text in pref_heading_texts else pref_body_font
+                _safe_config(child, font=label_font, height=pref_px(20, 12))
+            elif isinstance(child, ctk.CTkButton):
+                _safe_config(child, font=pref_body_font, height=pref_px(28, 18), corner_radius=pref_px(6, 3))
+            elif isinstance(child, ctk.CTkCheckBox):
+                _safe_config(
+                    child,
+                    font=pref_body_font,
+                    height=pref_px(24, 16),
+                    checkbox_width=pref_px(18, 12),
+                    checkbox_height=pref_px(18, 12),
+                    border_width=pref_px(3, 1),
+                )
+            elif isinstance(child, ctk.CTkRadioButton):
+                _safe_config(
+                    child,
+                    font=pref_body_font,
+                    height=pref_px(24, 16),
+                    radiobutton_width=pref_px(18, 12),
+                    radiobutton_height=pref_px(18, 12),
+                    border_width=pref_px(3, 1),
+                )
+            elif isinstance(child, ctk.CTkOptionMenu):
+                _safe_config(
+                    child,
+                    font=pref_body_font,
+                    dropdown_font=pref_body_font,
+                    height=pref_px(28, 18),
+                )
+            elif isinstance(child, ctk.CTkSwitch):
+                _safe_config(
+                    child,
+                    font=pref_body_font,
+                    height=pref_px(24, 16),
+                    switch_width=pref_px(36, 22),
+                    switch_height=pref_px(18, 12),
+                )
+            elif isinstance(child, ctk.CTkEntry):
+                _safe_config(child, font=pref_body_font, height=pref_px(28, 18))
+            elif isinstance(child, ctk.CTkSlider):
+                _safe_config(
+                    child,
+                    height=pref_px(20, 15),
+                    corner_radius=0,
+                    button_length=pref_px(12, 8),
+                    button_corner_radius=pref_px(6, 4),
+                    fg_color="#555555",
+                    progress_color="#555555",
+                    button_color="#1f6fae",
+                    button_hover_color="#2f84c8",
+                )
+            _compact_preferences_tree(child)
 
     if hasattr(app, "ensure_audio_devices_loaded"):
         app.ensure_audio_devices_loaded()
     audio_devices = getattr(app, "audio_devices", [])
     audio_device_options = [f"{d['name']} ({d['index']})" for d in audio_devices] if audio_devices else ["No devices found"]
 
+    video_section = _add_preferences_section("Video Options")
+    vlc_filters_section = _add_preferences_section("VLC Video Filters")
+    audio_section = _add_preferences_section("Audio Options")
+    thumbnail_section = _add_preferences_section("Thumbnail Options")
+    image_viewer_section = _add_preferences_section("Image Viewer")
+    general_section = _add_preferences_section("General Options")
+    interface_section = _add_preferences_section("Player Interface")
+    file_ops_section = _add_preferences_section("File Operations")
+    pref_heading_texts.update({
+        "Video Options",
+        "VLC Video Filters",
+        "Audio Options",
+        "Thumbnail Options",
+        "Image viewer",
+        "General Options",
+        "Player Interface Settings",
+        "Delete behavior",
+        "Drag and drop",
+    })
+
     # === VIDEO OPTIONS ===
-    video_options_frame = ctk.CTkFrame(content_frame)
+    video_options_frame = ctk.CTkFrame(video_section)
     video_options_frame.pack(fill="both", expand=True, padx=10, pady=10)
-    ctk.CTkLabel(video_options_frame, text="Video Options", font=("Helvetica", 16)).pack(anchor="w", padx=5, pady=5)
+    ctk.CTkLabel(video_options_frame, text="Video Options", font=pref_heading_font).pack(anchor="w", padx=5, pady=5)
 
     hud_enabled_var = ctk.BooleanVar(value=getattr(app, "video_show_hud", True))
     ctk.CTkCheckBox(
@@ -1214,8 +1385,9 @@ def create_preferences_window(app):
         command=lambda: setattr(app, "gpu_upscale", gpu_upscale_var.get())
     ).pack(anchor="w", padx=10, pady=5)
 
-    video_output_frame = ctk.CTkFrame(video_options_frame)
-    video_output_frame.pack(fill="both", expand=True, padx=10, pady=10)
+    _add_preferences_separator(video_options_frame)
+    video_output_frame = ctk.CTkFrame(video_options_frame, **pref_group_kwargs)
+    video_output_frame.pack(fill="x", padx=10, pady=(0, 6))
     video_output_var = ctk.StringVar(value=app.video_output_var.get())
     for option in ['direct3d11', 'direct3d9', 'glwin32', 'vmem']:
         ctk.CTkRadioButton(
@@ -1226,8 +1398,9 @@ def create_preferences_window(app):
             command=lambda: app.video_output_var.set(video_output_var.get())
         ).pack(anchor="w", padx=5)
 
-    capture_method_frame = ctk.CTkFrame(video_options_frame)
-    capture_method_frame.pack(fill="both", expand=True, padx=10, pady=10)
+    _add_preferences_separator(video_options_frame)
+    capture_method_frame = ctk.CTkFrame(video_options_frame, **pref_group_kwargs)
+    capture_method_frame.pack(fill="x", padx=10, pady=(0, 6))
     capture_method_var = ctk.StringVar(value=app.capture_method_var.get())
     for option in ['Imageio', 'OpenCV', 'FFmpeg']:
         ctk.CTkRadioButton(
@@ -1239,9 +1412,9 @@ def create_preferences_window(app):
         ).pack(anchor="w", padx=5)
 
     # === VLC VIDEO FILTERS ===
-    vlc_filters_frame = ctk.CTkFrame(content_frame)
+    vlc_filters_frame = ctk.CTkFrame(vlc_filters_section)
     vlc_filters_frame.pack(fill="both", expand=True, padx=10, pady=10)
-    ctk.CTkLabel(vlc_filters_frame, text="VLC Video Filters", font=("Helvetica", 16)).pack(anchor="w", padx=5, pady=5)
+    ctk.CTkLabel(vlc_filters_frame, text="VLC Video Filters", font=pref_heading_font).pack(anchor="w", padx=5, pady=5)
 
     vlc_postproc_var = ctk.BooleanVar(value=getattr(app, "vlc_enable_postproc", False))
     ctk.CTkCheckBox(
@@ -1250,8 +1423,9 @@ def create_preferences_window(app):
         variable=vlc_postproc_var
     ).pack(anchor="w", padx=10, pady=5)
 
-    postproc_quality_frame = ctk.CTkFrame(vlc_filters_frame)
-    postproc_quality_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+    _add_preferences_separator(vlc_filters_frame)
+    postproc_quality_frame = ctk.CTkFrame(vlc_filters_frame, **pref_group_kwargs)
+    postproc_quality_frame.pack(fill="x", padx=10, pady=(0, 6))
     ctk.CTkLabel(postproc_quality_frame, text="Post-processing quality (0-6)").pack(anchor="w", padx=5)
     vlc_postproc_quality_var = ctk.IntVar(value=int(getattr(app, "vlc_postproc_quality", 6)))
     ctk.CTkSlider(
@@ -1284,12 +1458,13 @@ def create_preferences_window(app):
     ).pack(anchor="w", padx=10, pady=5)
 
     # === AUDIO OPTIONS ===
-    audio_options_frame = ctk.CTkFrame(content_frame)
+    audio_options_frame = ctk.CTkFrame(audio_section)
     audio_options_frame.pack(fill="both", expand=True, padx=10, pady=10)
-    ctk.CTkLabel(audio_options_frame, text="Audio Options", font=("Helvetica", 16)).pack(anchor="w", padx=5, pady=5)
+    ctk.CTkLabel(audio_options_frame, text="Audio Options", font=pref_heading_font).pack(anchor="w", padx=5, pady=5)
 
-    audio_output_frame = ctk.CTkFrame(audio_options_frame)
-    audio_output_frame.pack(fill="both", expand=True, padx=10, pady=10)
+    _add_preferences_separator(audio_options_frame)
+    audio_output_frame = ctk.CTkFrame(audio_options_frame, **pref_group_kwargs)
+    audio_output_frame.pack(fill="x", padx=10, pady=(0, 6))
     audio_output_var = ctk.StringVar(value=app.audio_output_var.get())
     for option in ['directsound', 'waveout', 'alsa']:
         ctk.CTkRadioButton(
@@ -1300,8 +1475,9 @@ def create_preferences_window(app):
             command=lambda: app.audio_output_var.set(audio_output_var.get())
         ).pack(anchor="w", padx=5)
 
-    hardware_decoding_frame = ctk.CTkFrame(audio_options_frame)
-    hardware_decoding_frame.pack(fill="both", expand=True, padx=10, pady=10)
+    _add_preferences_separator(audio_options_frame)
+    hardware_decoding_frame = ctk.CTkFrame(audio_options_frame, **pref_group_kwargs)
+    hardware_decoding_frame.pack(fill="x", padx=10, pady=(0, 6))
     hardware_decoding_var = ctk.StringVar(value=app.hardware_decoding_var.get())
     for option in ['none', 'dxva2', 'd3d11va', 'cuda']:
         ctk.CTkRadioButton(
@@ -1312,8 +1488,9 @@ def create_preferences_window(app):
             command=lambda: app.hardware_decoding_var.set(hardware_decoding_var.get())
         ).pack(anchor="w", padx=5)
 
-    audio_device_frame = ctk.CTkFrame(audio_options_frame)
-    audio_device_frame.pack(fill="both", expand=True, padx=10, pady=10)
+    _add_preferences_separator(audio_options_frame)
+    audio_device_frame = ctk.CTkFrame(audio_options_frame, **pref_group_kwargs)
+    audio_device_frame.pack(fill="x", padx=10, pady=(0, 6))
     ctk.CTkLabel(audio_device_frame, text="Audio Device").pack(anchor="w", padx=5)
     audio_device_var = ctk.StringVar(value=app.audio_device_var.get())
     audio_device_dropdown = ctk.CTkOptionMenu(
@@ -1324,24 +1501,27 @@ def create_preferences_window(app):
     audio_device_dropdown.pack(fill="both", expand=True, padx=5, pady=5)
 
     # === THUMBNAIL OPTIONS ===
-    thumbnail_options_frame = ctk.CTkFrame(content_frame)
+    thumbnail_options_frame = ctk.CTkFrame(thumbnail_section)
     thumbnail_options_frame.pack(fill="both", expand=True, padx=10, pady=10)
-    ctk.CTkLabel(thumbnail_options_frame, text="Thumbnail Options", font=("Helvetica", 16)).pack(anchor="w", padx=5, pady=5)
+    ctk.CTkLabel(thumbnail_options_frame, text="Thumbnail Options", font=pref_heading_font).pack(anchor="w", padx=5, pady=5)
 
-    thumbnail_format_frame = ctk.CTkFrame(thumbnail_options_frame)
-    thumbnail_format_frame.pack(fill="both", expand=True, padx=10, pady=10)
+    _add_preferences_separator(thumbnail_options_frame)
+    thumbnail_format_frame = ctk.CTkFrame(thumbnail_options_frame, **pref_group_kwargs)
+    thumbnail_format_frame.pack(fill="x", padx=10, pady=(0, 6))
     thumbnail_format_var = ctk.StringVar(value=app.thumbnail_format)
     for option in ['PNG', 'JPG']:
         ctk.CTkRadioButton(thumbnail_format_frame, text=option, variable=thumbnail_format_var, value=option.lower()).pack(anchor="w", padx=5)
 
-    thumbnail_size_frame = ctk.CTkFrame(thumbnail_options_frame)
-    thumbnail_size_frame.pack(fill="both", expand=True, padx=10, pady=10)
+    _add_preferences_separator(thumbnail_options_frame)
+    thumbnail_size_frame = ctk.CTkFrame(thumbnail_options_frame, **pref_group_kwargs)
+    thumbnail_size_frame.pack(fill="x", padx=10, pady=(0, 6))
     thumbnail_size_var = ctk.StringVar(value=f"{app.thumbnail_size[0]}x{app.thumbnail_size[1]}")
     thumbnail_size_dropdown = ctk.CTkOptionMenu(thumbnail_size_frame, variable=thumbnail_size_var, values=["160x120", "240x180", "320x240", "400x300", "460x320"])
     thumbnail_size_dropdown.pack(fill="both", expand=True, padx=5, pady=5)
 
-    thumbnail_time_frame = ctk.CTkFrame(thumbnail_options_frame)
-    thumbnail_time_frame.pack(fill="both", expand=True, padx=10, pady=10)
+    _add_preferences_separator(thumbnail_options_frame)
+    thumbnail_time_frame = ctk.CTkFrame(thumbnail_options_frame, **pref_group_kwargs)
+    thumbnail_time_frame.pack(fill="x", padx=10, pady=(0, 6))
     ctk.CTkLabel(thumbnail_time_frame, text="Thumbnail Time (in % of video duration)").pack(anchor="w", padx=5)
     # thumbnail_time_var = tk.IntVar(value=int(app.thumbnail_time * 100))
     # thumbnail_time_slider = ctk.CTkSlider(thumbnail_time_frame, from_=0, to=100, variable=thumbnail_time_var)
@@ -1356,20 +1536,35 @@ def create_preferences_window(app):
     thumbnail_time_slider.pack(fill="both", expand=True, padx=5, pady=5)
 
     # === CACHE PATH ===
-    cache_path_frame = ctk.CTkFrame(thumbnail_options_frame)
-    cache_path_frame.pack(fill="both", expand=True, padx=10, pady=10)
+    _add_preferences_separator(thumbnail_options_frame)
+    cache_path_frame = ctk.CTkFrame(thumbnail_options_frame, **pref_group_kwargs)
+    cache_path_frame.pack(fill="x", padx=10, pady=(0, 6))
     cache_path_var = ctk.StringVar(value=app.thumbnail_cache_path)
     cache_path_entry = ctk.CTkEntry(cache_path_frame, textvariable=cache_path_var)
     cache_path_entry.pack(side="left", fill="both", expand=True, padx=5)
     ctk.CTkButton(cache_path_frame, text="Browse", command=lambda: browse_cache_path(app, cache_path_var)).pack(side="left", padx=5)
 
+    _add_preferences_separator(thumbnail_options_frame)
+    cache_actions_frame = ctk.CTkFrame(thumbnail_options_frame, **pref_group_kwargs)
+    cache_actions_frame.pack(fill="x", padx=10, pady=(0, 6))
+    ctk.CTkButton(
+        cache_actions_frame,
+        text="Clear Cache",
+        command=lambda: clear_cache(app)
+    ).pack(side="left", fill="x", expand=True, padx=5, pady=5)
+    ctk.CTkButton(
+        cache_actions_frame,
+        text="Open Cache Folder",
+        command=lambda: open_cache_folder(app)
+    ).pack(side="left", fill="x", expand=True, padx=5, pady=5)
+
     # === IMAGE VIEWER ===
-    image_viewer_frame = ctk.CTkFrame(content_frame)
+    image_viewer_frame = ctk.CTkFrame(image_viewer_section)
     image_viewer_frame.pack(fill="x", padx=10, pady=10)
     ctk.CTkLabel(
         image_viewer_frame,
         text="Image viewer",
-        font=("Helvetica", 16),
+        font=pref_heading_font,
     ).pack(anchor="w", padx=5, pady=(4, 6))
 
     image_viewer_pyglet_var = ctk.BooleanVar(
@@ -1402,9 +1597,9 @@ def create_preferences_window(app):
     ).pack(anchor="w", padx=10, pady=(2, 6))
 
     # === GENERAL OPTIONS ===
-    general_options_frame = ctk.CTkFrame(content_frame)
+    general_options_frame = ctk.CTkFrame(general_section)
     general_options_frame.pack(fill="both", expand=True, padx=10, pady=10)
-    ctk.CTkLabel(general_options_frame, text="General Options", font=("Helvetica", 16)).pack(anchor="w", padx=5, pady=5)
+    ctk.CTkLabel(general_options_frame, text="General Options", font=pref_heading_font).pack(anchor="w", padx=5, pady=5)
 
     memory_cache_var = ctk.BooleanVar(value=app.memory_cache)
     memory_cache_checkbox = ctk.CTkCheckBox(general_options_frame, text="Enable Memory Cache", variable=memory_cache_var)
@@ -1432,10 +1627,10 @@ def create_preferences_window(app):
     
     # Player Interface Settings
 
-    interface_frame = ctk.CTkFrame(content_frame)
+    interface_frame = ctk.CTkFrame(interface_section)
     interface_frame.pack(fill="x", pady=10)
 
-    ctk.CTkLabel(interface_frame, text="Player Interface Settings", font=("Helvetica", 16)).pack(anchor="w", padx=10)
+    ctk.CTkLabel(interface_frame, text="Player Interface Settings", font=pref_heading_font).pack(anchor="w", padx=10)
 
     # Tree font label + slider
     ctk.CTkLabel(interface_frame, text="Left panel font size").pack(anchor="w", padx=10, pady=(10, 0))
@@ -1452,7 +1647,7 @@ def create_preferences_window(app):
     thumb_slider.pack(fill="x", padx=10)
 
     # === FILE OPERATIONS (collapsible) ===
-    advanced_outer = ctk.CTkFrame(content_frame)
+    advanced_outer = ctk.CTkFrame(file_ops_section)
     advanced_outer.pack(fill="x", padx=10, pady=(5, 5))
     adv_open = {"v": False}
     adv_body = ctk.CTkFrame(advanced_outer)
@@ -1480,6 +1675,7 @@ def create_preferences_window(app):
         height=32,
     )
     adv_toggle_btn.pack(fill="x")
+    _toggle_advanced()
 
     ctk.CTkLabel(
         adv_body,
@@ -1551,15 +1747,16 @@ def create_preferences_window(app):
         on_close()        
 
     # === SAVE BUTTONS ===
-    button_frame = ctk.CTkFrame(content_frame)
-    button_frame.pack(fill="both", expand=True, padx=10, pady=10)
-    ctk.CTkButton(button_frame, text="Clear Cache", command=lambda: clear_cache(app)).pack(fill="both", expand=True, padx=5, pady=5)
-    ctk.CTkButton(button_frame, text="Open Cache Folder", command=lambda: open_cache_folder(app)).pack(fill="both", expand=True, padx=5, pady=5)
+    button_frame = ctk.CTkFrame(preferences_window)
+    button_frame.pack(fill="x", padx=8, pady=(0, 8))
     ctk.CTkButton(
         button_frame,
         text="Save and Close",
         command=save_and_close_action
-    ).pack(fill="both", expand=True, padx=5, pady=5)
+    ).pack(side="right", fill="x", padx=4, pady=5)
+
+    _compact_preferences_tree(preferences_window)
+    _show_preferences_section("Video Options")
 
 
 
