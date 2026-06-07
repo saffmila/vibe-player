@@ -654,7 +654,8 @@ def build_view_menu(app):
 
     view_menu.add_command(label="Show Playlist", command=app.Open_playlist)
     
-    app.wide_folders_check_var = tk.BooleanVar(value=(app.folder_view_mode.get() == "Wide"))
+    if not hasattr(app, "wide_folders_check_var"):
+        app.wide_folders_check_var = tk.BooleanVar(value=(app.folder_view_mode.get() == "Wide"))
     view_menu.add_checkbutton(label="Show Wide Folders",
                               variable=app.wide_folders_check_var)
 

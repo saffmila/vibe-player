@@ -246,7 +246,7 @@ class VtpPreferencesMixin:
                 # New additions
                 self.numwidefolders_in_col = settings.get("numwidefolders_in_col", 2)  # Default to 2
                 # 1. Load value under the new settings key
-                is_wide = settings.get("wide_folders_check_var", True)  # Default True (Wide)
+                is_wide = settings.get("wide_folders_check_var", False)  # Default False (Standard)
                 
                 # 2. Set the BooleanVar directly
                 self.wide_folders_check_var.set(is_wide)
@@ -337,9 +337,10 @@ class VtpPreferencesMixin:
             self.thumbnail_time_var.set(10)
             self.search_results_page_size = 250
             self.numwidefolders_in_col = 2  # Default
-            # self.wide_folders_var.set(settings.get("wide_folders_var", True))  # Default
+            # self.wide_folders_var.set(settings.get("wide_folders_var", False))  # Default
             # self.folder_view_mode.set("Wide" if settings.get("wide_folders_var") else "Standard")
-            self.wide_folders_check_var.set(True)  # Default True (Wide)
+            self.wide_folders_check_var.set(False)  # Default False (Standard)
+            self.folder_view_mode.set("Standard")
             self.widefolder_size = (560, 400)  # Default size
             self.memory_cache = True  # Default if no settings file exists
             self.dnd_confirm_dialogs = False

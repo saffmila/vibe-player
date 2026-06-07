@@ -1620,14 +1620,18 @@ class VtpGridMixin:
         logging.info(f"Folder view mode changed to '{new_mode}'. Refreshing display.")
 
         if hasattr(self, 'wide_folders_check_var'):
-            self.wide_folders_check_var.set(new_mode == "Wide")
+            is_wide = new_mode == "Wide"
+            if self.wide_folders_check_var.get() != is_wide:
+                self.wide_folders_check_var.set(is_wide)
 
         self.display_thumbnails(self.current_directory, preserve_scroll=True)
 
 
     def _on_check_var_changed(self, *args):
         is_wide = self.wide_folders_check_var.get()
-        self.folder_view_mode.set("Wide" if is_wide else "Standard")
+        new_mode = "Wide" if is_wide else "Standard"
+        if self.folder_view_mode.get() != new_mode:
+            self.folder_view_mode.set(new_mode)
 
 
 
