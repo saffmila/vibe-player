@@ -250,7 +250,7 @@ class VtpWindowLayoutMixin:
                         and getattr(info_panel, "expanded", True)
                         and hasattr(info_panel, "get_restore_height")
                     ):
-                        restore_h = int(info_panel.get_restore_height())
+                        restore_h = int(info_panel.get_restore_height(prefer_current=False))
                         y_sash_left = max(24, min(eff_left_h - 24, eff_left_h - restore_h))
                         logging.info(
                             f"[SPLITTER APPLY] left: using restore_height={restore_h} -> y_sash={y_sash_left} (eff_h={eff_left_h})"
@@ -278,7 +278,7 @@ class VtpWindowLayoutMixin:
                         and getattr(timeline_panel, "expanded", True)
                         and hasattr(timeline_panel, "get_restore_height")
                     ):
-                        restore_h = int(timeline_panel.get_restore_height())
+                        restore_h = int(timeline_panel.get_restore_height(prefer_current=False))
                         y_sash_right = max(24, min(eff_right_h - 24, eff_right_h - restore_h))
                         logging.info(
                             f"[SPLITTER APPLY] right: using restore_height={restore_h} -> y_sash={y_sash_right} (eff_h={eff_right_h})"

@@ -241,6 +241,9 @@ def create_menu(app: Any, parent: Any) -> Menu:
 def extract_video_info(file_path: str) -> dict[str, Any]:
     """Extract video/audio metadata (codec, fps, bitrate, color, audio) via pymediainfo."""
     result: dict[str, Any] = {
+        "width": None,
+        "height": None,
+        "duration": None,
         "codec": None,
         "fps": None,
         "bitrate": None,
@@ -259,10 +262,24 @@ def extract_video_info(file_path: str) -> dict[str, Any]:
 
     try:
         info = MediaInfo.parse(file_path)
+        general_track = next((t for t in info.tracks if t.track_type == "General"), None)
         video_track = next((t for t in info.tracks if t.track_type == "Video"), None)
         audio_track = next((t for t in info.tracks if t.track_type == "Audio"), None)
 
+        duration = getattr(general_track, "duration", None) if general_track else None
+        if not duration and video_track:
+            duration = getattr(video_track, "duration", None)
+        if duration:
+            try:
+                result["duration"] = float(duration) / 1000.0
+            except (TypeError, ValueError):
+                pass
+
         if video_track:
+            width = getattr(video_track, "width", None)
+            height = getattr(video_track, "height", None)
+            result["width"] = int(width) if width else None
+            result["height"] = int(height) if height else None
             result["codec"] = video_track.codec_id or video_track.codec or video_track.format
             result["fps"] = float(video_track.frame_rate) if video_track.frame_rate else None
             result["bitrate"] = int(video_track.bit_rate) if video_track.bit_rate else None

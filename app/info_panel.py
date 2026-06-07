@@ -17,6 +17,31 @@ db = Database()
 import logging
 
 
+def _format_resolution(width, height):
+    try:
+        width = int(width or 0)
+        height = int(height or 0)
+    except (TypeError, ValueError):
+        return "?"
+    if width <= 0 or height <= 0:
+        return "?"
+    return f"{width} x {height}"
+
+
+def _format_duration(duration):
+    try:
+        duration = float(duration or 0)
+    except (TypeError, ValueError):
+        return "?"
+    if duration <= 0:
+        return "?"
+    return f"{duration:.1f} s"
+
+
+def _format_optional(value):
+    return value if value not in (None, "") else "?"
+
+
 class InfoPanelFrame(ctk.CTkFrame):
     def __init__(self, parent):
         super().__init__(parent, height=150)
@@ -149,6 +174,7 @@ class InfoPanelFrame(ctk.CTkFrame):
 
         _section("── Video ──")
         self.label_codec       = _row("Codec: ?")
+        self.label_video_resolution = _row("Resolution: ?")
         self.label_duration    = _row("Duration: ?")
         self.label_fps         = _row("FPS: ?")
         self.label_compression = _row("Compression: ?")
@@ -486,10 +512,8 @@ class InfoPanelFrame(ctk.CTkFrame):
         size = metadata.get("file_size")
         self.label_size.configure(text=f"Size: {size / (1024 * 1024):.2f} MB" if size else "Size: ?")
 
-        if metadata.get("width") and metadata.get("height"):
-            self.label_dim.configure(text=f"Resolution: {metadata['width']} x {metadata['height']}")
-        else:
-            self.label_dim.configure(text="Resolution: ?")
+        resolution = _format_resolution(metadata.get("width"), metadata.get("height"))
+        self.label_dim.configure(text=f"Resolution: {resolution}")
 
         self.label_date.configure(text=f"Modified: {metadata.get('modified', '?')}")
 
@@ -505,7 +529,8 @@ class InfoPanelFrame(ctk.CTkFrame):
 
         # === Video ===
         duration = metadata.get("duration")
-        self.label_duration.configure(text=f"Duration: {duration:.1f} s" if duration else "Duration: ?")
+        self.label_duration.configure(text=f"Duration: {_format_duration(duration)}")
+        self.label_video_resolution.configure(text=f"Resolution: {resolution}")
         # Rich video metadata (codec/fps/bitrate) is populated separately via update_video_tab()
         # when the Video tab is active — avoid overwriting with '?' if already filled
         if metadata.get("codec"):
@@ -542,11 +567,12 @@ class InfoPanelFrame(ctk.CTkFrame):
         db_fields = [
             ("Filename", metadata.get("filename")),
             ("Path", metadata.get("file_path")),
-            ("Resolution", f"{metadata.get('width')} x {metadata.get('height')}"),
+            ("Resolution", resolution),
+            ("Duration", _format_duration(metadata.get("duration"))),
             ("Rating", rating),
             ("Keywords", keywords_final),
             ("Cached", "Yes" if metadata.get("is_cached") else "No"),
-            ("Thumb Time", metadata.get("thumbnail_timestamp")),
+            ("Thumb Time", _format_optional(metadata.get("thumbnail_timestamp"))),
         ]
 
         for label, value in db_fields:
@@ -563,6 +589,11 @@ class InfoPanelFrame(ctk.CTkFrame):
 
         # Video
         self.label_codec.configure(text=f"Codec: {_v('codec')}")
+        self.label_video_resolution.configure(
+            text=f"Resolution: {_format_resolution(video_info.get('width'), video_info.get('height'))}"
+        )
+        duration = video_info.get("duration")
+        self.label_duration.configure(text=f"Duration: {_format_duration(duration)}")
         self.label_fps.configure(text=f"FPS: {_v('fps')}")
         self.label_compression.configure(text=f"Compression: {_v('compression')}")
         bitrate = video_info.get("bitrate")
@@ -605,6 +636,8 @@ class InfoPanelFrame(ctk.CTkFrame):
     def reset_video_tab(self):
         """Reset all Video tab fields to '?' when a new file is selected."""
         self.label_codec.configure(text="Codec: ?")
+        self.label_video_resolution.configure(text="Resolution: ?")
+        self.label_duration.configure(text="Duration: ?")
         self.label_fps.configure(text="FPS: ?")
         self.label_compression.configure(text="Compression: ?")
         self.label_bitrate.configure(text="Bitrate: ?")

@@ -3776,12 +3776,32 @@ class VideoThumbnailPlayer(
             video_info = extract_video_info(file_path)
 
             def _apply():
+                current_path = getattr(self, "selected_file_path", None)
+                if current_path and (
+                    os.path.normcase(os.path.abspath(current_path))
+                    != os.path.normcase(os.path.abspath(file_path))
+                ):
+                    return
+
                 # Update the cache
                 if hasattr(self, "metadata_cache"):
                     if file_path in self.metadata_cache:
                         self.metadata_cache[file_path].update(video_info)
                     else:
                         self.metadata_cache[file_path] = video_info
+
+                db_update = {}
+                if video_info.get("width") and video_info.get("height"):
+                    db_update["width"] = video_info["width"]
+                    db_update["height"] = video_info["height"]
+                if video_info.get("duration"):
+                    db_update["duration"] = video_info["duration"]
+                if db_update:
+                    try:
+                        self.database.update_file_metadata(file_path, **db_update)
+                    except Exception as e:
+                        logging.debug("[InfoPanel] Failed to persist video info for %s: %s", file_path, e)
+
                 # Update the Video tab in the info panel
                 if self.info_panel:
                     self.info_panel.update_video_tab(video_info)
@@ -4650,6 +4670,38 @@ class VideoThumbnailPlayer(
 
                 metadata["file_path"] = path
                 metadata["filename"] = os.path.basename(path)
+
+                db_entry = self.database.get_entry(path)
+                if db_entry:
+                    metadata["is_cached"] = db_entry.get("is_cached")
+                    metadata["thumbnail_timestamp"] = db_entry.get("thumbnail_timestamp")
+                    if not (metadata.get("width") and metadata.get("height")):
+                        metadata["width"] = db_entry.get("width")
+                        metadata["height"] = db_entry.get("height")
+                    if not metadata.get("duration"):
+                        metadata["duration"] = db_entry.get("duration")
+
+                if path.lower().endswith(VIDEO_FORMATS):
+                    db_update = {}
+                    if not (metadata.get("width") and metadata.get("height")):
+                        width, height = get_video_size(path)
+                        if width and height:
+                            metadata["width"] = width
+                            metadata["height"] = height
+                            db_update["width"] = width
+                            db_update["height"] = height
+
+                    if not metadata.get("duration"):
+                        duration = get_video_duration_mediainfo(path)
+                        if duration and duration > 0:
+                            metadata["duration"] = duration
+                            db_update["duration"] = duration
+
+                    if db_update:
+                        try:
+                            self.database.update_file_metadata(path, **db_update)
+                        except Exception as e:
+                            logging.debug("[InfoPanel] Failed to persist panel metadata for %s: %s", path, e)
 
                 rating = self.database.get_rating(path)
                 keywords = self.database.get_keywords(path)

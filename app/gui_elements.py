@@ -195,8 +195,51 @@ class TogglePanelFrame(ctk.CTkFrame):
         except tk.TclError as e:
             logging.info("Error enforcing collapsed panel height for %s: %s", self.title, e)
 
-    def get_restore_height(self):
+    def _current_pane_height(self):
+        """Best-effort current pane height from the PanedWindow geometry."""
+        if not self.expanded:
+            return None
+        try:
+            widget_height = int(self.winfo_height())
+            if widget_height > self.collapsed_height + 10:
+                return widget_height
+        except (TypeError, ValueError, tk.TclError):
+            pass
+
+        try:
+            if self.parent_paned is None:
+                parent = self.winfo_parent()
+                widget = self.nametowidget(parent)
+                if isinstance(widget, tk.PanedWindow):
+                    self.parent_paned = widget
+            if self.parent_paned is None or str(self.parent_paned.cget("orient")) != str(tk.VERTICAL):
+                return None
+            panes = self._pane_paths()
+            widget_path = str(self)
+            if widget_path not in panes:
+                return None
+            idx = panes.index(widget_path)
+            sashwidth = self._tk_int(self.parent_paned.cget("sashwidth"), 0)
+            if idx == len(panes) - 1 and idx > 0:
+                _, y = self.parent_paned.sash_coord(idx - 1)
+                height = self.parent_paned.winfo_height() - int(y) - sashwidth
+            elif idx < len(panes) - 1:
+                _, y = self.parent_paned.sash_coord(idx)
+                height = int(y) - int(self.winfo_y())
+            else:
+                height = self.parent_paned.winfo_height()
+            if height > self.collapsed_height + 10:
+                return height
+        except (tk.TclError, ValueError) as e:
+            logging.debug("Could not read current pane height for %s: %s", self.title, e)
+        return None
+
+    def get_restore_height(self, prefer_current=True):
         """Height to restore to after collapsed proxy is expanded."""
+        if prefer_current:
+            current_height = self._current_pane_height()
+            if current_height:
+                self.set_restore_height(current_height)
         try:
             return max(80, int(self.default_height))
         except (TypeError, ValueError):
