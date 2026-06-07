@@ -117,9 +117,7 @@ from info_panel import InfoPanelFrame
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
-from video_operations import get_audio_devices
-
-from video_operations import VideoPlayer
+from video_operations import VideoPlayer, get_audio_devices, prewarm_vlc_instance
 from timeline_manager import TimelineManager
 from timeline_bar_widget import TimelineBarWidget
 from multi_timeline_viewer import MultiTimelineViewer
@@ -892,6 +890,43 @@ class VideoThumbnailPlayer(
         # Re-sync once HWND exists so tk/CTk scaling matches the caption monitor.
         self.after(80, self._sync_window_dpi_from_hwnd)
         self.after(400, self._sync_window_dpi_from_hwnd)
+        self.after(3500, self._start_vlc_prewarm)
+
+    def _start_vlc_prewarm(self) -> None:
+        if getattr(self, "_vlc_prewarm_started", False):
+            return
+        self._vlc_prewarm_started = True
+        try:
+            video_output = self.video_output_var.get()
+            audio_output = self.audio_output_var.get()
+            hardware_decoding = self.hardware_decoding_var.get()
+            audio_device = self.audio_device_var.get()
+            use_gpu_upscale = bool(getattr(self, "gpu_upscale", False))
+        except Exception as exc:
+            logging.debug("[VLC Warmup] Could not capture VLC preferences: %s", exc)
+            return
+
+        class _WarmupPrefs:
+            pass
+
+        prefs = _WarmupPrefs()
+        prefs.vlc_enable_postproc = bool(getattr(self, "vlc_enable_postproc", False))
+        prefs.vlc_postproc_quality = int(getattr(self, "vlc_postproc_quality", 6))
+        prefs.vlc_enable_gradfun = bool(getattr(self, "vlc_enable_gradfun", False))
+        prefs.vlc_enable_deinterlace = bool(getattr(self, "vlc_enable_deinterlace", False))
+        prefs.vlc_skiploopfilter_disable = bool(getattr(self, "vlc_skiploopfilter_disable", False))
+
+        def _worker() -> None:
+            prewarm_vlc_instance(
+                controller=prefs,
+                video_output=video_output,
+                audio_output=audio_output,
+                hardware_decoding=hardware_decoding,
+                audio_device=audio_device,
+                use_gpu_upscale=use_gpu_upscale,
+            )
+
+        threading.Thread(target=_worker, name="VLCPrewarm", daemon=True).start()
 
     def _sync_window_dpi_from_hwnd(self, _attempt: int = 0) -> None:
         if sys.platform != "win32":

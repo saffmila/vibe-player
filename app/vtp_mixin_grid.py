@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes
+import faulthandler
 import json
 import logging
 import math
@@ -5791,6 +5792,8 @@ class VtpGridMixin:
         self._create_video_player_window()
 
     def _create_video_player_window(self):
+        open_start = time.perf_counter()
+        dump_armed = False
         self._open_video_create_job = None
         pending = getattr(self, "_pending_open_video", None)
         if not pending:
@@ -5802,26 +5805,44 @@ class VtpGridMixin:
         try:
             self._preview_blocked = True
             logging.info(f"Opening video player for {video_name} with path {video_path}")  # Debug
+            try:
+                faulthandler.dump_traceback_later(8, repeat=False)
+                dump_armed = True
+                logging.info("[OpenVideo] Armed 8s faulthandler dump for player creation.")
+            except Exception as exc:
+                logging.debug("[OpenVideo] Could not arm faulthandler dump: %s", exc)
 
+            index_start = time.perf_counter()
             self.current_video_index = next(
                 (index for (index, d) in enumerate(self.video_files) if d["path"] == video_path),
                 None
             )
+            logging.info("[OpenVideo TIMING] resolve current_video_index: %.3fs", time.perf_counter() - index_start)
 
+            prefs_start = time.perf_counter()
+            vlc_video_output = self.video_output_var.get()
+            vlc_audio_output = self.audio_output_var.get()
+            vlc_hw_decoding = self.hardware_decoding_var.get()
+            vlc_audio_device = self.audio_device_var.get()
+            logging.info("[OpenVideo TIMING] read VLC prefs: %.3fs", time.perf_counter() - prefs_start)
+
+            ctor_start = time.perf_counter()
+            logging.info("[OpenVideo] Creating VideoPlayer instance.")
             self.current_video_window = VideoPlayer(
                 parent=self,
                 controller=self,
                 video_path=video_path,
                 video_name=video_name,
                 initial_volume=self.current_volume,
-                vlc_video_output=self.video_output_var.get(),
-                vlc_audio_output=self.audio_output_var.get(),
-                vlc_hw_decoding=self.hardware_decoding_var.get(),
-                vlc_audio_device=self.audio_device_var.get(),
+                vlc_video_output=vlc_video_output,
+                vlc_audio_output=vlc_audio_output,
+                vlc_hw_decoding=vlc_hw_decoding,
+                vlc_audio_device=vlc_audio_device,
                 auto_play=self.auto_play,
                 subtitles_enabled=self.subtitles_enabled,
                 use_gpu_upscale=getattr(self, "gpu_upscale", False)
             )
+            logging.info("[OpenVideo TIMING] VideoPlayer constructor: %.3fs", time.perf_counter() - ctor_start)
             self._demo_toast("demo_playback")
             vp = self.current_video_window
             if vp is not None:
@@ -5835,6 +5856,7 @@ class VtpGridMixin:
                 self.timeline_widget.reload_all_markers_and_redraw(video_path)
 
             logging.info("[DEBUG] current_video_window created: %s", self.current_video_window)
+            logging.info("[OpenVideo TIMING] total create window path: %.3fs", time.perf_counter() - open_start)
 
             if self.is_fullscreen:
                 logging.info("Applying fullscreen state to the new video window.")  # Debug
@@ -5844,6 +5866,12 @@ class VtpGridMixin:
             self._reset_video_open_state()
             return
         finally:
+            if dump_armed:
+                try:
+                    faulthandler.cancel_dump_traceback_later()
+                    logging.info("[OpenVideo] Canceled faulthandler dump; player creation finished.")
+                except Exception:
+                    pass
             self._video_player_switching = False
             self._set_bookmark_manager_polling_suspended(False)
 

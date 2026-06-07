@@ -38,6 +38,7 @@ from vtp_mixin_dnd import VtpDndMixin
 from bookmark_manager import BookmarkManager, DEFAULT_BOOKMARK_COLOR
 
 _audio_devices_cache = None
+_VLC_INSTANCE_INIT_LOCK = threading.Lock()
 
 _LEGACY_MPEG_PLAYBACK_EXTS = (
     ".mpg",
@@ -49,6 +50,14 @@ _LEGACY_MPEG_PLAYBACK_EXTS = (
     ".mts",
     ".m2ts",
 )
+
+
+def _log_vlc_timing(label: str, start_time: float) -> None:
+    logging.info("[VLC TIMING] %s: %.3fs", label, time.perf_counter() - start_time)
+
+
+def _log_player_timing(label: str, start_time: float) -> None:
+    logging.info("[VideoPlayer TIMING] %s: %.3fs", label, time.perf_counter() - start_time)
 
 
 def _dnd_tk_surface(widget):
@@ -104,11 +113,157 @@ def get_audio_devices():
             _audio_devices_cache = []
     return _audio_devices_cache
 
+
+def _build_vlc_options(
+    *,
+    video_path: str | None,
+    controller,
+    video_output: str,
+    audio_output: str,
+    hardware_decoding: str,
+    audio_device: str,
+    use_gpu_upscale: bool,
+    log_precheck: bool = True,
+) -> tuple[list[str], bool, str, str]:
+    legacy_mpeg_profile = (
+        os.path.splitext(str(video_path or ""))[1].lower()
+        in _LEGACY_MPEG_PLAYBACK_EXTS
+    )
+    effective_video_output = "direct3d9" if legacy_mpeg_profile else video_output
+    effective_hw_decoding = "none" if legacy_mpeg_profile else hardware_decoding
+    effective_gpu_upscale = bool(use_gpu_upscale) and not legacy_mpeg_profile
+
+    if log_precheck:
+        logging.info("--- [VLC PRE-CHECK] ---")
+        logging.info(f"  > Video Output: {effective_video_output}")
+        logging.info(f"  > Audio Output: {audio_output}")
+        logging.info(f"  > HW Decoding: {effective_hw_decoding}")
+        logging.info(f"  > Audio Device: {audio_device}")
+        logging.info(f"  > GPU Upscale: {effective_gpu_upscale}")
+        if legacy_mpeg_profile:
+            logging.info(
+                "[VLC Legacy] Using stable MPEG profile for %s: direct3d9 + software decode, filters disabled.",
+                os.path.basename(str(video_path or "")),
+            )
+        logging.info("-------------------------")
+
+    if effective_gpu_upscale:
+        gpu_start = time.perf_counter()
+        gpu_vendor = get_gpu_vendor()
+        _log_vlc_timing("get_gpu_vendor", gpu_start)
+        logging.info(f"[GPU Upscale] Detected vendor: {gpu_vendor}. Enabling GPU upscaling mode.")
+        # RTX Video Super Resolution requires the D3D11VA hardware decoder specifically.
+        # --avcodec-hw=any may fall back to the older DXVA2 path which bypasses RTX VSR.
+        # d3d11va keeps decoded frames in GPU memory as D3D11 textures, which is the
+        # prerequisite for the NVIDIA driver to intercept and apply Super Resolution.
+        # AMD FSR similarly needs the D3D11 presentation path.
+        vlc_options = [
+            '--vout=direct3d11',
+            '--avcodec-hw=d3d11va',
+            '--file-logging',
+            '--logfile=vlc-log.txt',
+        ]
+        logging.info(f"[GPU Upscale] Args: --vout=direct3d11 --avcodec-hw=d3d11va  (vendor={gpu_vendor})")
+    else:
+        vlc_options = [
+            f'--vout={effective_video_output}',
+            f'--avcodec-hw={effective_hw_decoding}',
+            '--file-logging',
+            '--logfile=vlc-log.txt'
+        ]
+
+    # Optional video quality filters configured in app preferences.
+    # VLC accepts multiple filters as a colon-separated chain.
+    filter_chain = []
+    if not legacy_mpeg_profile and getattr(controller, "vlc_enable_postproc", False):
+        filter_chain.append("postproc")
+        postproc_q = int(getattr(controller, "vlc_postproc_quality", 6))
+        postproc_q = max(0, min(6, postproc_q))
+        vlc_options.append(f'--postproc-q={postproc_q}')
+    if not legacy_mpeg_profile and getattr(controller, "vlc_enable_gradfun", False):
+        filter_chain.append("gradfun")
+    if filter_chain:
+        vlc_options.append(f'--video-filter={":".join(filter_chain)}')
+    if not legacy_mpeg_profile and getattr(controller, "vlc_enable_deinterlace", False):
+        vlc_options.append('--deinterlace=1')
+    if getattr(controller, "vlc_skiploopfilter_disable", False):
+        vlc_options.append('--avcodec-skiploopfilter=0')
+
+    has_explicit_device = bool(audio_device and str(audio_device).strip())
+
+    if audio_output and audio_output not in ("", "default", "directsound"):
+        if audio_output in ("wasapi", "mmdevice") and not has_explicit_device:
+            vlc_options.append('--aout=waveout')
+            logging.info(
+                "[VLC Audio] '%s' bez explicitního zařízení -> fallback na waveout",
+                audio_output,
+            )
+        else:
+            vlc_options.append(f'--aout={audio_output}')
+    elif audio_output == 'directsound' and has_explicit_device:
+        vlc_options.append('--aout=directsound')
+    else:
+        vlc_options.append('--aout=waveout')
+        logging.info("[VLC Audio] Používám waveout (nejkompatibilnější, nevyžaduje exkluzivní přístup)")
+
+    if audio_output == 'directsound' and has_explicit_device:
+        vlc_options.append(f'--directx-audio-device={audio_device}')
+
+    return vlc_options, effective_gpu_upscale, effective_video_output, effective_hw_decoding
+
+
+def prewarm_vlc_instance(
+    *,
+    controller,
+    video_output: str,
+    audio_output: str,
+    hardware_decoding: str,
+    audio_device: str,
+    use_gpu_upscale: bool,
+) -> None:
+    warmup_start = time.perf_counter()
+    logging.info("[VLC Warmup] Starting background libVLC warm-up.")
+    try:
+        vlc_options, _, _, _ = _build_vlc_options(
+            video_path=None,
+            controller=controller,
+            video_output=video_output,
+            audio_output=audio_output,
+            hardware_decoding=hardware_decoding,
+            audio_device=audio_device,
+            use_gpu_upscale=use_gpu_upscale,
+            log_precheck=False,
+        )
+        logging.info("[VLC Warmup] Creating VLC instance with command: %s", " ".join(vlc_options))
+        with _VLC_INSTANCE_INIT_LOCK:
+            instance_start = time.perf_counter()
+            instance = vlc.Instance(*vlc_options)
+            _log_vlc_timing("warmup vlc.Instance", instance_start)
+        if instance:
+            try:
+                instance.release()
+            except Exception as exc:
+                logging.debug("[VLC Warmup] instance.release failed: %s", exc)
+        _log_vlc_timing("warmup total", warmup_start)
+        logging.info("[VLC Warmup] Finished background libVLC warm-up.")
+    except Exception as exc:
+        _log_vlc_timing("warmup failed", warmup_start)
+        logging.warning("[VLC Warmup] Background libVLC warm-up failed: %s", exc, exc_info=True)
+
+
 class VideoPlayer:
     def __init__(self, parent, controller, video_path, video_name, initial_volume, 
                  vlc_video_output, vlc_audio_output, vlc_hw_decoding, vlc_audio_device,
                  auto_play=False, subtitles_enabled=False, playlist_manager=None, embed=False,
                  show_video_button_bar=True, use_gpu_upscale=False):
+        init_start = time.perf_counter()
+        logging.info(
+            "[VideoPlayer Init] start name=%s path=%s embed=%s auto_play=%s",
+            video_name,
+            video_path,
+            embed,
+            auto_play,
+        )
             
         #assign variables from other libraries, for example from video_operations.py
         self.parent = parent
@@ -135,7 +290,9 @@ class VideoPlayer:
         self.bookmarks = []
         if video_path:
             self.bookmark_file = self._get_sidecar_bookmark_path(video_path)
+            bookmarks_start = time.perf_counter()
             self.load_bookmarks()
+            _log_player_timing("load_bookmarks", bookmarks_start)
         else:
             self.bookmark_file = None
 
@@ -159,8 +316,11 @@ class VideoPlayer:
         self._bookmark_nav_grace_seconds = 1.5
         self.slider_hover_popup = None
         self.slider_hover_label = None
+        theme_start = time.perf_counter()
         self._init_cinematic_theme()
+        _log_player_timing("_init_cinematic_theme", theme_start)
 
+        window_start = time.perf_counter()
         if embed:
             self.video_window = tk.Frame(parent, bg="black")
             self.video_window.pack(fill="both", expand=True)
@@ -176,6 +336,9 @@ class VideoPlayer:
             self._apply_acrylic_if_available()
             # Make sure the video window is raised above all other windows
 
+        _log_player_timing("window shell", window_start)
+
+        stack_start = time.perf_counter()
         self.video_area = ctk.CTkFrame(self.video_window, fg_color="black")
         self.video_area.pack(side=ctk.TOP, fill=ctk.BOTH, expand=True)
 
@@ -188,6 +351,7 @@ class VideoPlayer:
         # wrongly logged "Failed to create VLC instance" whenever self.instance was still None.
         self.instance = None
         self.player = None
+        _log_player_timing("video stack widgets", stack_start)
 
         # pynput runs on a worker thread — never touch Tk from that thread (not even .after()).
         # Bridge mouse events through a queue; _pynput_queue_pump runs only on the Tk main thread.
@@ -203,12 +367,15 @@ class VideoPlayer:
         self._cleanup_done = False
 
         self.global_listener = None
+        pynput_start = time.perf_counter()
         self._start_global_mouse_listener_async()
         try:
             self._pynput_pump_job = self.video_window.after(25, self._pynput_queue_pump)
         except Exception:
             self._pynput_pump_job = None
+        _log_player_timing("pynput bridge setup", pynput_start)
 
+        label_start = time.perf_counter()
         self.video_label = ctk.CTkLabel(self._video_stack, text="")
         self.video_label.place(relx=0, rely=0, relwidth=1, relheight=1)
 
@@ -219,16 +386,22 @@ class VideoPlayer:
         self._broken_playback_overlay_active = False
         self._broken_check_after_ids = []
         self._broken_decode_check_gen = 0
+        _log_player_timing("video labels", label_start)
 
+        icons_start = time.perf_counter()
         self.load_icons()
+        _log_player_timing("load_icons", icons_start)
 
+        dnd_start = time.perf_counter()
         self._setup_video_playback_dnd()
+        _log_player_timing("playback dnd setup", dnd_start)
 
 
 
 
 
 
+        controls_start = time.perf_counter()
         if not embed:
             
             
@@ -308,6 +481,7 @@ class VideoPlayer:
                 _w.bind("<B1-Motion>", self._timeline_drag)
                 _w.bind("<ButtonRelease-1>", self.slider_update)
             self.render_slider(0.0)
+            _log_player_timing("control frame base", controls_start)
          
 
         
@@ -362,7 +536,9 @@ class VideoPlayer:
         
         
         if self.show_video_button_bar:
+            volume_setup_start = time.perf_counter()
             self.setup_volume_slider()
+            _log_player_timing("setup_volume_slider", volume_setup_start)
         
         # self.video_window.bind("<Shift-S>", self.set_loop_start)
         # self.video_window.bind("<Shift-E>", self.set_loop_end)
@@ -370,8 +546,10 @@ class VideoPlayer:
 
 
         if self.show_video_button_bar:
+            buttons_start = time.perf_counter()
             self.create_buttons()
             self._bind_video_context_menu()
+            _log_player_timing("create_buttons/context menu", buttons_start)
 
 
         self.video_window.bind("<Configure>", self.on_resize)
@@ -384,6 +562,7 @@ class VideoPlayer:
         self.video_window.bind("<FocusOut>", self.on_focus_out)
 
         self.video_window.focus_set()
+        _log_player_timing("__init__ total", init_start)
         
         # if self.video_path:  
             # if self.auto_play:
@@ -1412,119 +1591,33 @@ class VideoPlayer:
         NVIDIA Control Panel or AMD Software. A player restart is needed
         when this setting is toggled.
         """
-        legacy_mpeg_profile = (
-            os.path.splitext(str(self.video_path or ""))[1].lower()
-            in _LEGACY_MPEG_PLAYBACK_EXTS
+        vlc_options, effective_gpu_upscale, effective_video_output, effective_hw_decoding = _build_vlc_options(
+            video_path=self.video_path,
+            controller=self.controller,
+            video_output=self.video_output,
+            audio_output=self.audio_output,
+            hardware_decoding=self.hardware_decoding,
+            audio_device=self.audio_device,
+            use_gpu_upscale=self.use_gpu_upscale,
         )
-        effective_video_output = "direct3d9" if legacy_mpeg_profile else self.video_output
-        effective_hw_decoding = "none" if legacy_mpeg_profile else self.hardware_decoding
-        effective_gpu_upscale = bool(self.use_gpu_upscale) and not legacy_mpeg_profile
 
-        logging.info("--- [VLC PRE-CHECK] ---")
-        logging.info(f"  > Video Output: {effective_video_output}")
-        logging.info(f"  > Audio Output: {self.audio_output}")
-        logging.info(f"  > HW Decoding: {effective_hw_decoding}")
-        logging.info(f"  > Audio Device: {self.audio_device}")
-        logging.info(f"  > GPU Upscale: {effective_gpu_upscale}")
-        if legacy_mpeg_profile:
-            logging.info(
-                "[VLC Legacy] Using stable MPEG profile for %s: direct3d9 + software decode, filters disabled.",
-                os.path.basename(str(self.video_path or "")),
-            )
-        logging.info("-------------------------")
-
-        if effective_gpu_upscale:
-            gpu_vendor = get_gpu_vendor()
-            logging.info(f"[GPU Upscale] Detected vendor: {gpu_vendor}. Enabling GPU upscaling mode.")
-            # RTX Video Super Resolution requires the D3D11VA hardware decoder specifically.
-            # --avcodec-hw=any may fall back to the older DXVA2 path which bypasses RTX VSR.
-            # d3d11va keeps decoded frames in GPU memory as D3D11 textures, which is the
-            # prerequisite for the NVIDIA driver to intercept and apply Super Resolution.
-            # AMD FSR similarly needs the D3D11 presentation path.
-            vlc_options = [
-                '--vout=direct3d11',
-                '--avcodec-hw=d3d11va',
-                '--file-logging',
-                '--logfile=vlc-log.txt',
-            ]
-            logging.info(f"[GPU Upscale] Args: --vout=direct3d11 --avcodec-hw=d3d11va  (vendor={gpu_vendor})")
-        else:
-            vlc_options = [
-                f'--vout={effective_video_output}',
-                f'--avcodec-hw={effective_hw_decoding}',
-                '--file-logging',
-                '--logfile=vlc-log.txt'
-            ]
-
-        # Optional video quality filters configured in app preferences.
-        # VLC accepts multiple filters as a colon-separated chain.
-        filter_chain = []
-        if not legacy_mpeg_profile and getattr(self.controller, "vlc_enable_postproc", False):
-            filter_chain.append("postproc")
-            postproc_q = int(getattr(self.controller, "vlc_postproc_quality", 6))
-            postproc_q = max(0, min(6, postproc_q))
-            vlc_options.append(f'--postproc-q={postproc_q}')
-        if not legacy_mpeg_profile and getattr(self.controller, "vlc_enable_gradfun", False):
-            filter_chain.append("gradfun")
-        if filter_chain:
-            vlc_options.append(f'--video-filter={":".join(filter_chain)}')
-        if not legacy_mpeg_profile and getattr(self.controller, "vlc_enable_deinterlace", False):
-            vlc_options.append('--deinterlace=1')
-        if getattr(self.controller, "vlc_skiploopfilter_disable", False):
-            vlc_options.append('--avcodec-skiploopfilter=0')
-
-        # 1. Audio výstupní modul (--aout).
-        #
-        #    VLC na Windows zkouší postupně: wasapi → directsound → waveout.
-        #    Pokud sounddevice/PortAudio drží handle na WASAPI nebo DirectSound
-        #    (inicializace audio zařízení v _delayed_audio_init), VLC dostane:
-        #      "wasapi error: unsupported audio format"
-        #      "directsound error: cannot open directx audio device"
-        #    a audio selže úplně.
-        #
-        #    WaveOut (Windows Multimedia API) funguje vždy – nepotřebuje
-        #    exkluzivní přístup, Windows sám řeší resampling a routování
-        #    na správné výstupní zařízení (respektuje Windows default).
-        has_explicit_device = bool(self.audio_device and str(self.audio_device).strip())
-
-        if self.audio_output and self.audio_output not in ("", "default", "directsound"):
-            # Některé moduly (zejména wasapi/mmdevice) umí na části sestav viset
-            # nebo failnout při initu bez explicitního zařízení.
-            # V takovém případě raději použijeme stabilní waveout.
-            if self.audio_output in ("wasapi", "mmdevice") and not has_explicit_device:
-                vlc_options.append('--aout=waveout')
-                logging.info(
-                    "[VLC Audio] '%s' bez explicitního zařízení -> fallback na waveout",
-                    self.audio_output,
-                )
-            else:
-                # Uživatel zvolil konkrétní modul (např. directsound s device) – respektuj ho.
-                vlc_options.append(f'--aout={self.audio_output}')
-        elif self.audio_output == 'directsound' and has_explicit_device:
-            # directsound s explicitním zařízením – použij ho.
-            vlc_options.append('--aout=directsound')
-        else:
-            # Žádné explicitní audio nebo directsound bez zařízení →
-            # waveout je nejkompatibilnější volba na Windows.
-            vlc_options.append('--aout=waveout')
-            logging.info("[VLC Audio] Používám waveout (nejkompatibilnější, nevyžaduje exkluzivní přístup)")
-
-        # 2. Přidej konkrétní DirectSound zařízení, pouze pokud je explicitně nastaveno.
-        if self.audio_output == 'directsound' and has_explicit_device:
-            vlc_options.append(f'--directx-audio-device={self.audio_device}')
-
-        # 3. Přehledný výpis finálního příkazu pro snadné ladění.
         complete_vlc_command = " ".join(vlc_options)
         logging.info(f"Creating VLC instance with command: {complete_vlc_command}")
 
-        # 4. Safe instance creation with fallback.
+        # Safe instance creation with fallback.
         # If GPU upscale args fail, retry with standard settings so playback is not blocked.
         try:
-            instance = vlc.Instance(*vlc_options)
+            lock_wait_start = time.perf_counter()
+            with _VLC_INSTANCE_INIT_LOCK:
+                _log_vlc_timing("vlc.Instance primary lock wait", lock_wait_start)
+                instance_start = time.perf_counter()
+                instance = vlc.Instance(*vlc_options)
+            _log_vlc_timing("vlc.Instance primary", instance_start)
             if instance:
                 return instance
             raise RuntimeError("vlc.Instance() returned None")
         except Exception as e:
+            _log_vlc_timing("vlc.Instance primary failed", instance_start)
             logging.error(f"[VLC] Error creating instance: {e}")
             if effective_gpu_upscale:
                 logging.warning("[GPU Upscale] GPU upscale instance failed. Falling back to standard VLC settings.")
@@ -1551,11 +1644,17 @@ class VideoPlayer:
                 if getattr(self.controller, "vlc_skiploopfilter_disable", False):
                     fallback_options.append('--avcodec-skiploopfilter=0')
                 try:
-                    instance = vlc.Instance(*fallback_options)
+                    fallback_lock_wait_start = time.perf_counter()
+                    with _VLC_INSTANCE_INIT_LOCK:
+                        _log_vlc_timing("vlc.Instance fallback lock wait", fallback_lock_wait_start)
+                        fallback_start = time.perf_counter()
+                        instance = vlc.Instance(*fallback_options)
+                    _log_vlc_timing("vlc.Instance fallback", fallback_start)
                     if instance:
                         logging.info("[VLC] Fallback instance created successfully.")
                         return instance
                 except Exception as e2:
+                    _log_vlc_timing("vlc.Instance fallback failed", fallback_start)
                     logging.error(f"[VLC] Fallback instance also failed: {e2}")
             return None
 
@@ -1563,15 +1662,19 @@ class VideoPlayer:
         """Lazily create VLC Instance and MediaPlayer (must run on the Tk main thread)."""
         if self.instance and self.player:
             return True
+        ensure_start = time.perf_counter()
         if not self.instance:
             self.instance = self.create_vlc_instance()
             if not self.instance:
                 logging.error("[VLC] Failed to create VLC instance.")
                 return False
         if not self.player:
+            player_start = time.perf_counter()
             self.player = self.instance.media_player_new()
+            _log_vlc_timing("media_player_new", player_start)
         if self.embed:
             self._ensure_preview_muted()
+        _log_vlc_timing("_ensure_vlc_player total", ensure_start)
         return True
 
     def _apply_preview_media_options(self, media) -> None:
@@ -3823,6 +3926,7 @@ class VideoPlayer:
     # SOUBOR: video_operations.py
 
     def play_video(self):
+        play_start = time.perf_counter()
         logging.info(f"[DEBUG] play_video: playing={self.playing}")
         if not self.video_path:
             return
@@ -3830,8 +3934,10 @@ class VideoPlayer:
         self._reconcile_window_mode_before_play()
 
         # 1. Lazy VLC init (same path as display_first_frame).
+        ensure_start = time.perf_counter()
         if not self._ensure_vlc_player():
             return
+        _log_vlc_timing("play_video ensure_vlc_player", ensure_start)
 
         norm = self._normalized_media_path(self.video_path)
 
@@ -3872,7 +3978,9 @@ class VideoPlayer:
         self._cancel_broken_decode_checks()
 
         # 2. Vytvoření média a zbytek logiky (zůstává stejné)
+        media_start = time.perf_counter()
         media = self.instance.media_new(self.video_path)
+        _log_vlc_timing("media_new", media_start)
         self._apply_preview_media_options(media)
 
         if self.last_position:
@@ -3886,11 +3994,17 @@ class VideoPlayer:
         if not video_widget.winfo_exists():
             return
 
+        set_media_start = time.perf_counter()
         self.player.set_media(media)
+        _log_vlc_timing("player.set_media", set_media_start)
         self._mark_media_loaded()
+        hwnd_start = time.perf_counter()
         self._safe_set_hwnd(video_widget)
+        _log_vlc_timing("_safe_set_hwnd", hwnd_start)
         self._ensure_preview_muted()
+        player_play_start = time.perf_counter()
         self.player.play()
+        _log_vlc_timing("player.play call", player_play_start)
         self._schedule_preview_mute_retries()
         self._duration_retry_count = 0
 
@@ -3917,6 +4031,8 @@ class VideoPlayer:
 
         if self.subtitles_enabled:
             threading.Thread(target=self._load_and_apply_subtitles, daemon=True).start()
+
+        _log_vlc_timing("play_video total immediate", play_start)
 
 
 
