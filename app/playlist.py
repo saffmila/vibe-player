@@ -11,6 +11,8 @@ import os
 import json
 import random
 import logging
+import sys
+import ctypes
 
 # Import the create_menu utility
 from utils import create_menu
@@ -18,6 +20,59 @@ from utils import create_menu
 import tkinterdnd2 as dnd
 from vtp_constants import VIDEO_FORMATS
 from vtp_mixin_dnd import VtpDndMixin
+
+
+_PLAYLIST_BG = "#1A1C1E"
+_PLAYLIST_LIST_BG = "#2B2B2B"
+_PLAYLIST_BORDER = "#1A1C1E"
+_PLAYLIST_TEXT = "#F2F4F8"
+
+
+def _resolve_toplevel_hwnd(window) -> int | None:
+    if sys.platform != "win32":
+        return None
+    try:
+        window.update_idletasks()
+        window.update()
+        cid = int(window.winfo_id())
+        user32 = ctypes.windll.user32
+        GA_ROOT = 2
+        return int(user32.GetAncestor(cid, GA_ROOT) or cid) or None
+    except Exception:
+        return None
+
+
+def _apply_dark_window_chrome(window) -> None:
+    if sys.platform != "win32":
+        return
+    hwnd = _resolve_toplevel_hwnd(window)
+    if hwnd:
+        try:
+            use_dark = ctypes.c_int(1)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd,
+                20,  # DWMWA_USE_IMMERSIVE_DARK_MODE
+                ctypes.byref(use_dark),
+                ctypes.sizeof(use_dark),
+            )
+        except Exception as exc:
+            logging.debug("[Playlist] DWM dark mode failed: %s", exc)
+
+    try:
+        import pywinstyles
+    except ImportError:
+        return
+
+    for func, args in (
+        (pywinstyles.apply_style, (window, "dark")),
+        (pywinstyles.change_header_color, (window, _PLAYLIST_BG)),
+        (pywinstyles.change_border_color, (window, _PLAYLIST_BORDER)),
+        (pywinstyles.change_title_color, (window, _PLAYLIST_TEXT)),
+    ):
+        try:
+            func(*args)
+        except Exception as exc:
+            logging.debug("[Playlist] dark chrome step failed: %s", exc)
 
 class PlaylistManager:
     def __init__(self, parent, controller):
@@ -56,22 +111,39 @@ class PlaylistManager:
         self.playlist_window = ctk.CTkToplevel(self.parent)
         self.playlist_window.title("Playlist")
         self.playlist_window.geometry("400x600")
+        self.playlist_window.configure(fg_color=_PLAYLIST_BG)
         self.is_playlist_open = True
         self.playlist_window.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # Set the new window to be always on top
         self.playlist_window.attributes('-topmost', True)
         logging.info("New playlist window created with '-topmost' set to True.")
+        try:
+            self.playlist_window.after(25, lambda: _apply_dark_window_chrome(self.playlist_window))
+            self.playlist_window.after(300, lambda: _apply_dark_window_chrome(self.playlist_window))
+        except Exception:
+            pass
 
         # --- Main Frame for Layout ---
-        self.playlist_main_frame = ctk.CTkFrame(self.playlist_window, fg_color="transparent")
+        self.playlist_main_frame = ctk.CTkFrame(
+            self.playlist_window,
+            fg_color=_PLAYLIST_BG,
+            corner_radius=0,
+            border_width=0,
+        )
         self.playlist_main_frame.pack(fill=tk.BOTH, expand=True)
         main_frame = self.playlist_main_frame
         logging.info("Main frame created.")
 
         # --- Listbox for playlist items ---
-        self.playlist_box = tk.Listbox(main_frame, bg="#2B2B2B", fg="white",
-                                     selectbackground="#1F6AA5", highlightthickness=0, borderwidth=0)
+        self.playlist_box = tk.Listbox(
+            main_frame,
+            bg=_PLAYLIST_LIST_BG,
+            fg="white",
+            selectbackground="#1F6AA5",
+            highlightthickness=0,
+            borderwidth=0,
+        )
         self.playlist_box.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         # Bind events
@@ -150,7 +222,12 @@ class PlaylistManager:
         matching the aesthetic of the timeline widget.
         """
         # Frame to hold the buttons
-        button_frame = ctk.CTkFrame(parent_frame, fg_color="transparent")
+        button_frame = ctk.CTkFrame(
+            parent_frame,
+            fg_color=_PLAYLIST_BG,
+            corner_radius=0,
+            border_width=0,
+        )
         button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=(0, 5))
         button_frame.grid_columnconfigure((0, 1, 2, 3), weight=1)
 

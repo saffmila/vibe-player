@@ -360,9 +360,11 @@ class VideoPlayer:
         self._pynput_pump_job = None
         self._cached_player_owner_hwnd: int | None = None
         self._opening_raise_guard = False
+        self._open_full_app_hover_throttle_ts = 0.0
         self._timer_after_id = None
         self._slider_poll_after_id = None
         self._opening_raise_after_id = None
+        self._open_full_app_overlay_hide_job = None
         self._cleaning_up = False
         self._cleanup_done = False
 
@@ -386,6 +388,8 @@ class VideoPlayer:
         self._broken_playback_overlay_active = False
         self._broken_check_after_ids = []
         self._broken_decode_check_gen = 0
+        self.open_full_app_overlay_button = None
+        self._setup_open_full_app_overlay()
         _log_player_timing("video labels", label_start)
 
         icons_start = time.perf_counter()
@@ -501,6 +505,9 @@ class VideoPlayer:
             return handler
 
         self.video_window.bind("<Control-w>", lambda e: self.close_video_player())
+        if callable(getattr(self.controller, "open_library", None)):
+            self.video_window.bind("<Control-l>", lambda e: self.controller.open_library())
+            self.video_window.bind("<Control-L>", lambda e: self.controller.open_library())
         self.video_window.bind(hk("video_fullscreen", "f"), self.toggle_fullscreen)
         self.video_window.bind("<Shift-F>", self.toggle_fullscreen)
         self.video_window.bind("<Alt-Return>", self.toggle_fullscreen)
@@ -757,6 +764,7 @@ class VideoPlayer:
             "_timer_after_id",
             "_slider_poll_after_id",
             "_opening_raise_after_id",
+            "_open_full_app_overlay_hide_job",
         ):
             _cancel_attr(name)
         try:
@@ -2627,20 +2635,6 @@ class VideoPlayer:
             image=_settings_ico,
             command=self.show_video_menu
         )
-        self.open_library_button = None
-        if callable(getattr(self.controller, "open_library", None)):
-            self.open_library_button = ctk.CTkButton(
-                self.controls_frame,
-                width=72,
-                height=28,
-                fg_color=buttonFG_color,
-                hover_color=icon_hover,
-                text_color=button_text,
-                corner_radius=4,
-                text="library",
-                command=self.controller.open_library,
-            )
-
         # )
         _loop_ico = getattr(self, "loop_menu_icon", None)
         self.loop_menu_button = ctk.CTkButton(
@@ -2671,8 +2665,6 @@ class VideoPlayer:
         # self.playlist_button.pack(side=ctk.LEFT, padx=5)
         # self.subtitles_button.pack(side=ctk.LEFT, padx=5)
         self.video_menu_button.pack(side=ctk.RIGHT, padx=btn_padx, pady=controls_pady)
-        if self.open_library_button is not None:
-            self.open_library_button.pack(side=ctk.RIGHT, padx=btn_padx, pady=controls_pady)
         self.loop_menu_button.pack(side=ctk.RIGHT, padx=btn_padx, pady=controls_pady)
         
 
@@ -2967,6 +2959,89 @@ class VideoPlayer:
         widget.bind("<Enter>", _in)
         widget.bind("<Leave>", _out)
 
+    def _setup_open_full_app_overlay(self):
+        """Create the lightweight-mode entry point to the full browser."""
+        if self.embed or not callable(getattr(self.controller, "open_library", None)):
+            return
+        self.open_full_app_overlay_button = ctk.CTkButton(
+            self._video_stack,
+            width=118,
+            height=30,
+            corner_radius=15,
+            border_width=1,
+            border_color=self.outline_soft,
+            fg_color="#111315",
+            hover_color=self.surface_high,
+            text_color=self.on_surface,
+            text="Open full app",
+            font=self.telemetry_font,
+            command=self.controller.open_library,
+        )
+        self.open_full_app_overlay_button.place_forget()
+        self.open_full_app_overlay_button.bind("<Enter>", self._show_open_full_app_overlay, add="+")
+        self.open_full_app_overlay_button.bind("<Motion>", self._show_open_full_app_overlay, add="+")
+
+    def _show_open_full_app_overlay(self, event=None):
+        button = getattr(self, "open_full_app_overlay_button", None)
+        if self.embed or button is None or getattr(self, "_cleaning_up", False):
+            return
+        try:
+            if not self.video_window.winfo_exists():
+                return
+            button.place(relx=1.0, rely=0.0, x=-14, y=14, anchor="ne")
+            button.lift()
+        except Exception:
+            return
+        job = getattr(self, "_open_full_app_overlay_hide_job", None)
+        if job:
+            try:
+                self.video_window.after_cancel(job)
+            except Exception:
+                pass
+        try:
+            self._open_full_app_overlay_hide_job = self.video_window.after(
+                1800, self._hide_open_full_app_overlay_if_idle
+            )
+        except Exception:
+            self._open_full_app_overlay_hide_job = None
+
+    def _hide_open_full_app_overlay_if_idle(self):
+        self._open_full_app_overlay_hide_job = None
+        button = getattr(self, "open_full_app_overlay_button", None)
+        if button is None:
+            return
+        try:
+            px = int(self.video_window.winfo_pointerx())
+            py = int(self.video_window.winfo_pointery())
+        except Exception:
+            px = py = -1
+        if self._point_in_widget(button, px, py):
+            self._show_open_full_app_overlay()
+            return
+        try:
+            button.place_forget()
+        except Exception:
+            pass
+
+    def disable_open_full_app_overlay(self):
+        """Hide the full-app launcher after it has started the browser once."""
+        job = getattr(self, "_open_full_app_overlay_hide_job", None)
+        if job:
+            try:
+                self.video_window.after_cancel(job)
+            except Exception:
+                pass
+        self._open_full_app_overlay_hide_job = None
+        button = getattr(self, "open_full_app_overlay_button", None)
+        if button is None:
+            return
+        try:
+            button.place_forget()
+            button.destroy()
+        except Exception:
+            pass
+        self.open_full_app_overlay_button = None
+
     def _play_button_hover_enter(self, _e):
         if not getattr(self, "play_button_icon", None):
             return
@@ -3119,6 +3194,9 @@ class VideoPlayer:
             return False
         if self.is_cursor_over_toolbar(x, y):
             return False
+        overlay = getattr(self, "open_full_app_overlay_button", None)
+        if overlay is not None and self._point_in_widget(overlay, x, y):
+            return False
         for widget in (
             getattr(self, "video_area", None),
             getattr(self, "_video_stack", None),
@@ -3223,7 +3301,10 @@ class VideoPlayer:
             if getattr(self, "_pynput_bridge_dead", True) or getattr(self, "_cleaning_up", False):
                 return
             try:
-                listener = mouse.Listener(on_click=self._on_global_click)
+                listener = mouse.Listener(
+                    on_click=self._on_global_click,
+                    on_move=self._on_global_mouse_move,
+                )
                 listener.start()
                 self.global_listener = listener
                 logging.info("[pynput bridge] global mouse listener started.")
@@ -3258,6 +3339,10 @@ class VideoPlayer:
 
     def show_video_menu(self, event=None, *, x_root=None, y_root=None):
         menu = create_menu(self.controller, self.video_window)
+
+        if callable(getattr(self.controller, "open_library", None)):
+            menu.add_command(label="Open full app", command=self.controller.open_library)
+            menu.add_separator()
 
         menu.add_command(label="Toggle Subtitles", command=self.toggle_subtitles)
         menu.add_command(label="Create Thumbnail", command=self.generate_thumbnail)
@@ -3589,6 +3674,18 @@ class VideoPlayer:
             return
         self.show_video_menu(x_root=x, y_root=y)
 
+    def _show_open_full_app_overlay_if_over_video(self, x: int, y: int) -> None:
+        """Show lightweight overlay on VLC's native HWND, where Tk Motion is swallowed."""
+        if getattr(self, "_cleaning_up", False):
+            return
+        if getattr(self, "open_full_app_overlay_button", None) is None:
+            return
+        if not self._pointer_on_video_surface(int(x), int(y)):
+            return
+        if not self._screen_click_hits_player_window(int(x), int(y)):
+            return
+        self._show_open_full_app_overlay()
+
     def _pynput_queue_pump(self) -> None:
         """Drain pynput → main thread queue (Tk thread only)."""
         self._pynput_pump_job = None
@@ -3609,6 +3706,8 @@ class VideoPlayer:
                     self._global_click_toggle_if_over_video(x, y)
                 elif kind == "rmb":
                     self._global_rmb_show_menu_if_over_video()
+                elif kind == "hover":
+                    self._show_open_full_app_overlay_if_over_video(x, y)
                 elif kind == "move":
                     self._check_mouse_position_main(x, y)
         except Exception as e:
@@ -3643,6 +3742,21 @@ class VideoPlayer:
                     self._pynput_queue.put_nowait((kind, int(x), int(y)))
                 except (queue.Empty, queue.Full):
                     pass
+
+    def _on_global_mouse_move(self, x, y):
+        # Worker thread: throttle heavily and queue only; VLC HWND eats Tk Motion.
+        if getattr(self, "_pynput_bridge_dead", True) or getattr(self, "_cleaning_up", False):
+            return
+        if getattr(self, "open_full_app_overlay_button", None) is None:
+            return
+        now = time.perf_counter()
+        if now - float(getattr(self, "_open_full_app_hover_throttle_ts", 0.0) or 0.0) < 0.12:
+            return
+        self._open_full_app_hover_throttle_ts = now
+        try:
+            self._pynput_queue.put_nowait(("hover", int(x), int(y)))
+        except queue.Full:
+            pass
 
 
 
@@ -4705,9 +4819,15 @@ class VideoPlayer:
         self.slider_hover_label = None
 
     def _handle_player_motion_for_slider_popup(self, event=None):
-        if not getattr(self, "slider_hover_popup", None):
-            return
-        if not self._pointer_inside_slider_zone():
+        try:
+            px = int(self.video_window.winfo_pointerx())
+            py = int(self.video_window.winfo_pointery())
+        except Exception:
+            px = py = -1
+        if self._pointer_on_video_surface(px, py) or self.is_cursor_over_toolbar(px, py):
+            self._show_open_full_app_overlay(event)
+
+        if getattr(self, "slider_hover_popup", None) and not self._pointer_inside_slider_zone():
             self.hide_slider_hover_time_popup()
 
     def render_slider(self, percentage=0.0):

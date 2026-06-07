@@ -25,6 +25,21 @@ class VtpWindowLayoutMixin:
             self.refresh_virtual_libraries()
             self.restore_tree_state()
 
+            start_path = os.environ.pop("VIBE_START_DIRECTORY", "").strip()
+            if start_path and os.path.isfile(start_path):
+                start_path = os.path.dirname(os.path.abspath(start_path))
+            if start_path and os.path.isdir(start_path):
+                logging.info(f"[STARTUP] Opening requested folder: {start_path}")
+                self.expand_tree_to_path(start_path)
+                self.current_directory = start_path
+                self.display_thumbnails(start_path)
+                self.update_quick_access_combo(start_path)
+                try:
+                    self.add_to_recent_directories(start_path)
+                except Exception:
+                    pass
+                return
+
             last_path = self.get_last_recent_directory()
 
             if last_path and os.path.exists(last_path):

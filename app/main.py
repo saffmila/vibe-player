@@ -201,6 +201,14 @@ def _file_association_command() -> tuple[str, str]:
     return f"{_windows_quote(target)} {_windows_quote(main_py)} \"%1\"", target
 
 
+def _file_association_icon_target(command_target: str) -> str:
+    """Prefer the bundled .ico for Windows file type icons."""
+    icon_path = os.path.join(_runtime_base_dir(), "icons", "vibe_player.ico")
+    if os.path.isfile(icon_path):
+        return os.path.abspath(icon_path)
+    return command_target
+
+
 def _reg_set_sz(winreg, root, path: str, name: str, value: str) -> None:
     with winreg.CreateKeyEx(root, path, 0, winreg.KEY_WRITE) as key:
         winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
@@ -248,7 +256,8 @@ def _register_windows_file_associations() -> int:
     classes_root = r"Software\Classes"
     app_path = classes_root + r"\Applications" + "\\" + _FILE_ASSOC_APP_KEY
     capabilities_path = app_path + r"\Capabilities"
-    command, icon_target = _file_association_command()
+    command, command_target = _file_association_command()
+    icon_target = _file_association_icon_target(command_target)
     icon_value = f"{_windows_quote(icon_target)},0"
 
     try:
@@ -414,6 +423,9 @@ class _FastVideoController:
         self.current_volume = 100
         self.video_files = []
         self.current_video_index = 0
+        self.playlist_manager = None
+        self._full_app_process = None
+        self._full_app_launched = False
         self.video_show_hud = bool(prefs.get("video_show_hud", True))
         self.vlc_enable_postproc = bool(prefs.get("vlc_enable_postproc", False))
         self.vlc_postproc_quality = int(prefs.get("vlc_postproc_quality", 6))
@@ -450,16 +462,92 @@ class _FastVideoController:
     def after(self, ms, cb):
         return self._root.after(ms, cb)
 
+    def _set_folder_playlist(self, media_path: str):
+        folder = os.path.dirname(os.path.abspath(media_path))
+        try:
+            paths = [
+                os.path.join(folder, name)
+                for name in os.listdir(folder)
+                if os.path.isfile(os.path.join(folder, name))
+                and os.path.splitext(name)[1].lower() in _SUPERFAST_VIDEO_EXT
+            ]
+        except OSError:
+            paths = [media_path]
+
+        paths.sort(key=lambda p: os.path.basename(p).lower())
+        norm_media = os.path.normcase(os.path.abspath(media_path))
+        if not any(os.path.normcase(os.path.abspath(p)) == norm_media for p in paths):
+            paths.insert(0, media_path)
+
+        current_index = next(
+            (
+                idx
+                for idx, path in enumerate(paths)
+                if os.path.normcase(os.path.abspath(path)) == norm_media
+            ),
+            0,
+        )
+        self.video_files = [
+            {"path": path, "name": os.path.basename(path)}
+            for path in paths
+        ]
+        self.current_video_index = current_index
+        if self.playlist_manager is not None:
+            self.playlist_manager.playlist = list(paths)
+            self.playlist_manager.current_playing_index = current_index
+            try:
+                self.playlist_manager.populate_playlist_box()
+            except Exception:
+                pass
+
     def Open_playlist(self):
-        pass
+        if self.playlist_manager is not None:
+            self.playlist_manager.show_playlist()
 
     def add_selected_to_playlist(self, new_playlist=False):
-        pass
+        if self.playlist_manager is None:
+            return
+        win = self.current_video_window
+        current_path = getattr(win, "video_path", None)
+        if not current_path:
+            return
+        if new_playlist:
+            self.playlist_manager.playlist = []
+            self.video_files = []
+            self.current_video_index = 0
+        self.playlist_manager.add_to_playlist([current_path])
+        try:
+            self.playlist_manager.current_playing_index = self.playlist_manager.playlist.index(current_path)
+            self.playlist_manager.update_playlist_selection()
+        except ValueError:
+            pass
+
+    def open_video_player(self, video_path, video_name):
+        win = self.current_video_window
+        if win is None:
+            return
+        self._set_folder_playlist(video_path)
+        win.safe_switch_video(video_path, video_name)
 
     def open_library(self):
         """Launch the full browser app from a lightweight file-association viewer."""
+        if self._full_app_launched:
+            if self._full_app_process is None or self._full_app_process.poll() is None:
+                return
+            self._full_app_launched = False
+
         env = os.environ.copy()
         env["VIBE_SUPERFAST_MEDIA"] = "0"
+        win = self.current_video_window
+        current_path = getattr(win, "video_path", None)
+        if current_path:
+            start_dir = (
+                current_path
+                if os.path.isdir(current_path)
+                else os.path.dirname(os.path.abspath(current_path))
+            )
+            if start_dir and os.path.isdir(start_dir):
+                env["VIBE_START_DIRECTORY"] = start_dir
         project_root = _source_project_root()
 
         if getattr(sys, "frozen", False):
@@ -475,12 +563,16 @@ class _FastVideoController:
                 cwd = APP_DIR
 
         try:
-            subprocess.Popen(cmd, cwd=cwd, env=env)
+            self._full_app_process = subprocess.Popen(cmd, cwd=cwd, env=env)
+            self._full_app_launched = True
+            win = self.current_video_window
+            if win and hasattr(win, "disable_open_full_app_overlay"):
+                win.disable_open_full_app_overlay()
         except Exception as exc:
-            logging.exception("Could not launch full Vibe Player library.")
+            logging.exception("Could not launch full Vibe Player app.")
             self.universal_dialog(
-                "Open Library",
-                f"Could not open the full Vibe Player library:\n\n{exc}",
+                "Open full app",
+                f"Could not open the full Vibe Player app:\n\n{exc}",
                 show_cancel=False,
             )
 
@@ -572,6 +664,7 @@ def _run_superfast_video(media_path: str) -> None:
     os.chdir(APP_DIR)
     _prepare_lightweight_env()
     import customtkinter as ctk
+    from playlist import PlaylistManager
     from video_operations import VideoPlayer
 
     prefs = _load_fast_media_prefs()
@@ -579,6 +672,8 @@ def _run_superfast_video(media_path: str) -> None:
     root.default_directory = _runtime_base_dir()
     root.withdraw()
     stub = _FastVideoController(root, prefs)
+    stub.playlist_manager = PlaylistManager(root, stub)
+    stub._set_folder_playlist(media_path)
     vp = VideoPlayer(
         parent=root,
         controller=stub,
@@ -591,7 +686,7 @@ def _run_superfast_video(media_path: str) -> None:
         vlc_audio_device=str(prefs["audio_device"] or ""),
         auto_play=bool(prefs.get("auto_play", True)),
         subtitles_enabled=False,
-        playlist_manager=None,
+        playlist_manager=stub.playlist_manager,
         embed=False,
         show_video_button_bar=True,
         use_gpu_upscale=bool(prefs.get("gpu_upscale", False)),

@@ -104,7 +104,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # icon='assets/ikona.ico'  # Odkomentuj a uprav, pokud máš ikonu pro .exe!
+    icon='app/icons/vibe_player.ico',
 )
 coll = COLLECT(
     exe,

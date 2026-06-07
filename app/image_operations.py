@@ -746,7 +746,7 @@ class ImageViewerLegacy:
         menu.add_command(label=f"Delete ({hk_label('image_delete', 'Del')})", command=self.delete_current_image)
         menu.add_separator()
         if callable(getattr(self.controller, "open_library", None)):
-            menu.add_command(label="Open Library (Ctrl+L)", command=self.controller.open_library)
+            menu.add_command(label="Open full app (Ctrl+L)", command=self.controller.open_library)
             menu.add_separator()
         menu.add_command(label="Toggle Fullscreen (F11)", command=self.toggle_fullscreen)
         
@@ -1840,7 +1840,7 @@ class ImageViewerGPU:
         menu.add_command(label="Delete", accelerator=hk('image_delete', 'Del'), command=self.delete_current_image)
         menu.add_separator()
         if callable(getattr(self.controller, "open_library", None)):
-            menu.add_command(label="Open Library", accelerator="Ctrl+L", command=self.controller.open_library)
+            menu.add_command(label="Open full app", accelerator="Ctrl+L", command=self.controller.open_library)
             menu.add_separator()
         menu.add_command(label="Toggle Fullscreen", accelerator="F11", command=self.toggle_fullscreen)
         menu.tk_popup(int(screen_x), int(screen_y))
