@@ -2797,26 +2797,13 @@ class TimelineBarWidget(ctk.CTkFrame):
 
 
     def on_space_press(self, event):
-            """Toggles play/pause: prioritizing standalone player, then embedded preview."""
-            # 1. Zkusíme najít velké samostatné okno
-            standalone_player = getattr(self.controller, "current_video_window", None)
-            
-            if standalone_player:
-                logging.info("[Timeline] Space: Toggling standalone player.")
-                if hasattr(standalone_player, 'toggle_play'):
-                    standalone_player.toggle_play()
-                return
+        """Delegate Space to the app-level play/pause handler to avoid double toggles."""
+        handler = getattr(self.controller, "global_play_pause", None)
+        if callable(handler):
+            return handler(event)
 
-            # 2. Pokud velké okno není, zkusíme ovládat vložený náhled (Preview)
-            # Ten je v controlleru obvykle pod 'active_player'
-            preview_player = getattr(self.controller, "active_player", None)
-            
-            if preview_player:
-                logging.info("[Timeline] Space: Toggling embedded preview.")
-                if hasattr(preview_player, 'toggle_play'):
-                    preview_player.toggle_play()
-            else:
-                logging.info("[Timeline] Space: No player found to toggle.")
+        logging.info("[Timeline] Space: No app-level play/pause handler found.")
+        return "break"
 
     def on_shift_click(self, event):
         """

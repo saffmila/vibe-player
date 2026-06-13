@@ -4642,13 +4642,14 @@ class VtpGridMixin:
         else:
             logging.info("[DEBUG] No active viewer for skip_next")
 
-    def global_play_pause(self):
-        """Toggle play/pause on active video player (resume from pause when possible)."""
+    def global_play_pause(self, event=None):
+        """Toggle the standalone player first, otherwise the embedded preview."""
         active_video = getattr(self, "current_video_window", None) or getattr(self, "active_player", None)
         if active_video and hasattr(active_video, "toggle_play"):
             active_video.toggle_play()
         else:
             logging.info("[DEBUG] No active video player for play/pause")
+        return "break"
 
     def skip_to_next_bookmark_global(self):
         """Jump to the next bookmark on the active video player."""
