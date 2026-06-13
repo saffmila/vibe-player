@@ -199,8 +199,7 @@ class _BookmarkSeekProxy:
         Args:
             bookmarks: List of ``{"time": float, "label": str}`` dictionaries.
         """
-        player_obj = self.video_player
-        if player_obj is None:
+        if self.video_player is None and not (self.controller and self.video_path):
             return
 
         normalized = []

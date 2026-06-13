@@ -15,6 +15,8 @@ import customtkinter as ctk
 
 DEFAULT_BOOKMARK_COLOR = "#FFFFFF"
 LEGACY_AUTO_BOOKMARK_COLORS = {"#FFA500", "#FFD700", "#FFFFB3"}
+BOOKMARK_MANAGER_MIN_WIDTH = 320
+BOOKMARK_MANAGER_MIN_HEIGHT = 360
 
 
 class BookmarkManager:
@@ -98,13 +100,16 @@ class BookmarkManager:
 
         self.window = ctk.CTkToplevel(self.parent)
         self.window.title("Bookmarks")
-        self.window.geometry("300x400")
+        self.window.geometry(f"{BOOKMARK_MANAGER_MIN_WIDTH}x{BOOKMARK_MANAGER_MIN_HEIGHT}")
+        self.window.minsize(BOOKMARK_MANAGER_MIN_WIDTH, BOOKMARK_MANAGER_MIN_HEIGHT)
         self.window.protocol("WM_DELETE_WINDOW", self.on_close)
         self.window.attributes("-topmost", True)
         self.is_open = True
 
         main_frame = ctk.CTkFrame(self.window, fg_color="transparent")
         main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame.grid_columnconfigure(0, weight=1)
+        main_frame.grid_rowconfigure(1, weight=1)
 
         self.filter_entry = ctk.CTkEntry(
             main_frame,
@@ -112,7 +117,7 @@ class BookmarkManager:
             placeholder_text="Filter bookmarks...",
             height=30,
         )
-        self.filter_entry.pack(fill=tk.X, padx=6, pady=(6, 2))
+        self.filter_entry.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 2))
         self.filter_entry.bind("<KeyRelease>", self._on_filter_changed)
 
         self.bookmark_listbox = tk.Listbox(
@@ -127,7 +132,7 @@ class BookmarkManager:
             exportselection=False,
             font=("Segoe UI", 12),
         )
-        self.bookmark_listbox.pack(fill=tk.BOTH, expand=True, padx=6, pady=(2, 6))
+        self.bookmark_listbox.grid(row=1, column=0, sticky="nsew", padx=6, pady=(2, 6))
 
         self.bookmark_listbox.bind("<<ListboxSelect>>", self._on_bookmark_select)
         self.bookmark_listbox.bind("<Double-1>", self._on_bookmark_double_click)
@@ -145,6 +150,9 @@ class BookmarkManager:
                 ``{"time": float, "label": str, "color": str (optional)}``
         """
         self.bookmarks = []
+        seen_keys = {}
+        dropped_duplicates = 0
+
         for item in bookmarks_data or []:
             if not isinstance(item, dict):
                 continue
@@ -166,10 +174,33 @@ class BookmarkManager:
             color = self._normalize_hex_color(item.get("color"))
             if self.is_custom_bookmark_color(color):
                 entry["color"] = color
+
+            key = self._bookmark_duplicate_key(entry)
+            existing_index = seen_keys.get(key)
+            if existing_index is not None:
+                dropped_duplicates += 1
+                existing = self.bookmarks[existing_index]
+                if "color" not in existing and "color" in entry:
+                    existing["color"] = entry["color"]
+                continue
+
+            seen_keys[key] = len(self.bookmarks)
             self.bookmarks.append(entry)
 
         self._sort_bookmarks()
         self._populate_bookmark_list()
+        if dropped_duplicates:
+            self._sync_bookmarks_to_player()
+
+    @staticmethod
+    def _bookmark_duplicate_key(bookmark):
+        """Return a stable key for exact duplicate bookmark rows."""
+        try:
+            timestamp = round(float(bookmark.get("time", 0.0)), 3)
+        except (TypeError, ValueError):
+            timestamp = 0.0
+        label = str(bookmark.get("label", bookmark.get("name", ""))).strip().casefold()
+        return (timestamp, label)
 
     def _format_time(self, seconds):
         """
@@ -223,61 +254,61 @@ class BookmarkManager:
         Create the bottom control panel in a compact playlist-like style.
         """
         self.button_panel = ctk.CTkFrame(parent_frame, fg_color="transparent")
-        self.button_panel.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=(0, 6))
+        self.button_panel.grid(row=2, column=0, sticky="ew", padx=6, pady=(0, 6))
         self.button_panel.grid_columnconfigure(0, weight=1)
         self.button_panel.grid_columnconfigure((1, 2, 3, 4, 5), weight=0)
 
         btn_style = {
-            "font": ("Segoe UI", 11),
+            "font": ("Segoe UI", 12),
             "fg_color": "#333333",
             "hover_color": "#444444",
             "text_color": "#dddddd",
-            "corner_radius": 4,
-            "height": 26,
-            "width": 52,
+            "corner_radius": 3,
+            "height": 22,
+            "width": 34,
         }
 
         ctk.CTkButton(
             self.button_panel,
-            text="✚ Add",
+            text="+",
             command=self.add_bookmark,
             **btn_style,
-        ).grid(row=0, column=0, padx=2, pady=2, sticky="w")
+        ).grid(row=0, column=0, padx=1, pady=1, sticky="w")
 
         ctk.CTkButton(
             self.button_panel,
-            text="Color",
+            text="🎨",
             command=self.set_selected_bookmark_color,
             **btn_style,
-        ).grid(row=0, column=1, padx=2, pady=2, sticky="e")
+        ).grid(row=0, column=1, padx=1, pady=1, sticky="e")
 
         ctk.CTkButton(
             self.button_panel,
-            text="◀ Prev",
+            text="◀",
             command=self.skip_to_previous,
             **btn_style,
-        ).grid(row=0, column=2, padx=2, pady=2, sticky="e")
+        ).grid(row=0, column=2, padx=1, pady=1, sticky="e")
 
         ctk.CTkButton(
             self.button_panel,
-            text="Next ▶",
+            text="▶",
             command=self.skip_to_next,
             **btn_style,
-        ).grid(row=0, column=3, padx=2, pady=2, sticky="e")
+        ).grid(row=0, column=3, padx=1, pady=1, sticky="e")
 
         ctk.CTkButton(
             self.button_panel,
-            text="✖ Del",
+            text="×",
             command=self.delete_selected_bookmark,
             **btn_style,
-        ).grid(row=0, column=4, padx=2, pady=2, sticky="e")
+        ).grid(row=0, column=4, padx=1, pady=1, sticky="e")
 
         ctk.CTkButton(
             self.button_panel,
-            text="🗑 Clear",
+            text="🗑",
             command=self.clear_all_bookmarks,
             **btn_style,
-        ).grid(row=0, column=5, padx=2, pady=2, sticky="e")
+        ).grid(row=0, column=5, padx=1, pady=1, sticky="e")
 
     def _selected_bookmark_time(self) -> Optional[float]:
         """Return the source timestamp (seconds) for the listbox selection, if any."""

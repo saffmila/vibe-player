@@ -583,12 +583,24 @@ class VideoPlayer:
             return
 
         timeline = getattr(self, "timeline_widget", None)
-        if timeline:
+        if timeline is None:
+            timeline = getattr(self.controller, "timeline_widget", None)
+
+        if timeline is not None:
+            try:
+                if hasattr(timeline, "winfo_exists") and not timeline.winfo_exists():
+                    timeline = None
+            except tk.TclError:
+                timeline = None
+
+        if timeline is not None:
             try:
                 timeline.update_bookmarks()
                 timeline.redraw_timeline()
             except Exception as e:
                 logging.info("[Bookmark] timeline marker refresh failed: %s", e)
+        else:
+            logging.info("[Bookmark] timeline widget is not available for marker refresh.")
 
         self.update_loop_bar_display()
 
@@ -1749,12 +1761,8 @@ class VideoPlayer:
                     self.bookmarks.append({"name": name, "time": current_time})
                     self.save_bookmarks()
                     logging.info(f"Added bookmark: {name} @ {current_time}s")
-                    if hasattr(self, "timeline_widget"):
-                        logging.info("[DEBUG] ⟳ update_bookmarks + redraw_timeline kvůli novému bookmarku")
-                        self.timeline_widget.update_bookmarks()
-                        self.timeline_widget.redraw_timeline()
-                    else:
-                        logging.info("[DEBUG] timeline_widget není dostupný v VideoPlayer")
+                    logging.info("[DEBUG] ⟳ refresh bookmark markers kvůli novému bookmarku")
+                    self._refresh_bookmark_marker_views()
 
         # Use the controller's universal_dialog
         if hasattr(self.controller, 'universal_dialog'):
