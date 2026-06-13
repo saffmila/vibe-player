@@ -8,7 +8,7 @@ time-based bookmarks of the currently loaded video.
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import colorchooser, messagebox, simpledialog
+from tkinter import colorchooser, messagebox
 from typing import Dict, List, Optional
 
 import customtkinter as ctk
@@ -525,40 +525,51 @@ class BookmarkManager:
                 current_time = 0.0
 
         default_label = f"Bookmark {len(self.bookmarks) + 1}"
-        user_label = simpledialog.askstring(
-            "Add Bookmark",
-            f"Label for bookmark at {self._format_time(current_time)}:",
-            parent=self.window,
-            initialvalue=default_label,
-        )
 
-        if user_label is None:
-            return
-
-        # Warn when a bookmark already exists at (almost) the same timestamp.
-        duplicate_exists = any(
-            abs(float(item.get("time", -9999.0)) - current_time) < 1e-3
-            for item in self.bookmarks
-        )
-        if duplicate_exists:
-            should_continue = messagebox.askyesno(
-                "Bookmark Exists",
-                f"A bookmark already exists at {self._format_time(current_time)}.\n"
-                "Do you want to add another one?",
-                parent=self.window,
-            )
-            if not should_continue:
+        def finish_add_bookmark(user_label):
+            if user_label is None:
                 return
 
-        self.bookmarks.append(
-            {
-                "time": max(0.0, float(current_time)),
-                "label": user_label.strip() or default_label,
-            }
+            # Warn when a bookmark already exists at (almost) the same timestamp.
+            duplicate_exists = any(
+                abs(float(item.get("time", -9999.0)) - current_time) < 1e-3
+                for item in self.bookmarks
+            )
+            if duplicate_exists:
+                should_continue = messagebox.askyesno(
+                    "Bookmark Exists",
+                    f"A bookmark already exists at {self._format_time(current_time)}.\n"
+                    "Do you want to add another one?",
+                    parent=self.window,
+                )
+                if not should_continue:
+                    return
+
+            self.bookmarks.append(
+                {
+                    "time": max(0.0, float(current_time)),
+                    "label": str(user_label).strip() or default_label,
+                }
+            )
+            self._sort_bookmarks()
+            self._populate_bookmark_list()
+            self._sync_bookmarks_to_player()
+
+        dialog_owner = self.parent if hasattr(self.parent, "universal_dialog") else None
+        if dialog_owner is None:
+            dialog_owner = getattr(self.video_player, "controller", None)
+        if not dialog_owner or not hasattr(dialog_owner, "universal_dialog"):
+            messagebox.showerror("Add Bookmark", "Bookmark dialog is not available.", parent=self.window)
+            return
+
+        dialog_owner.universal_dialog(
+            title="Add Bookmark",
+            message=f"Label for bookmark at {self._format_time(current_time)}:",
+            confirm_callback=finish_add_bookmark,
+            input_field=True,
+            default_input=default_label,
+            modal=False,
         )
-        self._sort_bookmarks()
-        self._populate_bookmark_list()
-        self._sync_bookmarks_to_player()
 
     def delete_selected_bookmark(self):
         """

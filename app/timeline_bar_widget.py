@@ -886,6 +886,7 @@ class TimelineBarWidget(ctk.CTkFrame):
                 # V obou případech aktualizujeme Timeline
                 self.update_bookmarks()
                 self.redraw_timeline()
+                self._refresh_bookmark_manager_if_open()
                 if active_player and hasattr(active_player, "update_loop_bar_display"):
                     active_player.update_loop_bar_display()
                 logging.info(f"Bookmark '{name}' added at {timestamp}s (Player active: {active_player is not None})")
@@ -897,7 +898,8 @@ class TimelineBarWidget(ctk.CTkFrame):
                     message=f"Name for bookmark at {self.format_time(timestamp)}:",
                     confirm_callback=on_confirm,
                     input_field=True,
-                    default_input=default_name
+                    default_input=default_name,
+                    modal=False,
                 )
 
     def save_bookmarks_standalone(self, video_path, bookmarks):
@@ -941,18 +943,68 @@ class TimelineBarWidget(ctk.CTkFrame):
             timestamp = marker_to_remove["timestamp"]
 
             if active_player:
-                active_player.bookmarks = [b for b in active_player.bookmarks if b["time"] != timestamp]
+                active_player.bookmarks, removed = self._remove_single_bookmark_from_list(
+                    getattr(active_player, "bookmarks", []),
+                    marker_to_remove,
+                )
                 active_player.save_bookmarks()
             else:
                 # Práce bez přehrávače
                 current_bookmarks = self.load_bookmarks_for_path(self.video_path)
-                current_bookmarks = [b for b in current_bookmarks if b["time"] != timestamp]
+                current_bookmarks, removed = self._remove_single_bookmark_from_list(
+                    current_bookmarks,
+                    marker_to_remove,
+                )
                 self.save_bookmarks_standalone(self.video_path, current_bookmarks)
+
+            if not removed:
+                logging.info("[Timeline] Bookmark remove did not find an exact match at %.3fs", timestamp)
 
             self.update_bookmarks()
             self.redraw_timeline()
+            self._refresh_bookmark_manager_if_open()
             if active_player and hasattr(active_player, "update_loop_bar_display"):
                 active_player.update_loop_bar_display()
+
+    def _remove_single_bookmark_from_list(self, bookmarks, marker_to_remove):
+            """Remove only the one bookmark represented by a timeline marker."""
+            target_label = str(marker_to_remove.get("label", "")).strip()
+            try:
+                target_time = float(marker_to_remove["timestamp"])
+            except (KeyError, TypeError, ValueError):
+                return list(bookmarks or []), False
+
+            normalized = list(bookmarks or [])
+            fallback_index = None
+            fallback_delta = None
+            for idx, bookmark in enumerate(normalized):
+                if not isinstance(bookmark, dict):
+                    continue
+                raw_time = bookmark.get("time") if bookmark.get("time") is not None else bookmark.get("timestamp")
+                try:
+                    bookmark_time = float(raw_time)
+                except (TypeError, ValueError):
+                    continue
+                delta = abs(bookmark_time - target_time)
+                if delta > 0.001:
+                    continue
+
+                bookmark_label = str(
+                    bookmark.get("name") if bookmark.get("name") is not None else bookmark.get("label", "")
+                ).strip()
+                if bookmark_label == target_label:
+                    del normalized[idx]
+                    return normalized, True
+
+                if fallback_index is None or delta < fallback_delta:
+                    fallback_index = idx
+                    fallback_delta = delta
+
+            if fallback_index is not None:
+                del normalized[fallback_index]
+                return normalized, True
+
+            return normalized, False
 
     def remove_all_bookmarks(self):
             """Removes all bookmarks for the current video."""
@@ -973,8 +1025,17 @@ class TimelineBarWidget(ctk.CTkFrame):
 
             self.update_bookmarks()
             self.redraw_timeline()
+            self._refresh_bookmark_manager_if_open()
             if active_player and hasattr(active_player, "update_loop_bar_display"):
                 active_player.update_loop_bar_display()
+
+    def _refresh_bookmark_manager_if_open(self):
+            ctrl = getattr(self, "controller", None)
+            if ctrl and hasattr(ctrl, "refresh_bookmark_manager_if_open"):
+                try:
+                    ctrl.refresh_bookmark_manager_if_open(self.video_path)
+                except Exception as e:
+                    logging.info("[Timeline] bookmark manager refresh failed: %s", e)
 
     def seek_and_play(self, timestamp):
             """Seeks to timestamp. Opens player if it's closed."""

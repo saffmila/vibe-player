@@ -71,7 +71,7 @@ import queue
 from queue import Queue
 import cv2
 import tkinter as tk
-from tkinter import filedialog, ttk, simpledialog, messagebox
+from tkinter import filedialog, ttk, messagebox
 
 from file_operations import *
 from gui_elements import *
@@ -1230,7 +1230,8 @@ class VideoThumbnailPlayer(
         default_input="",
         confirm_text="Confirm",
         cancel_text="Cancel",
-        show_cancel=True
+        show_cancel=True,
+        modal=True,
     ):
         """
         Create a universal dialog window for confirmation, error, or input.
@@ -1244,6 +1245,7 @@ class VideoThumbnailPlayer(
             third_callback (function): The function to call when the third button is clicked (optional).
             input_field (bool): Whether the dialog requires an input field (default is False).
             default_input (str): The default value for the input field if enabled.
+            modal (bool): Whether to grab all app input while the dialog is open.
         """
         dialog_window = ctk.CTkToplevel(self)
         dialog_window.title(title)
@@ -1257,7 +1259,8 @@ class VideoThumbnailPlayer(
 
         # Bring the dialog to the front
         dialog_window.attributes('-topmost', True)
-        dialog_window.grab_set()
+        if modal:
+            dialog_window.grab_set()
 
         _msg_wrap = 540 if input_field else 350
         label = ctk.CTkLabel(
@@ -1272,7 +1275,13 @@ class VideoThumbnailPlayer(
             input_entry.pack(fill="x", expand=True, padx=14, pady=(4, 8))
 
         # Confirm button
+        confirm_in_progress = False
+
         def on_confirm():
+            nonlocal confirm_in_progress
+            if confirm_in_progress:
+                return "break"
+            confirm_in_progress = True
             if confirm_callback:
                 if input_field:
                     confirm_callback(input_var.get())  # Pass the input value
@@ -1280,6 +1289,7 @@ class VideoThumbnailPlayer(
                     confirm_callback()
             if dialog_window.winfo_exists():
                 dialog_window.destroy()
+            return "break"
 
         btn_confirm = None
         if confirm_callback is not None:
@@ -1315,9 +1325,22 @@ class VideoThumbnailPlayer(
 
         # Keyboard shortcuts for all universal dialogs:
         # Enter = confirm, Escape = cancel
-        dialog_window.bind("<Return>", lambda e: on_confirm() if btn_confirm is not None else None)
+        def _confirm_from_key(_event=None):
+            if btn_confirm is not None:
+                return on_confirm()
+            return "break"
+
+        dialog_window.bind("<Return>", _confirm_from_key)
+        dialog_window.bind("<KP_Enter>", _confirm_from_key)
+        if input_field:
+            input_entry.bind("<Return>", _confirm_from_key)
+            input_entry.bind("<KP_Enter>", _confirm_from_key)
         if btn_cancel is not None:
-            dialog_window.bind("<Escape>", lambda e: btn_cancel.invoke())
+            def _cancel_from_key(_event=None):
+                btn_cancel.invoke()
+                return "break"
+
+            dialog_window.bind("<Escape>", _cancel_from_key)
 
         # Input dialogs: robust focus on Windows / CustomTkinter (parent can steal focus early).
         if input_field:
@@ -2682,15 +2705,22 @@ class VideoThumbnailPlayer(
         Prompts the user to enter a name for a new virtual library
         and creates it.
         """
-        # Ask the user for the name of the new virtual library
-        folder_name = simpledialog.askstring("New Virtual Library", "Enter name for the virtual library:")
-        
-        # If a name was provided (user didn't cancel)
-        if folder_name:
+        def on_confirm(folder_name):
+            folder_name = str(folder_name or "").strip()
+            if not folder_name:
+                return
             # Call the function to create the underlying folder/structure
             create_virtual_folder(folder_name)
             # Refresh the list of virtual libraries in the UI
             self.refresh_virtual_libraries()
+
+        self.universal_dialog(
+            title="New Virtual Library",
+            message="Enter name for the virtual library:",
+            confirm_callback=on_confirm,
+            input_field=True,
+            default_input="",
+        )
 
     def add_to_virtual_library(self, thumbnails, library_name):
         # Extract file paths from the selected thumbnails
@@ -3908,6 +3938,10 @@ class VideoThumbnailPlayer(
         """
  
         self._last_menu_interaction_time = time.time()
+        active_video = getattr(self, "current_video_window", None) or getattr(self, "active_player", None)
+        suppress_click = getattr(active_video, "_suppress_global_click_toggle", None)
+        if callable(suppress_click):
+            suppress_click(0.6)
 
     def _focus_back_after_dialog(self):
         """Return focus to main window after a dialog (keyword, etc.) closes."""

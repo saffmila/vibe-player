@@ -361,6 +361,10 @@ class VideoPlayer:
         self._cached_player_owner_hwnd: int | None = None
         self._opening_raise_guard = False
         self._open_full_app_hover_throttle_ts = 0.0
+        self._popup_menu_active = False
+        self._ignore_global_click_until = 0.0
+        self._ignore_next_global_lmb_after_menu = False
+        self._ignore_next_global_lmb_after_menu_until = 0.0
         self._timer_after_id = None
         self._slider_poll_after_id = None
         self._opening_raise_after_id = None
@@ -1763,6 +1767,12 @@ class VideoPlayer:
                     logging.info(f"Added bookmark: {name} @ {current_time}s")
                     logging.info("[DEBUG] ⟳ refresh bookmark markers kvůli novému bookmarku")
                     self._refresh_bookmark_marker_views()
+                    ctrl = getattr(self, "controller", None)
+                    if ctrl and hasattr(ctrl, "refresh_bookmark_manager_if_open"):
+                        try:
+                            ctrl.refresh_bookmark_manager_if_open(self.video_path)
+                        except Exception as e:
+                            logging.info("[Bookmark] manager refresh failed after add: %s", e)
 
         # Use the controller's universal_dialog
         if hasattr(self.controller, 'universal_dialog'):
@@ -1771,7 +1781,8 @@ class VideoPlayer:
                 message="Enter bookmark name:",
                 confirm_callback=on_confirm,
                 input_field=True,
-                default_input=default_name
+                default_input=default_name,
+                modal=False,
             )
         else:
             logging.info("universal_dialog not available")
@@ -3347,6 +3358,7 @@ class VideoPlayer:
 
     def show_video_menu(self, event=None, *, x_root=None, y_root=None):
         menu = create_menu(self.controller, self.video_window)
+        self._guard_menu_commands(menu)
 
         if callable(getattr(self.controller, "open_library", None)):
             menu.add_command(label="Open full app", command=self.controller.open_library)
@@ -3385,6 +3397,7 @@ class VideoPlayer:
         menu.add_separator()
 
         speed_menu = tk.Menu(menu, tearoff=0)
+        self._guard_menu_commands(speed_menu)
         speeds = [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2]
         for spd in speeds:
             label = f"{'▶  ' if spd == self.current_speed else '      '}{spd:.1f}x"
@@ -3408,6 +3421,7 @@ class VideoPlayer:
             y = int(self.video_menu_button.winfo_rooty() + self.video_menu_button.winfo_height())
         x, y = self._menu_popup_xy(x, y)
         try:
+            self._begin_popup_menu_guard(menu)
             menu.tk_popup(x, y)
         finally:
             try:
@@ -3425,6 +3439,7 @@ class VideoPlayer:
         """
         # Create the menu using the helper function, parented to the controller
         menu = create_menu(self.controller, self.controls_frame)
+        self._guard_menu_commands(menu)
 
         # Add commands that call existing methods within this VideoPlayer instance
         menu.add_command(label="Set Loop Start", command=self.set_loop_start)
@@ -3437,7 +3452,14 @@ class VideoPlayer:
         y = self.loop_menu_button.winfo_rooty() + self.loop_menu_button.winfo_height()
 
         # Display the menu at the calculated position
-        menu.tk_popup(x, y)
+        try:
+            self._begin_popup_menu_guard(menu)
+            menu.tk_popup(x, y)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
 
 
     def configure_buttons_with_icons(self):
@@ -3650,6 +3672,18 @@ class VideoPlayer:
             px, py = int(x), int(y)
         if not self._pointer_on_video_surface(px, py):
             return
+        if getattr(self, "_ignore_next_global_lmb_after_menu", False):
+            if time.monotonic() <= float(getattr(self, "_ignore_next_global_lmb_after_menu_until", 0.0) or 0.0):
+                self._ignore_next_global_lmb_after_menu = False
+                self._ignore_next_global_lmb_after_menu_until = 0.0
+                self._suppress_global_click_toggle(0.25)
+                logging.info("[pynput] ignored first LMB after popup menu at (%s,%s)", px, py)
+                return
+            self._ignore_next_global_lmb_after_menu = False
+            self._ignore_next_global_lmb_after_menu_until = 0.0
+        if self._global_click_toggle_suppressed():
+            logging.info("[pynput] click ignored while popup menu interaction is active at (%s,%s)", px, py)
+            return
         if not self._screen_click_hits_player_window(px, py):
             logging.debug(
                 "[pynput] click at (%s,%s) over player rect but another window is on top — ignored",
@@ -3659,6 +3693,80 @@ class VideoPlayer:
             return
         logging.info("[DEBUG] Global mouse click on video at (%s,%s)", px, py)
         self.toggle_play()
+
+    def _guard_menu_commands(self, menu):
+        """Wrap menu commands so their selection click cannot toggle video playback."""
+        for method_name in ("add_command", "add_checkbutton", "add_radiobutton"):
+            original = getattr(menu, method_name, None)
+            if original is None:
+                continue
+
+            def wrapper(*args, _original=original, **kwargs):
+                command = kwargs.get("command")
+                if callable(command):
+                    def guarded_command(*a, _command=command, **kw):
+                        self._suppress_global_click_toggle(0.6)
+                        return _command(*a, **kw)
+
+                    kwargs["command"] = guarded_command
+                return _original(*args, **kwargs)
+
+            setattr(menu, method_name, wrapper)
+        return menu
+
+    def _begin_popup_menu_guard(self, menu=None):
+        """Ignore global player clicks while a popup menu is open above the video."""
+        self._popup_menu_active = True
+        self._ignore_next_global_lmb_after_menu = True
+        self._ignore_next_global_lmb_after_menu_until = time.monotonic() + 10.0
+        self._suppress_global_click_toggle(0.8)
+        if menu is not None:
+            try:
+                menu.bind("<Unmap>", lambda _e: self._schedule_end_popup_menu_guard(), add="+")
+            except Exception:
+                pass
+            try:
+                self.video_window.after(100, lambda m=menu: self._poll_popup_menu_guard(m))
+            except Exception:
+                pass
+        try:
+            self.video_window.after(10000, self._end_popup_menu_guard)
+        except Exception:
+            pass
+
+    def _poll_popup_menu_guard(self, menu):
+        try:
+            menu_open = bool(menu.winfo_ismapped())
+        except Exception:
+            menu_open = False
+        if menu_open:
+            try:
+                self.video_window.after(250, lambda m=menu: self._poll_popup_menu_guard(m))
+                return
+            except Exception:
+                pass
+        self._schedule_end_popup_menu_guard()
+
+    def _schedule_end_popup_menu_guard(self):
+        self._suppress_global_click_toggle(0.35)
+        try:
+            self.video_window.after(350, self._end_popup_menu_guard)
+        except Exception:
+            self._end_popup_menu_guard()
+
+    def _end_popup_menu_guard(self):
+        self._popup_menu_active = False
+
+    def _suppress_global_click_toggle(self, seconds: float = 0.35):
+        self._ignore_global_click_until = max(
+            float(getattr(self, "_ignore_global_click_until", 0.0) or 0.0),
+            time.monotonic() + float(seconds),
+        )
+
+    def _global_click_toggle_suppressed(self) -> bool:
+        if getattr(self, "_popup_menu_active", False):
+            return True
+        return time.monotonic() < float(getattr(self, "_ignore_global_click_until", 0.0) or 0.0)
 
     def _global_rmb_show_menu_if_over_video(self) -> None:
         """VLC HWND swallows Tk Button-3 — pynput only signals; use Tk pointer for hit-test."""
