@@ -25,6 +25,7 @@ from bookmark_manager import BookmarkManager, DEFAULT_BOOKMARK_COLOR
 from file_operations import (
     create_video_thumbnail,
     get_ffmpeg_path,
+    get_ffprobe_path,
     get_video_duration_mediainfo,
     probe_first_video_stream,
 )
@@ -237,7 +238,7 @@ class VideoExportDialog(ctk.CTkToplevel):
             )
             self.format_menu.pack(pady=(0, 5))
 
-            ctk.CTkCheckBox(custom_tab, text="Include audio (not supported yet)", variable=self.sound_var, state="disabled").pack(pady=(0, 5))
+            ctk.CTkCheckBox(custom_tab, text="Include audio", variable=self.sound_var).pack(pady=(0, 5))
 
             self.tabs.set("Lossless")
             self._update_export_duration_label()
@@ -492,6 +493,7 @@ class VideoExportDialog(ctk.CTkToplevel):
                     "width": int(self.width_var.get()),
                     "height": int(self.height_var.get()),
                     "fps": float(self.fps_var.get()),
+                    "include_audio": bool(self.sound_var.get()),
                     "start_time": export_start,
                     "end_time": export_end,
                     "export_mode": export_mode,
@@ -1882,72 +1884,302 @@ class TimelineBarWidget(ctk.CTkFrame):
             self.after(0, lambda err=str(e): messagebox.showerror("Export Error", err))
 
     def _convert_worker_custom_segments(self, input_path, save_path, settings, video_name, set_status, segments):
-        cap = None
-        out = None
         try:
-            cap = cv2.VideoCapture(input_path)
-            if not cap.isOpened():
-                raise RuntimeError("Cannot open video file.")
+            ffmpeg_bin = get_ffmpeg_path()
+        except FileNotFoundError as fnf:
+            raise RuntimeError(str(fnf)) from fnf
 
-            fourcc_map = {
-                ".mp4": cv2.VideoWriter_fourcc(*"mp4v"),
-                ".avi": cv2.VideoWriter_fourcc(*"XVID"),
-                ".mov": cv2.VideoWriter_fourcc(*"mp4v"),
-                ".mkv": cv2.VideoWriter_fourcc(*"mp4v"),
-                ".webm": cv2.VideoWriter_fourcc(*"VP80"),
-            }
-            target_ext = (os.path.splitext(save_path)[1] or settings["ext"]).lower()
-            fourcc = fourcc_map.get(target_ext, cv2.VideoWriter_fourcc(*"mp4v"))
-            out = cv2.VideoWriter(save_path, fourcc, settings["fps"], (settings["width"], settings["height"]))
-            if not out.isOpened():
-                raise RuntimeError("Cannot open output writer.")
+        width = int(settings["width"])
+        height = int(settings["height"])
+        fps = float(settings["fps"])
+        if width <= 0 or height <= 0 or fps <= 0:
+            raise RuntimeError("Width, height, and FPS must be positive values.")
 
-            fps_src = cap.get(cv2.CAP_PROP_FPS) or 25.0
-            total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
-            full_duration = (total_frames / fps_src) if fps_src > 0 else 0
-            clean_segments = []
-            for seg in segments:
-                s = seg.get("start")
-                e = seg.get("end")
-                s = 0.0 if s is None else float(s)
-                e = full_duration if e is None else float(e)
-                if e > s:
-                    clean_segments.append({"start": s, "end": e})
-            if not clean_segments:
-                clean_segments = [{"start": 0.0, "end": full_duration if full_duration > 0 else 0.0}]
+        try:
+            full_duration = float(get_video_duration_mediainfo(input_path) or 0.0)
+        except Exception:
+            full_duration = 0.0
 
-            total_ms = sum(max(0.0, seg["end"] - seg["start"]) for seg in clean_segments) * 1000.0
-            total_ms = max(total_ms, 1.0)
-            processed_ms = 0.0
+        clean_segments = []
+        for seg in segments:
+            try:
+                start = 0.0 if seg.get("start") is None else float(seg.get("start"))
+                end = full_duration if seg.get("end") is None and full_duration > 0 else seg.get("end")
+                end = None if end is None else float(end)
+            except (TypeError, ValueError, AttributeError):
+                continue
+            start = max(0.0, start)
+            if end is None or end > start:
+                clean_segments.append({"start": start, "end": end})
+
+        if not clean_segments:
+            clean_segments = [{"start": 0.0, "end": full_duration if full_duration > 0 else None}]
+
+        total_seconds = 0.0
+        for seg in clean_segments:
+            if seg["end"] is not None:
+                total_seconds += max(0.0, seg["end"] - seg["start"])
+        if total_seconds <= 0 and full_duration > 0:
+            total_seconds = full_duration
+
+        include_audio = bool(settings.get("include_audio", True))
+        if len(clean_segments) == 1:
+            cmd = self._build_custom_ffmpeg_segment_command(
+                ffmpeg_bin,
+                input_path,
+                save_path,
+                settings,
+                clean_segments[0],
+                include_audio,
+            )
+        else:
+            cmd = self._build_custom_ffmpeg_merged_command(
+                ffmpeg_bin,
+                input_path,
+                save_path,
+                settings,
+                clean_segments,
+                include_audio and self._has_exportable_audio_stream(input_path),
+            )
+
+        self._run_custom_ffmpeg_command(cmd, save_path, video_name, set_status, total_seconds, len(clean_segments))
+
+    def _build_custom_ffmpeg_segment_command(self, ffmpeg_bin, input_path, save_path, settings, segment, include_audio):
+        cmd = [
+            ffmpeg_bin,
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-y",
+            "-nostdin",
+        ]
+        if segment["start"] > 0:
+            cmd += ["-ss", f"{segment['start']:.6f}"]
+        cmd += ["-i", input_path]
+        if segment["end"] is not None:
+            duration = segment["end"] - segment["start"]
+            if duration > 0:
+                cmd += ["-t", f"{duration:.6f}"]
+
+        cmd += [
+            "-map",
+            "0:v:0",
+        ]
+        if include_audio:
+            cmd += ["-map", "0:a?"]
+        cmd += [
+            "-vf",
+            self._custom_export_video_filter(settings),
+            *self._custom_export_codec_args(save_path, settings),
+            *(self._custom_export_audio_args(save_path, settings) if include_audio else ["-an"]),
+            "-progress",
+            "pipe:1",
+            save_path,
+        ]
+        return cmd
+
+    def _build_custom_ffmpeg_merged_command(self, ffmpeg_bin, input_path, save_path, settings, segments, include_audio):
+        filter_parts = []
+        video_concat_inputs = []
+        audio_concat_inputs = []
+        for idx, seg in enumerate(segments):
+            trim = f"trim=start={seg['start']:.6f}"
+            if seg["end"] is not None:
+                trim += f":end={seg['end']:.6f}"
+            label = f"v{idx}"
+            filter_parts.append(
+                f"[0:v:0]{trim},setpts=PTS-STARTPTS,{self._custom_export_video_filter(settings)}[{label}]"
+            )
+            video_concat_inputs.append(f"[{label}]")
+            if include_audio:
+                atrim = f"atrim=start={seg['start']:.6f}"
+                if seg["end"] is not None:
+                    atrim += f":end={seg['end']:.6f}"
+                audio_label = f"a{idx}"
+                filter_parts.append(f"[0:a:0]{atrim},asetpts=PTS-STARTPTS[{audio_label}]")
+                audio_concat_inputs.append(f"[{audio_label}]")
+
+        filter_complex = ";".join(filter_parts)
+        if include_audio:
+            concat_inputs = "".join(
+                f"{video_concat_inputs[idx]}{audio_concat_inputs[idx]}" for idx in range(len(segments))
+            )
+            filter_complex += f";{concat_inputs}concat=n={len(segments)}:v=1:a=1[v][a]"
+        else:
+            filter_complex += f";{''.join(video_concat_inputs)}concat=n={len(segments)}:v=1:a=0[v]"
+
+        cmd = [
+            ffmpeg_bin,
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-y",
+            "-nostdin",
+            "-i",
+            input_path,
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[v]",
+        ]
+        if include_audio:
+            cmd += ["-map", "[a]"]
+        cmd += [
+            *self._custom_export_codec_args(save_path, settings),
+            *(self._custom_export_audio_args(save_path, settings) if include_audio else ["-an"]),
+            "-progress",
+            "pipe:1",
+            save_path,
+        ]
+        return cmd
+
+    def _custom_export_video_filter(self, settings):
+        width = int(settings["width"])
+        height = int(settings["height"])
+        fps = float(settings["fps"])
+        fps_text = f"{fps:g}"
+        return f"scale={width}:{height}:flags=lanczos,fps={fps_text},format=yuv420p"
+
+    def _custom_export_codec_args(self, save_path, settings):
+        target_ext = (os.path.splitext(save_path)[1] or settings["ext"]).lower()
+        if target_ext == ".webm":
+            return ["-c:v", "libvpx-vp9", "-crf", "30", "-b:v", "0", "-pix_fmt", "yuv420p"]
+        if target_ext == ".avi":
+            return ["-c:v", "mpeg4", "-q:v", "3", "-pix_fmt", "yuv420p"]
+
+        args = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"]
+        if target_ext in (".mp4", ".mov", ".m4v"):
+            args += ["-movflags", "+faststart"]
+        return args
+
+    def _custom_export_audio_args(self, save_path, settings):
+        target_ext = (os.path.splitext(save_path)[1] or settings["ext"]).lower()
+        if target_ext == ".webm":
+            return ["-c:a", "libopus", "-b:a", "160k"]
+        if target_ext == ".avi":
+            return ["-c:a", "libmp3lame", "-b:a", "192k"]
+        return ["-c:a", "aac", "-b:a", "192k"]
+
+    def _has_exportable_audio_stream(self, input_path):
+        try:
+            ffprobe_bin = get_ffprobe_path()
+        except FileNotFoundError:
+            return False
+        cmd = [
+            ffprobe_bin,
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "json",
+            input_path,
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
+                startupinfo=_SUBPROCESS_STARTUPINFO,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return False
+            data = json.loads(result.stdout)
+            return bool(data.get("streams"))
+        except Exception:
+            return False
+
+    def _run_custom_ffmpeg_command(self, cmd, save_path, video_name, set_status, total_seconds, segment_count):
+        proc = None
+        stderr_thread = None
+        stderr_lines: list[str] = []
+        try:
+            logging.info("[Export][Custom] %s", " ".join(cmd))
+            set_status(f"Exporting video: {video_name}  0%")
+
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                startupinfo=_SUBPROCESS_STARTUPINFO,
+            )
+
+            def _drain_stderr(pipe, sink):
+                try:
+                    for line in pipe:
+                        sink.append(line.rstrip("\r\n"))
+                except Exception:
+                    pass
+
+            if proc.stderr is not None:
+                stderr_thread = threading.Thread(
+                    target=_drain_stderr,
+                    args=(proc.stderr, stderr_lines),
+                    daemon=True,
+                )
+                stderr_thread.start()
+
             last_pct = -1
-
-            for i, seg in enumerate(clean_segments, start=1):
-                start_ms = seg["start"] * 1000.0
-                end_ms = seg["end"] * 1000.0
-                cap.set(cv2.CAP_PROP_POS_MSEC, start_ms)
-                while True:
-                    current_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
-                    if current_msec > end_ms:
-                        break
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    resized = cv2.resize(frame, (settings["width"], settings["height"]))
-                    out.write(resized)
-                    pct = int(((processed_ms + max(0.0, current_msec - start_ms)) / total_ms) * 100)
+            time_re = re.compile(r"^out_time_ms=(-?\d+)")
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                m = time_re.match(line)
+                if m and total_seconds > 0:
+                    out_us = int(m.group(1))
+                    if out_us < 0:
+                        continue
+                    out_seconds = out_us / 1_000_000.0
+                    pct = int(out_seconds / total_seconds * 100)
                     pct = max(0, min(100, pct))
                     if pct != last_pct:
                         last_pct = pct
-                        if len(clean_segments) > 1:
-                            set_status(f"Exporting {video_name} (cut {i}/{len(clean_segments)})  {pct}%")
+                        if segment_count > 1:
+                            set_status(f"Exporting merged cuts: {video_name}  {pct}%")
                         else:
                             set_status(f"Exporting video: {video_name}  {pct}%")
-                processed_ms += max(0.0, end_ms - start_ms)
+                elif line == "progress=end":
+                    break
+
+            return_code = proc.wait()
+            if stderr_thread is not None:
+                stderr_thread.join(timeout=5)
+
+            if stderr_lines:
+                logging.warning(
+                    "[Export][Custom] FFmpeg stderr (%d lines):\n%s",
+                    len(stderr_lines),
+                    "\n".join(stderr_lines[-50:]),
+                )
+
+            if return_code != 0:
+                detail = "\n".join(stderr_lines[-12:]) or f"FFmpeg exited with code {return_code}"
+                raise RuntimeError(detail)
+
+            out_size = os.path.getsize(save_path) if os.path.isfile(save_path) else 0
+            if out_size < 1024:
+                detail = "\n".join(stderr_lines[-12:]) or "(no FFmpeg stderr)"
+                raise RuntimeError(f"Output file looks empty or corrupted ({out_size} bytes).\n{detail}")
+
+            out_vinfo = probe_first_video_stream(save_path)
+            if not out_vinfo or not out_vinfo.get("codec_name"):
+                detail = "\n".join(stderr_lines[-12:]) or "(no FFmpeg stderr)"
+                raise RuntimeError(f"Export finished, but the output has no readable video stream.\n{detail}")
         finally:
-            if cap is not None:
-                cap.release()
-            if out is not None:
-                out.release()
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            if stderr_thread is not None and stderr_thread.is_alive():
+                stderr_thread.join(timeout=2)
 
     def _convert_worker_lossless(self, input_path, save_path, settings, video_name, set_status, show_done=True):
         """
