@@ -28,7 +28,7 @@ from file_operations import (
     get_video_duration_mediainfo,
     probe_first_video_stream,
 )
-from utils import create_menu, parse_srt_file
+from utils import Tooltip, create_menu, parse_srt_file
 
 
 # Hide subprocess console windows on Windows (matches the pattern used in file_operations.py).
@@ -37,42 +37,6 @@ if os.name == "nt":
     _SUBPROCESS_STARTUPINFO = subprocess.STARTUPINFO()
     _SUBPROCESS_STARTUPINFO.dwFlags |= subprocess.STARTF_USESHOWWINDOW
     _SUBPROCESS_STARTUPINFO.wShowWindow = subprocess.SW_HIDE
-
-
-class Tooltip:
-    """Lightweight tooltip for icon-only controls."""
-
-    def __init__(self, widget, text):
-        self.widget = widget
-        self.text = text
-        self.tip_window = None
-        self.widget.bind("<Enter>", self._show, add="+")
-        self.widget.bind("<Leave>", self._hide, add="+")
-
-    def _show(self, _event=None):
-        if self.tip_window is not None:
-            return
-        x = self.widget.winfo_rootx() + 10
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
-        self.tip_window = tw = tk.Toplevel(self.widget)
-        tw.overrideredirect(True)
-        tw.geometry(f"+{x}+{y}")
-        tk.Label(
-            tw,
-            text=self.text,
-            bg="#1f1f1f",
-            fg="#f2f2f2",
-            relief="solid",
-            borderwidth=1,
-            padx=6,
-            pady=3,
-            font=("Segoe UI", 9),
-        ).pack()
-
-    def _hide(self, _event=None):
-        if self.tip_window is not None:
-            self.tip_window.destroy()
-            self.tip_window = None
 
 
 class VideoExportDialog(ctk.CTkToplevel):

@@ -15,7 +15,7 @@ import sys
 import ctypes
 
 # Import the create_menu utility
-from utils import create_menu
+from utils import Tooltip, create_menu
 
 import tkinterdnd2 as dnd
 from vtp_constants import VIDEO_FORMATS
@@ -26,6 +26,10 @@ _PLAYLIST_BG = "#1A1C1E"
 _PLAYLIST_LIST_BG = "#2B2B2B"
 _PLAYLIST_BORDER = "#1A1C1E"
 _PLAYLIST_TEXT = "#F2F4F8"
+_PLAYLIST_WINDOW_WIDTH = 360
+_PLAYLIST_WINDOW_HEIGHT = 560
+_PLAYLIST_MIN_WIDTH = 320
+_PLAYLIST_MIN_HEIGHT = 360
 
 
 def _resolve_toplevel_hwnd(window) -> int | None:
@@ -110,7 +114,8 @@ class PlaylistManager:
         logging.info("Creating a new playlist window.")
         self.playlist_window = ctk.CTkToplevel(self.parent)
         self.playlist_window.title("Playlist")
-        self.playlist_window.geometry("400x600")
+        self.playlist_window.geometry(f"{_PLAYLIST_WINDOW_WIDTH}x{_PLAYLIST_WINDOW_HEIGHT}")
+        self.playlist_window.minsize(_PLAYLIST_MIN_WIDTH, _PLAYLIST_MIN_HEIGHT)
         self.playlist_window.configure(fg_color=_PLAYLIST_BG)
         self.is_playlist_open = True
         self.playlist_window.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -132,6 +137,8 @@ class PlaylistManager:
             border_width=0,
         )
         self.playlist_main_frame.pack(fill=tk.BOTH, expand=True)
+        self.playlist_main_frame.grid_columnconfigure(0, weight=1)
+        self.playlist_main_frame.grid_rowconfigure(0, weight=1)
         main_frame = self.playlist_main_frame
         logging.info("Main frame created.")
 
@@ -144,7 +151,7 @@ class PlaylistManager:
             highlightthickness=0,
             borderwidth=0,
         )
-        self.playlist_box.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.playlist_box.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
         
         # Bind events
         self.playlist_box.bind("<Double-1>", self._on_double_click)
@@ -228,37 +235,41 @@ class PlaylistManager:
             corner_radius=0,
             border_width=0,
         )
-        button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=(0, 5))
-        button_frame.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        button_frame.grid(row=1, column=0, sticky="ew", padx=6, pady=(0, 6))
+        button_frame.grid_columnconfigure(0, weight=1)
+        button_frame.grid_columnconfigure((1, 2, 3), weight=0)
 
-        # Style dictionary for the buttons, inspired by TimelineBarWidget
+        # Compact icon buttons, matching BookmarkManager.
         btn_style = {
-            "font": ("Segoe UI", 10),
-            "fg": "#dddddd",
-            "bg": "#333333",
-            "activebackground": "#444444",
-            "activeforeground": "white",
-            "relief": "flat",
-            "padx": 8,
-            "pady": 4,
-            "borderwidth": 0,
-            "highlightthickness": 0
+            "font": ("Segoe UI", 12),
+            "fg_color": "#333333",
+            "hover_color": "#444444",
+            "text_color": "#dddddd",
+            "corner_radius": 3,
+            "height": 22,
+            "width": 34,
         }
 
-        # --- Button Definitions using tk.Button and the shared style ---
-        btn_add = tk.Button(button_frame, text="✚ Add", command=self.add_files_dialog, **btn_style)
-        btn_rem = tk.Button(button_frame, text="✖ Remove", command=self.remove_selected, **btn_style)
-        btn_sort = tk.Button(button_frame, text="⇅ Sort", command=self.show_sort_menu, **btn_style)
-        btn_clear = tk.Button(button_frame, text="🗑 Clear", command=self.clear_playlist, **btn_style)
+        btn_add = ctk.CTkButton(button_frame, text="+ Add", command=self.add_files_dialog, **btn_style)
+        btn_rem = ctk.CTkButton(button_frame, text="×", command=self.remove_selected, **btn_style)
+        btn_sort = ctk.CTkButton(button_frame, text="⇅", command=self.show_sort_menu, **btn_style)
+        btn_clear = ctk.CTkButton(button_frame, text="🗑", command=self.clear_playlist, **btn_style)
+        btn_add.configure(width=58)
 
         # --- Place buttons in the grid ---
-        btn_add.grid(row=0, column=0, padx=1, pady=1, sticky="ew")
-        btn_rem.grid(row=0, column=1, padx=1, pady=1, sticky="ew")
-        btn_sort.grid(row=0, column=2, padx=1, pady=1, sticky="ew")
-        btn_clear.grid(row=0, column=3, padx=1, pady=1, sticky="ew")
+        btn_add.grid(row=0, column=0, padx=1, pady=1, sticky="w")
+        btn_rem.grid(row=0, column=1, padx=1, pady=1, sticky="e")
+        btn_sort.grid(row=0, column=2, padx=1, pady=1, sticky="e")
+        btn_clear.grid(row=0, column=3, padx=1, pady=1, sticky="e")
         
         # Store the sort button to anchor the menu to it
         self.sort_button = btn_sort
+        self._button_tooltips = [
+            Tooltip(btn_add, "Add Files"),
+            Tooltip(btn_rem, "Remove Selected"),
+            Tooltip(btn_sort, "Sort Playlist"),
+            Tooltip(btn_clear, "Clear Playlist"),
+        ]
 
    
 

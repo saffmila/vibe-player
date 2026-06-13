@@ -13,6 +13,8 @@ from typing import Dict, List, Optional
 
 import customtkinter as ctk
 
+from utils import Tooltip
+
 DEFAULT_BOOKMARK_COLOR = "#FFFFFF"
 LEGACY_AUTO_BOOKMARK_COLORS = {"#FFA500", "#FFD700", "#FFFFB3"}
 BOOKMARK_MANAGER_MIN_WIDTH = 320
@@ -268,47 +270,64 @@ class BookmarkManager:
             "width": 34,
         }
 
-        ctk.CTkButton(
+        btn_add = ctk.CTkButton(
             self.button_panel,
-            text="+",
+            text="+ Add",
             command=self.add_bookmark,
             **btn_style,
-        ).grid(row=0, column=0, padx=1, pady=1, sticky="w")
+        )
 
-        ctk.CTkButton(
+        btn_color = ctk.CTkButton(
             self.button_panel,
             text="🎨",
             command=self.set_selected_bookmark_color,
             **btn_style,
-        ).grid(row=0, column=1, padx=1, pady=1, sticky="e")
+        )
 
-        ctk.CTkButton(
+        btn_prev = ctk.CTkButton(
             self.button_panel,
             text="◀",
             command=self.skip_to_previous,
             **btn_style,
-        ).grid(row=0, column=2, padx=1, pady=1, sticky="e")
+        )
 
-        ctk.CTkButton(
+        btn_next = ctk.CTkButton(
             self.button_panel,
             text="▶",
             command=self.skip_to_next,
             **btn_style,
-        ).grid(row=0, column=3, padx=1, pady=1, sticky="e")
+        )
 
-        ctk.CTkButton(
+        btn_delete = ctk.CTkButton(
             self.button_panel,
             text="×",
             command=self.delete_selected_bookmark,
             **btn_style,
-        ).grid(row=0, column=4, padx=1, pady=1, sticky="e")
+        )
 
-        ctk.CTkButton(
+        btn_clear = ctk.CTkButton(
             self.button_panel,
             text="🗑",
             command=self.clear_all_bookmarks,
             **btn_style,
-        ).grid(row=0, column=5, padx=1, pady=1, sticky="e")
+        )
+        btn_add.configure(width=58)
+
+        btn_add.grid(row=0, column=0, padx=1, pady=1, sticky="w")
+        btn_color.grid(row=0, column=1, padx=1, pady=1, sticky="e")
+        btn_prev.grid(row=0, column=2, padx=1, pady=1, sticky="e")
+        btn_next.grid(row=0, column=3, padx=1, pady=1, sticky="e")
+        btn_delete.grid(row=0, column=4, padx=1, pady=1, sticky="e")
+        btn_clear.grid(row=0, column=5, padx=1, pady=1, sticky="e")
+
+        self._button_tooltips = [
+            Tooltip(btn_add, "Add Bookmark"),
+            Tooltip(btn_color, "Set Bookmark Color"),
+            Tooltip(btn_prev, "Previous Bookmark"),
+            Tooltip(btn_next, "Next Bookmark"),
+            Tooltip(btn_delete, "Delete Selected Bookmark"),
+            Tooltip(btn_clear, "Clear All Bookmarks"),
+        ]
 
     def _selected_bookmark_time(self) -> Optional[float]:
         """Return the source timestamp (seconds) for the listbox selection, if any."""

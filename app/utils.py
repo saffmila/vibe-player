@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import subprocess
+import tkinter as tk
 from tkinter import Menu
 from typing import Any, Callable
 
@@ -30,6 +31,114 @@ _OPENCV_FRAGILE_VIDEO_EXTS = (
     ".mts",
     ".m2ts",
 )
+
+
+class Tooltip:
+    """Lightweight tooltip for compact icon controls."""
+
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tip_window = None
+        self.widget.bind("<Enter>", self._show, add="+")
+        self.widget.bind("<Leave>", self._hide, add="+")
+        self.widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _show(self, _event=None):
+        if self.tip_window is not None:
+            return
+
+        self.tip_window = tw = tk.Toplevel(self.widget)
+        tw.withdraw()
+        tw.overrideredirect(True)
+        tw.configure(bg="#0f1115", highlightbackground="#6b7280", highlightthickness=1)
+        try:
+            tw.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+
+        tk.Label(
+            tw,
+            text=self.text,
+            bg="#0f1115",
+            fg="#ffffff",
+            relief="flat",
+            borderwidth=0,
+            padx=8,
+            pady=4,
+            font=("Segoe UI", 9),
+        ).pack()
+        tw.update_idletasks()
+
+        x, y = self._position_for(tw.winfo_reqwidth(), tw.winfo_reqheight())
+        tw.geometry(f"+{x}+{y}")
+        tw.deiconify()
+        tw.lift()
+
+    def _hide(self, _event=None):
+        if self.tip_window is not None:
+            self.tip_window.destroy()
+            self.tip_window = None
+
+    def _position_for(self, tip_width: int, tip_height: int) -> tuple[int, int]:
+        widget_x = self.widget.winfo_rootx()
+        widget_y = self.widget.winfo_rooty()
+        widget_w = self.widget.winfo_width()
+        widget_h = self.widget.winfo_height()
+
+        monitor_x, monitor_y, monitor_w, monitor_h = self._monitor_bounds(
+            widget_x + widget_w // 2,
+            widget_y + widget_h // 2,
+        )
+        margin = 8
+
+        x = widget_x + (widget_w - tip_width) // 2
+        min_x = monitor_x + margin
+        max_x = monitor_x + monitor_w - tip_width - margin
+        if max_x < min_x:
+            max_x = min_x
+        x = max(min_x, min(x, max_x))
+
+        above_y = widget_y - tip_height - 6
+        below_y = widget_y + widget_h + 6
+        monitor_bottom = monitor_y + monitor_h
+        if above_y >= monitor_y + margin:
+            y = above_y
+        elif below_y + tip_height <= monitor_bottom - margin:
+            y = below_y
+        else:
+            y = max(monitor_y + margin, min(below_y, monitor_bottom - tip_height - margin))
+        return int(x), int(y)
+
+    def _monitor_bounds(self, x: int, y: int) -> tuple[int, int, int, int]:
+        try:
+            from screeninfo import get_monitors
+
+            monitors = get_monitors()
+            for monitor in monitors:
+                if monitor.x <= x < monitor.x + monitor.width and monitor.y <= y < monitor.y + monitor.height:
+                    return monitor.x, monitor.y, monitor.width, monitor.height
+            if monitors:
+                nearest = min(
+                    monitors,
+                    key=lambda m: (
+                        max(m.x - x, 0, x - (m.x + m.width)) ** 2
+                        + max(m.y - y, 0, y - (m.y + m.height)) ** 2
+                    ),
+                )
+                return nearest.x, nearest.y, nearest.width, nearest.height
+        except Exception:
+            pass
+
+        try:
+            return (
+                self.widget.winfo_vrootx(),
+                self.widget.winfo_vrooty(),
+                self.widget.winfo_vrootwidth(),
+                self.widget.winfo_vrootheight(),
+            )
+        except tk.TclError:
+            return 0, 0, self.widget.winfo_screenwidth(), self.widget.winfo_screenheight()
 
 
 def _get_local_ffprobe_path() -> str:
