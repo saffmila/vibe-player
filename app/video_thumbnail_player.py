@@ -595,7 +595,7 @@ class VideoThumbnailPlayer(
             orient=tk.HORIZONTAL,
             bg="#2d2d2d",
             bd=0,
-            sashwidth=2,
+            sashwidth=10,
             showhandle=False,
             relief='flat'
         )
@@ -608,7 +608,7 @@ class VideoThumbnailPlayer(
    
        
         # Tree + InfoPanel in PanedWindow for resizable split
-        self.left_split = tk.PanedWindow(self.left_frame, orient=tk.VERTICAL, bg="#2d2d2d")
+        self.left_split = tk.PanedWindow(self.left_frame, orient=tk.VERTICAL, bg="#2d2d2d", sashwidth=10)
         self.left_split.pack(fill=ctk.BOTH, expand=True)
 
         self.tree_frame = ctk.CTkFrame(self.left_split, fg_color="#2d2d2d")
@@ -651,7 +651,7 @@ class VideoThumbnailPlayer(
         
         
         # Right split: thumbnails + timeline
-        self.right_split = tk.PanedWindow(self.right_frame, orient=tk.VERTICAL, bg="#2d2d2d", sashwidth=4)
+        self.right_split = tk.PanedWindow(self.right_frame, orient=tk.VERTICAL, bg="#2d2d2d", sashwidth=10)
         self.right_split.pack(fill=ctk.BOTH, expand=True)
 
         self.frame = ctk.CTkFrame(self.right_split, fg_color=self.BackroundColor, corner_radius=0)  # parent: right_split

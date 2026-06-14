@@ -18,7 +18,8 @@ from utils import Tooltip
 DEFAULT_BOOKMARK_COLOR = "#FFFFFF"
 LEGACY_AUTO_BOOKMARK_COLORS = {"#FFA500", "#FFD700", "#FFFFB3"}
 BOOKMARK_MANAGER_MIN_WIDTH = 320
-BOOKMARK_MANAGER_MIN_HEIGHT = 360
+BOOKMARK_MANAGER_DEFAULT_HEIGHT = 360
+BOOKMARK_MANAGER_MIN_HEIGHT = 180
 
 
 class BookmarkManager:
@@ -102,7 +103,7 @@ class BookmarkManager:
 
         self.window = ctk.CTkToplevel(self.parent)
         self.window.title("Bookmarks")
-        self.window.geometry(f"{BOOKMARK_MANAGER_MIN_WIDTH}x{BOOKMARK_MANAGER_MIN_HEIGHT}")
+        self.window.geometry(f"{BOOKMARK_MANAGER_MIN_WIDTH}x{BOOKMARK_MANAGER_DEFAULT_HEIGHT}")
         self.window.minsize(BOOKMARK_MANAGER_MIN_WIDTH, BOOKMARK_MANAGER_MIN_HEIGHT)
         self.window.protocol("WM_DELETE_WINDOW", self.on_close)
         self.window.attributes("-topmost", True)

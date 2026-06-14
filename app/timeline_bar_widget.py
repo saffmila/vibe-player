@@ -15,7 +15,7 @@ import tempfile
 import threading
 import tkinter as tk
 from functools import partial
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 
 import customtkinter as ctk
 import cv2
@@ -575,6 +575,11 @@ class TimelineBarWidget(ctk.CTkFrame):
 
         # Must exist before create_widgets — load_thumbnails() ends with redraw_timeline().
         self.marker_canvas_ids = {}
+        self._bookmark_drag_marker = None
+        self._bookmark_drag_start_x = None
+        self._bookmark_drag_start_y = None
+        self._bookmark_drag_original_marker = None
+        self._bookmark_drag_moved = False
 
         self.create_widgets()
         self.toggle_all_label = tk.StringVar(value="Show No Markers")
@@ -780,13 +785,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         duration = self._get_current_duration()
         active_player = getattr(self.controller, "current_video_window", None)
         seg_hit = self._get_segment_hover_at(cx, cy)
-        marker_under_cursor = None
-        nearby_items = self.canvas.find_overlapping(cx - 2, cy - 2, cx + 2, cy + 2)
-        for item_id in reversed(nearby_items):
-            marker = getattr(self, "marker_canvas_ids", {}).get(item_id)
-            if marker and marker.get("type") == "bookmark":
-                marker_under_cursor = marker
-                break
+        marker_under_cursor = self._bookmark_marker_at(cx, cy)
 
         menu = tk.Menu(
             self,
@@ -955,6 +954,10 @@ class TimelineBarWidget(ctk.CTkFrame):
         menu.add_command(label="Add Bookmark", command=lambda: self.add_bookmark_at(clicked_time))
         if marker_under_cursor:
             menu.add_command(
+                label=f"Edit Bookmark: {marker_under_cursor['label']}",
+                command=lambda m=marker_under_cursor: self.edit_bookmark(m),
+            )
+            menu.add_command(
                 label=f"Remove Bookmark: {marker_under_cursor['label']}",
                 command=lambda m=marker_under_cursor: self.remove_bookmark_at(m),
             )
@@ -985,28 +988,23 @@ class TimelineBarWidget(ctk.CTkFrame):
 
     def add_bookmark_at(self, timestamp):
             """Adds bookmark even if the player window is closed."""
-            # 🟢 Zjistíme, jestli máme přehrávač
-            active_player = getattr(self.controller, "current_video_window", None) or getattr(
-                self.controller, "active_player", None
-            )
             default_name = f"Marker {len(self.markers) + 1}"
 
             def on_confirm(name):
                 name = name.strip()
                 if not name: return
 
-                if active_player:
-                    # SCÉNÁŘ A: Přehrávač běží (standardní cesta)
-                    active_player.bookmarks.append({"name": name, "time": timestamp})
-                    active_player.save_bookmarks()
+                active_player = self._active_player_for_timeline_video()
+                if active_player and getattr(active_player, "bookmarks", None):
+                    current_bookmarks = list(active_player.bookmarks)
                 else:
-                    # SCÉNÁŘ B: Přehrávač JE ZAVŘENÝ
-                    # 1. Načteme stávající záložky z disku
                     current_bookmarks = self.load_bookmarks_for_path(self.video_path)
-                    # 2. Přidáme novou
-                    current_bookmarks.append({"name": name, "time": timestamp})
-                    # 3. Uložíme je zpět (použijeme pomocnou funkci níže)
-                    self.save_bookmarks_standalone(self.video_path, current_bookmarks)
+                current_bookmarks.append({"name": name, "time": timestamp})
+                self.save_bookmarks_standalone(self.video_path, current_bookmarks)
+                if active_player is not None:
+                    active_player.bookmarks = self._bookmarks_for_storage(current_bookmarks)
+                    if hasattr(active_player, "bookmark_file"):
+                        active_player.bookmark_file = os.path.splitext(self.video_path)[0] + "_bookmarks.json"
                 
                 # V obou případech aktualizujeme Timeline
                 self.update_bookmarks()
@@ -1014,7 +1012,12 @@ class TimelineBarWidget(ctk.CTkFrame):
                 self._refresh_bookmark_manager_if_open()
                 if active_player and hasattr(active_player, "update_loop_bar_display"):
                     active_player.update_loop_bar_display()
-                logging.info(f"Bookmark '{name}' added at {timestamp}s (Player active: {active_player is not None})")
+                logging.info(
+                    "Bookmark '%s' added at %ss (matching player active: %s)",
+                    name,
+                    timestamp,
+                    active_player is not None,
+                )
 
             # Spustíme dialog
             if hasattr(self.controller, 'universal_dialog'):
@@ -1060,27 +1063,156 @@ class TimelineBarWidget(ctk.CTkFrame):
                 normalized.append(entry)
             return normalized
 
+    def _active_player_for_timeline_video(self):
+            """Return the live player only when it belongs to this timeline video."""
+            want = self._timeline_norm_path(getattr(self, "video_path", None))
+            if not want:
+                return None
+            for candidate in (
+                getattr(self.controller, "current_video_window", None),
+                getattr(self.controller, "active_player", None),
+            ):
+                if candidate is None:
+                    continue
+                player_path = self._timeline_norm_path(getattr(candidate, "video_path", None))
+                if player_path == want:
+                    return candidate
+            return None
+
+    def _bookmark_source_for_timeline_video(self):
+            active_player = self._active_player_for_timeline_video()
+            disk_bookmarks = self.load_bookmarks_for_path(self.video_path)
+            if disk_bookmarks:
+                return disk_bookmarks, active_player
+            if active_player is not None and getattr(active_player, "bookmarks", None):
+                return list(active_player.bookmarks), active_player
+            return disk_bookmarks, active_player
+
+    def _sync_timeline_bookmarks(self, bookmarks, active_player=None):
+            normalized = self._bookmarks_for_storage(bookmarks)
+            self.save_bookmarks_standalone(self.video_path, normalized)
+            if active_player is None:
+                active_player = self._active_player_for_timeline_video()
+            if active_player is not None:
+                active_player.bookmarks = list(normalized)
+                if hasattr(active_player, "bookmark_file"):
+                    active_player.bookmark_file = os.path.splitext(self.video_path)[0] + "_bookmarks.json"
+                if hasattr(active_player, "update_loop_bar_display"):
+                    active_player.update_loop_bar_display()
+            self.update_bookmarks()
+            self.redraw_timeline()
+            self._refresh_bookmark_manager_if_open()
+
+    def _update_single_bookmark_in_list(self, bookmarks, marker_to_update, *, label=None, timestamp=None):
+            """Update one bookmark by timeline marker identity; append if the source is stale."""
+            target_label = str(marker_to_update.get("label", "")).strip()
+            try:
+                target_time = float(marker_to_update["timestamp"])
+            except (KeyError, TypeError, ValueError):
+                return list(bookmarks or []), False
+
+            normalized = list(bookmarks or [])
+            fallback_index = None
+            fallback_delta = None
+            for idx, bookmark in enumerate(normalized):
+                if not isinstance(bookmark, dict):
+                    continue
+                raw_time = bookmark.get("time") if bookmark.get("time") is not None else bookmark.get("timestamp")
+                try:
+                    bookmark_time = float(raw_time)
+                except (TypeError, ValueError):
+                    continue
+                delta = abs(bookmark_time - target_time)
+                if delta > 0.001:
+                    continue
+
+                bookmark_label = str(
+                    bookmark.get("name") if bookmark.get("name") is not None else bookmark.get("label", "")
+                ).strip()
+                if bookmark_label == target_label:
+                    fallback_index = idx
+                    break
+                if fallback_index is None or delta < fallback_delta:
+                    fallback_index = idx
+                    fallback_delta = delta
+
+            if fallback_index is None:
+                updated = {
+                    "name": label if label is not None else target_label,
+                    "time": timestamp if timestamp is not None else target_time,
+                }
+                color = BookmarkManager._normalize_hex_color(marker_to_update.get("color"))
+                if BookmarkManager.is_custom_bookmark_color(color):
+                    updated["color"] = color
+                normalized.append(updated)
+                return normalized, False
+
+            updated = dict(normalized[fallback_index])
+            if label is not None:
+                updated["name"] = str(label)
+                updated.pop("label", None)
+            if timestamp is not None:
+                updated["time"] = max(0.0, float(timestamp))
+                updated.pop("timestamp", None)
+            normalized[fallback_index] = updated
+            return normalized, True
+
+    def edit_bookmark(self, marker_to_edit):
+            """Rename a bookmark from the timeline context menu."""
+            current_label = str(marker_to_edit.get("label", "")).strip()
+
+            def _finish(new_label):
+                new_label = str(new_label or "").strip()
+                if not new_label:
+                    return
+                source_bookmarks, active_player = self._bookmark_source_for_timeline_video()
+                updated, found = self._update_single_bookmark_in_list(
+                    source_bookmarks,
+                    marker_to_edit,
+                    label=new_label,
+                )
+                if not found:
+                    logging.info("[Timeline] Bookmark edit used fallback append at %.3fs", marker_to_edit.get("timestamp", -1))
+                self._sync_timeline_bookmarks(updated, active_player)
+
+            if hasattr(self.controller, "universal_dialog"):
+                self.controller.universal_dialog(
+                    title="Edit Bookmark",
+                    message="Bookmark label:",
+                    confirm_callback=_finish,
+                    input_field=True,
+                    default_input=current_label,
+                    modal=False,
+                )
+            else:
+                result = simpledialog.askstring(
+                    "Edit Bookmark",
+                    "Bookmark label:",
+                    initialvalue=current_label,
+                    parent=self,
+                )
+                if result is not None:
+                    _finish(result)
+
     def remove_bookmark_at(self, marker_to_remove):
             """Removes a specific bookmark even if player is closed."""
-            active_player = getattr(self.controller, "current_video_window", None) or getattr(
-                self.controller, "active_player", None
-            )
+            active_player = self._active_player_for_timeline_video()
             timestamp = marker_to_remove["timestamp"]
 
-            if active_player:
-                active_player.bookmarks, removed = self._remove_single_bookmark_from_list(
-                    getattr(active_player, "bookmarks", []),
-                    marker_to_remove,
-                )
-                active_player.save_bookmarks()
-            else:
-                # Práce bez přehrávače
-                current_bookmarks = self.load_bookmarks_for_path(self.video_path)
-                current_bookmarks, removed = self._remove_single_bookmark_from_list(
-                    current_bookmarks,
-                    marker_to_remove,
-                )
-                self.save_bookmarks_standalone(self.video_path, current_bookmarks)
+            source_bookmarks = (
+                list(getattr(active_player, "bookmarks", []))
+                if active_player and getattr(active_player, "bookmarks", None)
+                else self.load_bookmarks_for_path(self.video_path)
+            )
+            current_bookmarks, removed = self._remove_single_bookmark_from_list(
+                source_bookmarks,
+                marker_to_remove,
+            )
+            self.save_bookmarks_standalone(self.video_path, current_bookmarks)
+            if active_player is not None:
+                active_player.bookmarks = self._bookmarks_for_storage(current_bookmarks)
+                if hasattr(active_player, "bookmark_file"):
+                    active_player.bookmark_file = os.path.splitext(self.video_path)[0] + "_bookmarks.json"
 
             if not removed:
                 logging.info("[Timeline] Bookmark remove did not find an exact match at %.3fs", timestamp)
@@ -1137,15 +1269,12 @@ class TimelineBarWidget(ctk.CTkFrame):
                 return
 
             def _remove_all_bookmarks_confirmed():
-                active_player = getattr(self.controller, "current_video_window", None) or getattr(
-                    self.controller, "active_player", None
-                )
-                if active_player and hasattr(active_player, "bookmarks"):
+                active_player = self._active_player_for_timeline_video()
+                self.save_bookmarks_standalone(self.video_path, [])
+                if active_player is not None and hasattr(active_player, "bookmarks"):
                     active_player.bookmarks = []
-                    if hasattr(active_player, "save_bookmarks"):
-                        active_player.save_bookmarks()
-                else:
-                    self.save_bookmarks_standalone(self.video_path, [])
+                    if hasattr(active_player, "bookmark_file"):
+                        active_player.bookmark_file = os.path.splitext(self.video_path)[0] + "_bookmarks.json"
 
                 self.update_bookmarks()
                 self.redraw_timeline()
@@ -3069,6 +3198,21 @@ class TimelineBarWidget(ctk.CTkFrame):
     def _canvas_pointer_xy(self, event):
         return self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
 
+    def _bookmark_marker_at(self, x, y, hit_px=4):
+        nearby_items = self.canvas.find_overlapping(x - hit_px, y - hit_px, x + hit_px, y + hit_px)
+        for item_id in reversed(nearby_items):
+            marker = getattr(self, "marker_canvas_ids", {}).get(item_id)
+            if marker and marker.get("type") == "bookmark":
+                return marker
+        return None
+
+    def _clear_bookmark_drag_state(self):
+        self._bookmark_drag_marker = None
+        self._bookmark_drag_original_marker = None
+        self._bookmark_drag_start_x = None
+        self._bookmark_drag_start_y = None
+        self._bookmark_drag_moved = False
+
 
     def on_space_press(self, event):
         """Delegate Space to the app-level play/pause handler to avoid double toggles."""
@@ -3183,6 +3327,17 @@ class TimelineBarWidget(ctk.CTkFrame):
                     self._sync_active_segment_to_player()
                     self._log_segments_state(f"primary_click activate idx={i} x={x}")
                     return
+
+        bookmark_marker = self._bookmark_marker_at(x, y)
+        if bookmark_marker is not None:
+            self.loop_drag = "bookmark_pending"
+            self._bookmark_drag_marker = bookmark_marker
+            self._bookmark_drag_original_marker = dict(bookmark_marker)
+            self._bookmark_drag_start_x = x
+            self._bookmark_drag_start_y = y
+            self._bookmark_drag_moved = False
+            self.canvas.config(cursor="fleur")
+            return
 
         # 2. Fallback: playhead seek when no segment was hit.
         margin_drag_playhead = 10
@@ -4411,6 +4566,24 @@ class TimelineBarWidget(ctk.CTkFrame):
 
         active_seg = self._get_active_segment()
 
+        if self.loop_drag == "bookmark_pending":
+            start_x = self._bookmark_drag_start_x if self._bookmark_drag_start_x is not None else x
+            start_y = self._bookmark_drag_start_y if self._bookmark_drag_start_y is not None else self._canvas_pointer_xy(event)[1]
+            if max(abs(x - start_x), abs(self._canvas_pointer_xy(event)[1] - start_y)) < 6:
+                return
+            self.loop_drag = "bookmark_move"
+            self._bookmark_drag_moved = True
+            logging.info("[Timeline] bookmark drag started: %s", self._bookmark_drag_marker)
+
+        if self.loop_drag == "bookmark_move":
+            marker = self._bookmark_drag_marker
+            if marker is None:
+                return
+            bookmark_time = max(0.0, min(float(duration), float(raw_time))) if duration > 0 else max(0.0, float(raw_time))
+            marker["timestamp"] = bookmark_time
+            self.redraw_timeline()
+            return
+
         if self.loop_drag == "select":
             if active_seg is None:
                 self.on_timeline_click(event)
@@ -4482,6 +4655,43 @@ class TimelineBarWidget(ctk.CTkFrame):
       
 
     def on_canvas_release(self, event):
+        if self.loop_drag in ("bookmark_pending", "bookmark_move"):
+            marker = self._bookmark_drag_marker
+            original_marker = self._bookmark_drag_original_marker or marker
+            moved = self.loop_drag == "bookmark_move" and bool(self._bookmark_drag_moved)
+            self.loop_drag = None
+            self.canvas.config(cursor="")
+
+            if not marker:
+                self._clear_bookmark_drag_state()
+                return
+
+            try:
+                target_time = float(marker.get("timestamp", 0.0))
+            except (TypeError, ValueError):
+                target_time = 0.0
+
+            if not moved:
+                logging.info("[Timeline] Jumping to bookmark: %s at %.2fs", marker.get("label"), target_time)
+                if getattr(self, "on_seek", None):
+                    self.on_seek(target_time)
+                self.set_current_time(target_time)
+                self._clear_bookmark_drag_state()
+                return
+
+            source_bookmarks, active_player = self._bookmark_source_for_timeline_video()
+            updated, found = self._update_single_bookmark_in_list(
+                source_bookmarks,
+                original_marker,
+                timestamp=target_time,
+            )
+            if not found:
+                logging.info("[Timeline] Bookmark move used fallback append at %.3fs", target_time)
+            self._sync_timeline_bookmarks(updated, active_player)
+            logging.info("[Timeline] Bookmark moved to %.2fs: %s", target_time, marker.get("label"))
+            self._clear_bookmark_drag_state()
+            return
+
         if self.loop_drag == "select":
             seg = self._get_active_segment()
             if seg and seg.get("start") is not None and seg.get("end") is not None:
