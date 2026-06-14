@@ -843,7 +843,10 @@ class TimelineBarWidget(ctk.CTkFrame):
         )
         menu.add_separator()
 
-        # --- LOOPING ---
+        # --- CUTS / LOOP ---
+        has_cuts = bool(getattr(self, "segments", []))
+        cut_state = "normal" if has_cuts else "disabled"
+
         if active_player:
             def cmd_set_loop_start(t=clicked_time):
                 active_player.loop_active = True
@@ -905,10 +908,14 @@ class TimelineBarWidget(ctk.CTkFrame):
             if hasattr(active_player, "toggle_loop"):
                 menu.add_command(label=f"{loop_state} LOOP", command=cmd_toggle_loop)
 
-        menu.add_command(label="Clear All Cuts", command=self.clear_all_cuts)
-        menu.add_separator()
+        menu.add_command(
+            label="Add Loop / Cut Here (1s)",
+            command=lambda t=clicked_time: self.add_segment_at_time(t),
+        )
+        menu.add_command(label="Skip to Previous Cut (Ctrl+Left)", command=self.skip_to_previous_cut, state=cut_state)
+        menu.add_command(label="Skip to Next Cut (Ctrl+Right)", command=self.skip_to_next_cut, state=cut_state)
+        menu.add_command(label="Clear All Cuts", command=self.clear_all_cuts, state=cut_state)
 
-        # --- EXPORT SELECTION ---
         loop_s = getattr(active_player, "loop_start", None) if active_player else getattr(self, "loop_start", None)
         loop_e = getattr(active_player, "loop_end", None) if active_player else getattr(self, "loop_end", None)
         
@@ -917,7 +924,6 @@ class TimelineBarWidget(ctk.CTkFrame):
         if loop_e is None and self.loop_end is not None: loop_e = self.loop_end
         
         if loop_s is not None and loop_e is not None:
-            menu.add_separator()
             menu.add_command(
                 label=f"🎬 Export Current Loop / Cut ({self.format_time(loop_s)} - {self.format_time(loop_e)})",
                 command=lambda s=loop_s, e=loop_e: self.open_export_dialog(self.video_path, s, e)
@@ -927,8 +933,14 @@ class TimelineBarWidget(ctk.CTkFrame):
 
         # --- BOOKMARKS ---
         bookmark_player = getattr(self.controller, "current_video_window", None) or getattr(self.controller, "active_player", None)
-        can_skip_prev = bool(bookmark_player and hasattr(bookmark_player, "skip_to_previous_bookmark"))
-        can_skip_next = bool(bookmark_player and hasattr(bookmark_player, "skip_to_next_bookmark"))
+        has_bookmarks = any(m.get("type") == "bookmark" for m in getattr(self, "markers", []))
+        bookmark_state = "normal" if has_bookmarks else "disabled"
+        can_skip_prev = bool(
+            has_bookmarks and bookmark_player and hasattr(bookmark_player, "skip_to_previous_bookmark")
+        )
+        can_skip_next = bool(
+            has_bookmarks and bookmark_player and hasattr(bookmark_player, "skip_to_next_bookmark")
+        )
 
         menu.add_command(
             label="Previous Bookmark (Alt+Left)",
@@ -940,18 +952,17 @@ class TimelineBarWidget(ctk.CTkFrame):
             command=(lambda p=bookmark_player: p.skip_to_next_bookmark()) if can_skip_next else (lambda: None),
             state="normal" if can_skip_next else "disabled",
         )
-        menu.add_command(label="Skip to Previous Cut (Ctrl+Left)", command=self.skip_to_previous_cut)
-        menu.add_command(label="Skip to Next Cut (Ctrl+Right)", command=self.skip_to_next_cut)
-        menu.add_separator()
         menu.add_command(label="Add Bookmark", command=lambda: self.add_bookmark_at(clicked_time))
         if marker_under_cursor:
             menu.add_command(
                 label=f"Remove Bookmark: {marker_under_cursor['label']}",
                 command=lambda m=marker_under_cursor: self.remove_bookmark_at(m),
             )
-        has_bookmarks = any(m.get("type") == "bookmark" for m in getattr(self, "markers", []))
-        if has_bookmarks:
-            menu.add_command(label="Remove All Bookmarks", command=self.remove_all_bookmarks)
+        menu.add_command(
+            label="Remove All Bookmarks",
+            command=self.remove_all_bookmarks,
+            state=bookmark_state,
+        )
 
         can_bookmark_manager = bool(
             self.video_path
@@ -1124,24 +1135,35 @@ class TimelineBarWidget(ctk.CTkFrame):
             """Removes all bookmarks for the current video."""
             if not self.video_path:
                 return
-            if not messagebox.askyesno("Remove all bookmarks", "Delete all bookmarks for this video?"):
-                return
 
-            active_player = getattr(self.controller, "current_video_window", None) or getattr(
-                self.controller, "active_player", None
-            )
-            if active_player and hasattr(active_player, "bookmarks"):
-                active_player.bookmarks = []
-                if hasattr(active_player, "save_bookmarks"):
-                    active_player.save_bookmarks()
-            else:
-                self.save_bookmarks_standalone(self.video_path, [])
+            def _remove_all_bookmarks_confirmed():
+                active_player = getattr(self.controller, "current_video_window", None) or getattr(
+                    self.controller, "active_player", None
+                )
+                if active_player and hasattr(active_player, "bookmarks"):
+                    active_player.bookmarks = []
+                    if hasattr(active_player, "save_bookmarks"):
+                        active_player.save_bookmarks()
+                else:
+                    self.save_bookmarks_standalone(self.video_path, [])
 
-            self.update_bookmarks()
-            self.redraw_timeline()
-            self._refresh_bookmark_manager_if_open()
-            if active_player and hasattr(active_player, "update_loop_bar_display"):
-                active_player.update_loop_bar_display()
+                self.update_bookmarks()
+                self.redraw_timeline()
+                self._refresh_bookmark_manager_if_open()
+                if active_player and hasattr(active_player, "update_loop_bar_display"):
+                    active_player.update_loop_bar_display()
+
+            if hasattr(self.controller, "universal_dialog"):
+                self.controller.universal_dialog(
+                    title="Remove all bookmarks",
+                    message="Delete all bookmarks for this video?",
+                    confirm_callback=_remove_all_bookmarks_confirmed,
+                    confirm_text="Delete",
+                    cancel_text="Cancel",
+                    show_cancel=True,
+                )
+            elif messagebox.askyesno("Remove all bookmarks", "Delete all bookmarks for this video?"):
+                _remove_all_bookmarks_confirmed()
 
     def _refresh_bookmark_manager_if_open(self):
             ctrl = getattr(self, "controller", None)
@@ -2676,9 +2698,9 @@ class TimelineBarWidget(ctk.CTkFrame):
                 pass
         return float(getattr(self, "current_time", 0.0) or 0.0)
 
-    def add_segment_at_current_time(self, default_len=1.0):
-        """Append a new segment at the current time (~default_len long) and make it active."""
-        t = self._get_edit_time_seconds()
+    def add_segment_at_time(self, timestamp, default_len=1.0, *, source="context menu"):
+        """Append a new segment at a specific time and make it active."""
+        t = float(timestamp)
         duration = self._get_current_duration() or 0.0
         start = max(0.0, float(t))
         end = start + float(default_len)
@@ -2693,10 +2715,14 @@ class TimelineBarWidget(ctk.CTkFrame):
                 end = start + 0.1
         self.segments.append({"start": start, "end": end})
         self.active_segment_index = len(self.segments) - 1
-        self._log_segments_state(f"toolbar add segment at {start:.3f}s len={end - start:.3f}s")
+        self._log_segments_state(f"{source} add segment at {start:.3f}s len={end - start:.3f}s")
         self.save_segments_for_path(self.video_path)
         self._sync_active_segment_to_player()
         self.redraw_timeline()
+
+    def add_segment_at_current_time(self, default_len=1.0):
+        """Append a new segment at the current time (~default_len long) and make it active."""
+        self.add_segment_at_time(self._get_edit_time_seconds(), default_len, source="toolbar")
 
     def delete_active_segment(self):
         """Remove only the currently active segment (toolbar -)."""
@@ -2774,19 +2800,35 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.redraw_timeline()
 
     def clear_all_cuts(self):
-        self.segments = []
-        self.active_segment_index = None
-        active_player = getattr(self.controller, "current_video_window", None) or getattr(self.controller, "active_player", None)
-        if active_player:
-            active_player.loop_active = False
-            active_player.loop_start = None
-            active_player.loop_end = None
-            if hasattr(active_player, "update_loop_bar_display"):
-                active_player.update_loop_bar_display()
-        self.loop_mode = False
-        self._apply_loop_button_style()
-        self.save_segments_for_path(self.video_path)
-        self.redraw_timeline()
+        if not self.segments:
+            return
+
+        def _clear_all_cuts_confirmed():
+            self.segments = []
+            self.active_segment_index = None
+            active_player = getattr(self.controller, "current_video_window", None) or getattr(self.controller, "active_player", None)
+            if active_player:
+                active_player.loop_active = False
+                active_player.loop_start = None
+                active_player.loop_end = None
+                if hasattr(active_player, "update_loop_bar_display"):
+                    active_player.update_loop_bar_display()
+            self.loop_mode = False
+            self._apply_loop_button_style()
+            self.save_segments_for_path(self.video_path)
+            self.redraw_timeline()
+
+        if hasattr(self.controller, "universal_dialog"):
+            self.controller.universal_dialog(
+                title="Clear all cuts",
+                message="Delete all cuts for this video?",
+                confirm_callback=_clear_all_cuts_confirmed,
+                confirm_text="Delete",
+                cancel_text="Cancel",
+                show_cancel=True,
+            )
+        elif messagebox.askyesno("Clear all cuts", "Delete all cuts for this video?"):
+            _clear_all_cuts_confirmed()
 
     def skip_to_previous_cut(self):
         if not self.segments:

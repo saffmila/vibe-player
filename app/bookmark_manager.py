@@ -126,7 +126,7 @@ class BookmarkManager:
             main_frame,
             bg="#2B2B2B",
             fg="white",
-            selectbackground="#1F6AA5",
+            selectbackground="#2A6BB0",
             selectforeground="white",
             highlightthickness=0,
             borderwidth=0,
@@ -348,8 +348,20 @@ class BookmarkManager:
         except (TypeError, ValueError):
             return None
 
+    def _configure_listbox_row(self, list_idx: int, **options) -> None:
+        """Apply row colors, tolerating Tk builds with fewer item options."""
+        if not self.bookmark_listbox:
+            return
+        try:
+            self.bookmark_listbox.itemconfig(list_idx, **options)
+        except tk.TclError:
+            fallback = {k: v for k, v in options.items() if k in {"bg", "fg", "background", "foreground"}}
+            if fallback:
+                self.bookmark_listbox.itemconfig(list_idx, **fallback)
+
     def _on_bookmark_select(self, event=None):
         """Single-click: seek to the bookmark without changing play/pause."""
+        self._apply_list_row_styles()
         target_time = self._selected_bookmark_time()
         if target_time is None:
             return
@@ -453,14 +465,28 @@ class BookmarkManager:
 
         default_bg = "#2B2B2B"
         active_bg = "#404040"
+        selected_bg = "#2A6BB0"
+        selected_active_bg = "#347BD0"
+        selected_fg = "#FFFFFF"
         selected_set = set(self.bookmark_listbox.curselection())
 
         for list_idx, bookmark_idx in enumerate(self.visible_indices):
-            if list_idx in selected_set:
-                continue
             bookmark = self.bookmarks[bookmark_idx]
             is_active = bookmark_idx == self.active_bookmark_index
+            is_selected = list_idx in selected_set
             color = self._normalize_hex_color(bookmark.get("color"))
+            if is_selected:
+                row_bg = selected_active_bg if is_active else selected_bg
+                row_fg = color if self.is_custom_bookmark_color(color) else selected_fg
+                self._configure_listbox_row(
+                    list_idx,
+                    bg=row_bg,
+                    fg=row_fg,
+                    selectbackground=row_bg,
+                    selectforeground=row_fg,
+                )
+                continue
+
             if self.is_custom_bookmark_color(color):
                 mix = 0.42 if is_active else 0.28
                 row_bg = self._blend_hex(default_bg if not is_active else active_bg, color, mix)
@@ -468,7 +494,13 @@ class BookmarkManager:
             else:
                 row_bg = active_bg if is_active else default_bg
                 row_fg = "white"
-            self.bookmark_listbox.itemconfig(list_idx, bg=row_bg, fg=row_fg)
+            self._configure_listbox_row(
+                list_idx,
+                bg=row_bg,
+                fg=row_fg,
+                selectbackground=selected_bg,
+                selectforeground=selected_fg,
+            )
 
     def _selected_bookmark_index(self) -> Optional[int]:
         if not self.bookmark_listbox:
@@ -665,6 +697,7 @@ class BookmarkManager:
                 self.bookmark_listbox.selection_set(list_idx)
                 self.bookmark_listbox.activate(list_idx)
                 self.bookmark_listbox.see(list_idx)
+                self._apply_list_row_styles()
                 return
 
     def _sync_bookmarks_to_player(self):

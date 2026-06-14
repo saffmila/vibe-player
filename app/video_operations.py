@@ -4615,43 +4615,63 @@ class VideoPlayer:
         Detach Win32 HWND, stop, and release Media. Safe order for Windows (avoids AV on close).
         Does not call player.release() — caller does that after the Tk window is gone.
         """
+        logging.info("[Cleanup][VLC] shutdown start detach_hwnd=%s player=%r", detach_hwnd, player)
         if detach_hwnd and os.name == "nt" and hasattr(player, "set_hwnd"):
             try:
+                logging.info("[Cleanup][VLC] before player.set_hwnd(0)")
                 player.set_hwnd(0)
-            except Exception:
-                pass
+                logging.info("[Cleanup][VLC] after player.set_hwnd(0)")
+            except Exception as e:
+                logging.info("[Cleanup][VLC] player.set_hwnd(0) failed: %s", e)
         try:
+            logging.info("[Cleanup][VLC] before player.get_state()")
             st = player.get_state()
-        except Exception:
+            logging.info("[Cleanup][VLC] after player.get_state(): %s", st)
+        except Exception as e:
+            logging.info("[Cleanup][VLC] player.get_state() failed: %s", e)
             st = None
         if st == vlc.State.Paused:
             try:
+                logging.info("[Cleanup][VLC] before player.set_pause(0)")
                 player.set_pause(0)
-            except Exception:
-                pass
+                logging.info("[Cleanup][VLC] after player.set_pause(0)")
+            except Exception as e:
+                logging.info("[Cleanup][VLC] player.set_pause(0) failed: %s", e)
         try:
+            logging.info("[Cleanup][VLC] before player.stop()")
             player.stop()
-        except Exception:
-            pass
+            logging.info("[Cleanup][VLC] after player.stop()")
+        except Exception as e:
+            logging.info("[Cleanup][VLC] player.stop() failed: %s", e)
         try:
             t0 = time.time()
             while (time.time() - t0) < 1.2:
                 try:
+                    logging.debug("[Cleanup][VLC] before player.is_playing()")
                     if not player.is_playing():
+                        logging.info("[Cleanup][VLC] playback stopped after %.2fs", time.time() - t0)
                         break
-                except Exception:
+                except Exception as e:
+                    logging.info("[Cleanup][VLC] player.is_playing() failed: %s", e)
                     break
                 time.sleep(0.05)
-        except Exception:
-            pass
-        try:
-            m = player.get_media()
-            if m is not None:
-                player.set_media(None)
-                m.release()
         except Exception as e:
-            logging.debug("[VLC] _shutdown_vlc_player media: %s", e)
+            logging.info("[Cleanup][VLC] stop wait failed: %s", e)
+        try:
+            logging.info("[Cleanup][VLC] before player.get_media()")
+            m = player.get_media()
+            logging.info("[Cleanup][VLC] after player.get_media(): %r", m)
+            if m is not None:
+                logging.info("[Cleanup][VLC] before player.set_media(None)")
+                player.set_media(None)
+                logging.info("[Cleanup][VLC] after player.set_media(None)")
+                logging.info("[Cleanup][VLC] before media.release()")
+                m.release()
+                logging.info("[Cleanup][VLC] after media.release()")
+        except Exception as e:
+            logging.info("[Cleanup][VLC] media detach/release failed: %s", e)
         self._loaded_video_path = None
+        logging.info("[Cleanup][VLC] shutdown done")
 
     def release_held_media(self):
         """
@@ -4698,7 +4718,9 @@ class VideoPlayer:
         player = getattr(self, "player", None)
         if player is not None:
             try:
+                logging.info("[Cleanup] Před VLC shutdown helperem.")
                 self._shutdown_vlc_player(player, detach_hwnd=True)
+                logging.info("[Cleanup] Po VLC shutdown helperu.")
                 logging.info("[Cleanup] VLC playback zastaveno, médium uvolněno.")
             except Exception as e:
                 logging.debug("[Cleanup] vlc shutdown: %s", e)
@@ -4715,7 +4737,9 @@ class VideoPlayer:
 
         if player is not None:
             try:
+                logging.info("[Cleanup] Před player.release().")
                 player.release()
+                logging.info("[Cleanup] Po player.release().")
                 logging.info("[Cleanup] VLC přehrávač uvolněn.")
             except Exception as e:
                 logging.info("[Cleanup] Chyba při uvolňování přehrávače: %s", e)
@@ -4726,7 +4750,9 @@ class VideoPlayer:
         instance = getattr(self, "instance", None)
         if instance:
             try:
+                logging.info("[Cleanup] Před instance.release().")
                 instance.release()
+                logging.info("[Cleanup] Po instance.release().")
                 logging.info("[Cleanup] VLC instance uvolněna.")
             except Exception as e:
                 logging.info("[Cleanup] Chyba při uvolňování VLC instance: %s", e)
