@@ -1308,6 +1308,46 @@ class VideoPlayer:
                 best = bm
         return best
 
+    def _timeline_matches_current_video(self, timeline):
+        timeline_path = getattr(timeline, "video_path", None)
+        if not timeline_path or not getattr(self, "video_path", None):
+            return False
+        return self._normalized_media_path(timeline_path) == self._normalized_media_path(self.video_path)
+
+    def _loop_visual_timelines(self):
+        """Return live timeline widgets for this player/video."""
+        candidates = (
+            getattr(self, "timeline_widget", None),
+            getattr(self.controller, "timeline_widget", None),
+            getattr(self.parent, "timeline_widget", None),
+            getattr(self.controller, "timeline_window", None),
+            getattr(self.parent, "timeline_window", None),
+        )
+        timelines = []
+        seen = set()
+        for timeline in candidates:
+            if timeline is None or id(timeline) in seen:
+                continue
+            seen.add(id(timeline))
+            try:
+                if hasattr(timeline, "winfo_exists") and not timeline.winfo_exists():
+                    continue
+            except tk.TclError:
+                continue
+            if hasattr(timeline, "segments") and self._timeline_matches_current_video(timeline):
+                timelines.append(timeline)
+        return timelines
+
+    def _refresh_loop_timelines(self, timelines):
+        for timeline in timelines:
+            try:
+                if hasattr(timeline, "save_segments_for_path"):
+                    timeline.save_segments_for_path(getattr(timeline, "video_path", None))
+                if hasattr(timeline, "redraw_timeline"):
+                    timeline.redraw_timeline()
+            except Exception as e:
+                logging.info("[LoopCut] timeline refresh failed: %s", e)
+
     def draw_loop_bar(self):
         self.loop_bar_canvas.delete("all")
         if not self.player:
@@ -1329,6 +1369,8 @@ class VideoPlayer:
         if not self.loop_active:
             # Keep loop-specific overlays hidden when loop is off, but keep bookmark ticks.
             return
+
+        timeline = next(iter(self._loop_visual_timelines()), None)
 
         # Draw all saved segments first as subtle inactive guides.
         if timeline and hasattr(timeline, "segments"):
@@ -1376,10 +1418,11 @@ class VideoPlayer:
         if not self.player:
             return
         new_start = self.player.get_time() / 1000.0
-        self._ensure_active_segment_for_shortcut(new_start, boundary="start")
+        timelines = self._loop_visual_timelines()
+        for timeline in timelines:
+            self._ensure_active_segment_for_shortcut(new_start, boundary="start", timeline=timeline)
         self.loop_start = new_start
-        timeline = getattr(self, "timeline_widget", None)
-        if timeline:
+        for timeline in timelines:
             # Keep timeline segment model in sync with player shortcut updates.
             timeline.loop_start = new_start
         self.loop_active = True
@@ -1388,19 +1431,17 @@ class VideoPlayer:
         self.update_loop_bar_display() # <-- ZMĚNA
 
         # PŘIDAT: Informuj timeline, aby se překreslila
-        if timeline:
-            if hasattr(timeline, "save_segments_for_path"):
-                timeline.save_segments_for_path(getattr(timeline, "video_path", None))
-            timeline.redraw_timeline()
+        self._refresh_loop_timelines(timelines)
 
     def set_loop_end(self, event=None):
         if not self.player:
             return
         new_end = self.player.get_time() / 1000.0
-        self._ensure_active_segment_for_shortcut(new_end, boundary="end")
+        timelines = self._loop_visual_timelines()
+        for timeline in timelines:
+            self._ensure_active_segment_for_shortcut(new_end, boundary="end", timeline=timeline)
         self.loop_end = new_end
-        timeline = getattr(self, "timeline_widget", None)
-        if timeline:
+        for timeline in timelines:
             # Keep timeline segment model in sync with player shortcut updates.
             timeline.loop_end = new_end
         self.loop_active = True
@@ -1409,13 +1450,12 @@ class VideoPlayer:
         self.update_loop_bar_display() # <-- ZMĚNA
       
         # PŘIDAT: Informuj timeline, aby se překreslila
-        if timeline:
-            if hasattr(timeline, "save_segments_for_path"):
-                timeline.save_segments_for_path(getattr(timeline, "video_path", None))
-            timeline.redraw_timeline()
+        self._refresh_loop_timelines(timelines)
 
-    def _ensure_active_segment_for_shortcut(self, new_time, boundary="start", far_threshold=2.0):
-        timeline = getattr(self, "timeline_widget", None)
+    def _ensure_active_segment_for_shortcut(self, new_time, boundary="start", far_threshold=2.0, timeline=None):
+        if timeline is None:
+            timelines = self._loop_visual_timelines()
+            timeline = timelines[0] if timelines else None
         if not timeline or not hasattr(timeline, "segments"):
             return
         active_idx = getattr(timeline, "active_segment_index", None)
@@ -1501,7 +1541,8 @@ class VideoPlayer:
         self.update_loop_bar_display()
 
     def _sync_loop_bounds_from_timeline_active_segment(self):
-        timeline = getattr(self, "timeline_widget", None)
+        timelines = self._loop_visual_timelines()
+        timeline = timelines[0] if timelines else None
         if not timeline or not hasattr(timeline, "segments"):
             return
         idx = getattr(timeline, "active_segment_index", None)
