@@ -778,7 +778,7 @@ def build_help_menu(app):
 
 
 def open_help_page(app):
-    url = getattr(app, "help_url", "https://github.com/")
+    url = getattr(app, "help_url", "https://github.com/saffmila/vibe-player")
     try:
         webbrowser.open(url, new=2)
     except Exception as e:
@@ -836,7 +836,7 @@ def show_about_window(app):
 
     coffee_url = getattr(app, "coffee_url", "https://buymeacoffee.com/")
     paypal_url = getattr(app, "paypal_url", "https://www.paypal.com/donate")
-    github_url = getattr(app, "help_url", "https://github.com/")
+    github_url = getattr(app, "help_url", "https://github.com/saffmila/vibe-player")
 
     ctk.CTkButton(btns, text="Buy Me a Coffee", command=lambda: webbrowser.open(coffee_url, new=2)).pack(side="left", padx=(0, 8))
     ctk.CTkButton(btns, text="Donate via PayPal", command=lambda: webbrowser.open(paypal_url, new=2)).pack(side="left", padx=(0, 8))
