@@ -2657,6 +2657,15 @@ class TimelineBarWidget(ctk.CTkFrame):
                 if ctrl and hasattr(ctrl, "refresh_bookmark_manager_if_open"):
                     ctrl.refresh_bookmark_manager_if_open(self.video_path)
 
+        self._reload_thumbnail_strip(num_thumbs=num_thumbs)
+
+
+    def _reload_thumbnail_strip(self, num_thumbs=None):
+        """Regeneruje vizuální pruh náhledů pro aktuální self.video_path.
+
+        Sdíleno mezi load_thumbnails (grid selekce) a reload_all_markers_and_redraw
+        (otevření/přepnutí videa v přehrávači), aby pruh nezůstal viset na starém videu.
+        """
         if num_thumbs is not None:
             self.num_thumbs = num_thumbs
 
@@ -4179,6 +4188,9 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.update_thumbnails()
         self.update_subtitles()
         if video_changed and video_path and os.path.isfile(video_path):
+            # Při skutečné změně videa (dvojklik/otevření/přepnutí v přehrávači) musíme
+            # přegenerovat i vizuální pruh náhledů, jinak zůstane viset na předchozím videu.
+            self._reload_thumbnail_strip()
             ctrl = getattr(self, "controller", None)
             if ctrl and hasattr(ctrl, "refresh_bookmark_manager_if_open"):
                 ctrl.refresh_bookmark_manager_if_open(video_path)
