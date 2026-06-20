@@ -99,6 +99,63 @@ class VtpDndMixin:
 
         logging.info("[DnD] Drag & Drop initialized (tkinterdnd2).")
 
+    def _dnd_canvas_folder_under_pointer(self, event):
+        """Return the folder path of the grid cell under the drop point, or None.
+
+        Standard cells (``canvas``) and wide strips (``strip``/``img_canvas``) stash
+        ``file_path``/``is_folder`` on their widgets, so a drop onto a folder cell can
+        target that folder instead of always falling back to the current directory.
+        """
+        try:
+            x_root = int(getattr(event, "x_root", 0))
+            y_root = int(getattr(event, "y_root", 0))
+        except Exception:
+            return None
+
+        # 1) Widget directly under the pointer carries the attributes (canvas/strip).
+        try:
+            probe = self.winfo_containing(x_root, y_root)
+        except Exception:
+            probe = None
+        for _ in range(6):
+            if probe is None:
+                break
+            if getattr(probe, "is_folder", False) and getattr(probe, "file_path", None):
+                path = probe.file_path
+                if isinstance(path, str) and os.path.isdir(path):
+                    return path
+            probe = getattr(probe, "master", None)
+
+        # 2) Geometry hit-test against visible folder slots (covers label/padding gaps).
+        if not getattr(self, "_vg_active", False):
+            return None
+        slot_maps = (
+            getattr(self, "_vg_visible_std_slots_by_path", {}),
+            getattr(self, "_vg_visible_wide_slots_by_path", {}),
+        )
+        vg_data = getattr(self, "_vg_data", [])
+        for slots in slot_maps:
+            for slot in list(slots.values()):
+                widget = slot.get("frame") or slot.get("strip") or slot.get("canvas")
+                if widget is None:
+                    continue
+                try:
+                    if not widget.winfo_ismapped():
+                        continue
+                    wx, wy = widget.winfo_rootx(), widget.winfo_rooty()
+                    ww, wh = widget.winfo_width(), widget.winfo_height()
+                except Exception:
+                    continue
+                if wx <= x_root < wx + ww and wy <= y_root < wy + wh:
+                    data_idx = int(slot.get("data_idx", -1))
+                    if 0 <= data_idx < len(vg_data):
+                        item = vg_data[data_idx]
+                        if item.get("is_folder", False):
+                            path = item.get("path")
+                            if isinstance(path, str) and os.path.isdir(path):
+                                return path
+        return None
+
     def _dnd_on_drop_canvas(self, event):
         self._dnd_reset_canvas_highlight()
         logging.info(f"[DnD] DROP IN raw data: {event.data!r}")
@@ -107,9 +164,12 @@ class VtpDndMixin:
         if not paths:
             return
 
-        dest = getattr(self, 'current_directory', None)
+        current_dir = getattr(self, 'current_directory', None)
+        # Drop onto a folder cell targets that folder; otherwise the open directory.
+        target_folder = self._dnd_canvas_folder_under_pointer(event)
+        dest = target_folder or current_dir
         if not dest or not os.path.isdir(dest):
-            logging.warning("[DnD] DROP canvas: current_directory not set: %r", dest)
+            logging.warning("[DnD] DROP canvas: no valid destination: %r", dest)
             return
 
         files = [p for p in paths if os.path.isfile(p)]
@@ -134,12 +194,27 @@ class VtpDndMixin:
             is_move = shift_down
         logging.info(
             f"[DnD] DROP IN canvas: files={len(files)} dirs={len(dirs)} dest={dest} "
-            f"internal={internal} is_move={is_move}"
+            f"target_folder={target_folder} internal={internal} is_move={is_move}"
+        )
+
+        dropped_into_subfolder = bool(
+            target_folder
+            and current_dir
+            and os.path.normcase(os.path.normpath(target_folder))
+            != os.path.normcase(os.path.normpath(current_dir))
         )
 
         def _after_canvas_op():
             self.refresh_folder_icon(dest)
-            self.display_thumbnails(dest, force_refresh=True, preserve_scroll=True)
+            if dropped_into_subfolder:
+                # Files landed in a sibling/child folder: stay in the open directory so
+                # the user sees the items leave, and rebuild the target folder's preview
+                # (it gained media) plus the source previews (handled in the move finish).
+                self._invalidate_folder_preview_caches(dest)
+                view = current_dir if (current_dir and os.path.isdir(current_dir)) else dest
+                self.display_thumbnails(view, force_refresh=True, preserve_scroll=True)
+            else:
+                self.display_thumbnails(dest, force_refresh=True, preserve_scroll=True)
 
         self._dnd_confirm_and_execute(
             sources=sources,
@@ -662,6 +737,19 @@ class VtpDndMixin:
                 )
                 for folder_path in dict.fromkeys(changed_cache_folders):
                     self.refresh_folder_icon(folder_path)
+                # Moving media out can empty a source folder (or strip media from an
+                # ancestor preview); drop stale folder-preview overlays so the icons
+                # rebuild instead of keeping a thumbnail for files that are gone.
+                if is_move and hasattr(self, "_invalidate_folder_preview_caches"):
+                    for moved_src in ok:
+                        try:
+                            self._invalidate_folder_preview_caches(moved_src)
+                        except Exception:
+                            logging.debug(
+                                "[DnD] folder preview invalidation failed for %s",
+                                moved_src,
+                                exc_info=True,
+                            )
                 if on_success:
                     on_success()
             if fail:

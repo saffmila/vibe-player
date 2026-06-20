@@ -1778,6 +1778,7 @@ class VideoThumbnailPlayer(
                             _prune_selection_after_dir_removed(path)
 
                         purge_cache_for_deleted_path(path)
+                        self._invalidate_folder_preview_caches(path)
 
                         node_id = self.find_node_by_path(path)
                         if node_id:
@@ -2333,10 +2334,24 @@ class VideoThumbnailPlayer(
 
 
     def _delete_wide_folder_preview_cache_files(self, folder_path):
-        """Remove cached folder preview PNGs for this folder (not recursive)."""
+        """Remove cached folder preview PNGs for this folder (not recursive).
+
+        Covers both the standard 2x2 overlay (``!folder_preview_``) and the wide
+        filmstrip (``!folder_wide_``). The base name is sanitized the same way the
+        cache writer sanitizes it so folders with characters like ``<>:"/\\|?*`` in
+        their name still match their cache files.
+        """
         cache_dir_path, _ = get_cache_dir_path(folder_path, self.thumbnail_cache_path)
-        _bn = os.path.basename(folder_path.rstrip(os.sep))
-        _prefixes = (f"!folder_wide_{_bn}_", f"!folder_preview_{_bn}_")
+        _bn = os.path.basename(os.path.normpath(folder_path)) or "root"
+        _safe_bn = "".join(c if c not in '<>:"/\\|?*' else "_" for c in _bn)
+        _prefixes = tuple(
+            {
+                f"!folder_wide_{_bn}_",
+                f"!folder_preview_{_bn}_",
+                f"!folder_wide_{_safe_bn}_",
+                f"!folder_preview_{_safe_bn}_",
+            }
+        )
         if not os.path.isdir(cache_dir_path):
             return
         for fn in os.listdir(cache_dir_path):
@@ -2348,6 +2363,66 @@ class VideoThumbnailPlayer(
                     logging.error(f"[Folder preview cache] Failed to delete cache {fn}: {e}")
         if hasattr(self, "_preview_status_cache"):
             self._preview_status_cache.clear()
+
+    def _invalidate_folder_preview_caches(self, changed_path):
+        """Drop stale folder-preview overlays after media is deleted from a folder.
+
+        A folder icon's preview (standard 2x2 *and* wide filmstrip) is composited
+        from media discovered up to ``_folder_preview_max_depth`` levels deep, so
+        removing files can leave any ancestor within that range showing a preview
+        for media that no longer exists (e.g. an emptied folder keeps its thumbnail).
+
+        This clears the on-disk preview PNGs plus the in-memory composite/wide
+        thumbnail entries and preview-status caches for the affected ancestors so the
+        icons regenerate as plain folders (or rebuild from whatever media remains).
+        """
+        if not changed_path:
+            return
+        try:
+            max_levels = int(getattr(self, "_folder_preview_max_depth", 5)) + 1
+        except Exception:
+            max_levels = 6
+
+        # A still-existing directory (e.g. a move destination that gained files) needs
+        # its own preview rebuilt; a removed file/folder only affects its ancestors.
+        norm = os.path.normpath(str(changed_path))
+        parent = norm if os.path.isdir(norm) else os.path.dirname(norm)
+        seen = set()
+        for _ in range(max(1, max_levels)):
+            if not parent:
+                break
+            norm_parent = os.path.normcase(os.path.normpath(parent))
+            if norm_parent in seen:
+                break
+            seen.add(norm_parent)
+
+            if os.path.isdir(parent):
+                try:
+                    self._delete_wide_folder_preview_cache_files(parent)
+                except Exception:
+                    logging.debug(
+                        "[FolderPreview] invalidate disk delete failed for %s",
+                        parent,
+                        exc_info=True,
+                    )
+                try:
+                    cache = getattr(getattr(self, "thumbnail_cache", None), "cache", None)
+                    if isinstance(cache, dict):
+                        for key in list(cache.keys()):
+                            base = str(key).split("\x00", 1)[0]
+                            if os.path.normcase(os.path.normpath(base)) == norm_parent:
+                                cache.pop(key, None)
+                except Exception:
+                    logging.debug(
+                        "[FolderPreview] invalidate memory pop failed for %s",
+                        parent,
+                        exc_info=True,
+                    )
+
+            new_parent = os.path.dirname(parent)
+            if not new_parent or new_parent == parent:
+                break
+            parent = new_parent
 
     def refresh_folder_wide_thumbnail(self, folder_path):
         """
