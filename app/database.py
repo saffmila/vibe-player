@@ -639,6 +639,99 @@ class Database:
             "extra_keyword_count": extra_keyword_count,
         }
 
+    def get_global_catalog_stats(self) -> dict:
+        """Aggregate catalog-wide media stats from the 'files' table in a single SQL pass.
+
+        Counts are cheap (one table scan). File sizes are intentionally not summed here:
+        size is not stored in the DB and would require per-file disk I/O over the whole
+        catalog, which is too slow to run on startup.
+
+        Keywords are split on commas only (matching get_all_keywords / get_folder_descendant_media_stats).
+
+        Returns:
+            total_files, video_count, image_count, unique_keyword_count.
+        """
+        video_ext = {e.lower() for e in VIDEO_FORMATS}
+        image_ext = {e.lower() for e in IMAGE_FORMATS}
+
+        total_files = 0
+        video_count = 0
+        image_count = 0
+        unique_keywords: set[str] = set()
+
+        try:
+            rows = self.db.query(
+                "SELECT file_path, keywords FROM files WHERE file_path IS NOT NULL"
+            )
+            for row in rows:
+                fp = row.get("file_path") or ""
+                if not fp:
+                    continue
+                total_files += 1
+                _, ext = os.path.splitext(fp.lower())
+                if ext in video_ext:
+                    video_count += 1
+                elif ext in image_ext:
+                    image_count += 1
+
+                raw_kw = row.get("keywords") or ""
+                if isinstance(raw_kw, str) and raw_kw.strip():
+                    for part in raw_kw.split(","):
+                        t = part.strip().lower()
+                        if t:
+                            unique_keywords.add(t)
+        except Exception as e:
+            logging.error(f"get_global_catalog_stats failed: {e}")
+            return {
+                "total_files": 0,
+                "video_count": 0,
+                "image_count": 0,
+                "unique_keyword_count": 0,
+            }
+
+        return {
+            "total_files": total_files,
+            "video_count": video_count,
+            "image_count": image_count,
+            "unique_keyword_count": len(unique_keywords),
+        }
+
+    def get_disk_usage_by_drive(self) -> dict:
+        """Sum on-disk file sizes per drive for all catalog files.
+
+        Reads sizes from disk via os.path.getsize() because size is not stored in the DB,
+        so this is slow over a large catalog — call it lazily (e.g. from a button), never on startup.
+        Missing or unreadable files are skipped.
+
+        Returns:
+            dict mapping a drive root (e.g. 'C:\\') to total bytes.
+        """
+        usage: dict[str, int] = {}
+        # Materialize all paths first so the DB cursor is not held open during the
+        # slow per-file getsize loop (avoids partial results / cross-thread cursor issues).
+        try:
+            paths = [
+                row.get("file_path") or ""
+                for row in self.db.query(
+                    "SELECT file_path FROM files WHERE file_path IS NOT NULL"
+                )
+            ]
+        except Exception as e:
+            logging.error(f"get_disk_usage_by_drive query failed: {e}")
+            return usage
+
+        for fp in paths:
+            if not fp:
+                continue
+            try:
+                size = os.path.getsize(fp)
+            except OSError:
+                continue
+            drive = os.path.splitdrive(fp)[0]
+            drive = (drive.upper() + os.sep) if drive else "?"
+            usage[drive] = usage.get(drive, 0) + size
+        return usage
+
     def get_valid_columns(self):
         # Query the database to get valid columns
         valid_columns = self.db.query("PRAGMA table_info(files)")

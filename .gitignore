@@ -27,6 +27,7 @@ env/
 # --- App thumbnails / cache ---
 thumbnail_cache/
 bookmarks/
+app/catalog_stats_cache.json
 
 # Tag engine cache (large binaries, generated locally)
 app/tag_engine/cache_*.pkl

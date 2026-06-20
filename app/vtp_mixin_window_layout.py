@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import logging
 import os
+import threading
+import time
 import tkinter as tk
 
 import customtkinter as ctk
@@ -64,6 +67,151 @@ class VtpWindowLayoutMixin:
 
         # Yield one more frame to the Tk event loop before any blocking work
         self.after(0, _phase1)
+
+        # Catalog stats: instant paint from cache, cheap recount in background,
+        # heavy per-file disk scan deferred to idle time.
+        self._init_catalog_panel()
+
+    # ------------------------------------------------------------------ #
+    #  CATALOG STATS (counts + idle disk scan + disk cache)               #
+    # ------------------------------------------------------------------ #
+
+    CATALOG_IDLE_THRESHOLD_S = 20.0   # seconds of inactivity before a disk scan
+    CATALOG_IDLE_POLL_MS     = 4000   # how often to check for idleness
+
+    def _catalog_cache_path(self):
+        base = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(base, "catalog_stats_cache.json")
+
+    def _load_catalog_cache(self):
+        try:
+            with open(self._catalog_cache_path(), "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+
+    def _save_catalog_cache(self, data):
+        try:
+            with open(self._catalog_cache_path(), "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        except OSError as e:
+            logging.warning(f"[Catalog] cache save failed: {e}")
+
+    def _init_catalog_panel(self):
+        info_panel = getattr(self, "info_panel", None)
+        if info_panel is None:
+            return
+
+        self._catalog_disk_running = False
+        self._last_activity_ts = time.time()
+        self._catalog_cache = self._load_catalog_cache()
+
+        # Instant paint from last session's cache (no disk work).
+        cache = self._catalog_cache
+        if cache.get("stats") and hasattr(info_panel, "update_catalog_stats"):
+            info_panel.update_catalog_stats(cache["stats"])
+        if cache.get("disk_usage") and hasattr(info_panel, "update_disk_usage"):
+            info_panel.update_disk_usage(cache["disk_usage"], cache.get("disk_computed_at"))
+
+        # Cheap recount (single SQL scan) refreshes the numbers right away.
+        self.refresh_catalog_stats()
+
+        # Track activity so heavy disk work only runs while the user is idle.
+        for seq in ("<Motion>", "<KeyPress>", "<ButtonPress>", "<MouseWheel>"):
+            try:
+                self.bind_all(seq, self._mark_user_activity, add="+")
+            except Exception:
+                pass
+        self.after(self.CATALOG_IDLE_POLL_MS, self._catalog_idle_tick)
+
+    def _mark_user_activity(self, _event=None):
+        self._last_activity_ts = time.time()
+
+    def refresh_catalog_stats(self):
+        """Recompute cheap catalog counts in a worker thread and update the info panel.
+
+        Kept off the Tk main thread (scans the 'files' table); results are pushed back
+        via after(0, ...) since Tk widgets are not thread-safe.
+        """
+        info_panel = getattr(self, "info_panel", None)
+        if info_panel is None or not hasattr(info_panel, "update_catalog_stats"):
+            return
+
+        def _worker():
+            try:
+                stats = self.database.get_global_catalog_stats()
+            except Exception as e:
+                logging.error(f"[Catalog] Failed to compute global stats: {e}")
+                return
+            self.after(0, lambda: self._apply_catalog_stats(stats))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_catalog_stats(self, stats):
+        info_panel = getattr(self, "info_panel", None)
+        if info_panel is not None and hasattr(info_panel, "update_catalog_stats"):
+            info_panel.update_catalog_stats(stats)
+        cache = getattr(self, "_catalog_cache", {}) or {}
+        cache["stats"] = stats
+        self._catalog_cache = cache
+        self._save_catalog_cache(cache)
+
+    def _catalog_disk_scan_stale(self):
+        """True if the disk-usage cache is missing or the file count changed since it ran."""
+        cache = getattr(self, "_catalog_cache", {}) or {}
+        if not cache.get("disk_usage"):
+            return True
+        cur_total = (cache.get("stats") or {}).get("total_files")
+        return cache.get("disk_signature") != cur_total
+
+    def _catalog_idle_tick(self):
+        """Periodic check: if the user has been idle long enough, run the disk scan once."""
+        try:
+            if not getattr(self, "_catalog_disk_running", False):
+                idle_s = time.time() - getattr(self, "_last_activity_ts", time.time())
+                if idle_s >= self.CATALOG_IDLE_THRESHOLD_S and self._catalog_disk_scan_stale():
+                    self._start_idle_disk_scan()
+        except Exception as e:
+            logging.debug(f"[Catalog] idle tick error: {e}")
+        finally:
+            try:
+                self.after(self.CATALOG_IDLE_POLL_MS, self._catalog_idle_tick)
+            except Exception:
+                pass
+
+    def _start_idle_disk_scan(self):
+        self._catalog_disk_running = True
+        logging.info("[Catalog] idle disk-usage scan started")
+
+        def _worker():
+            t0 = time.perf_counter()
+            try:
+                usage = self.database.get_disk_usage_by_drive()
+            except Exception as e:
+                logging.error(f"[Catalog] disk scan failed: {e}")
+                usage = {}
+            elapsed = time.perf_counter() - t0
+            logging.info(
+                "[Catalog] idle disk-usage scan done in %.2fs: %s",
+                elapsed,
+                {k: round(v / (1024 ** 3), 2) for k, v in usage.items()},
+            )
+            self.after(0, lambda: self._on_idle_disk_done(usage))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_idle_disk_done(self, usage):
+        self._catalog_disk_running = False
+        ts = time.time()
+        info_panel = getattr(self, "info_panel", None)
+        if info_panel is not None and hasattr(info_panel, "update_disk_usage"):
+            info_panel.update_disk_usage(usage, ts)
+        cache = getattr(self, "_catalog_cache", {}) or {}
+        cache["disk_usage"] = usage
+        cache["disk_computed_at"] = ts
+        cache["disk_signature"] = (cache.get("stats") or {}).get("total_files")
+        self._catalog_cache = cache
+        self._save_catalog_cache(cache)
 
 
 

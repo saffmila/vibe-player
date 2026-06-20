@@ -12,6 +12,7 @@ from PIL import Image, ImageTk
 import os
 import queue
 import threading
+import time
 
 db = Database()
 import logging
@@ -40,6 +41,17 @@ def _format_duration(duration):
 
 def _format_optional(value):
     return value if value not in (None, "") else "?"
+
+
+def _format_bytes(num_bytes):
+    try:
+        num_bytes = float(num_bytes or 0)
+    except (TypeError, ValueError):
+        return "?"
+    gb = num_bytes / (1024 ** 3)
+    if gb >= 1024:
+        return f"{gb / 1024:.2f} TB"
+    return f"{gb:.1f} GB"
 
 
 class InfoPanelFrame(ctk.CTkFrame):
@@ -134,7 +146,7 @@ class InfoPanelFrame(ctk.CTkFrame):
         self.preview_mode_var.trace_add("write", lambda *_: self._update_preview_zoom_button_state())
         self._update_preview_zoom_button_state()
         
-        self.tab_database = self.tabs.add("Database")
+        # General + Database merged into a single tab (catalog fields live below the basics).
         self.database_labels = []
 
         # Tabs: GENERAL
@@ -146,6 +158,15 @@ class InfoPanelFrame(ctk.CTkFrame):
 
         for w in [self.label_name, self.label_size, self.label_dim, self.label_date]:
             w.pack(anchor="w", padx=10, pady=2)
+
+        # Catalog/DB section header + container for dynamically rebuilt rows.
+        self.database_header = ctk.CTkLabel(
+            self.tab_general, text="\u2500\u2500 Database \u2500\u2500",
+            font=("Arial", 10, "bold"), text_color="gray60",
+        )
+        self.database_header.pack(anchor="w", padx=8, pady=(8, 1))
+        self.database_section = ctk.CTkFrame(self.tab_general, fg_color="transparent")
+        self.database_section.pack(fill="x")
 
         # Tabs: METADATA / Tags
         self.tab_tags = self.tabs.add("Tags")
@@ -195,6 +216,211 @@ class InfoPanelFrame(ctk.CTkFrame):
         self.label_scan_type         = _row("Scan Type: ?")
         self.label_encoder_library   = _row("Encoder: ?")
         self.label_compression_ratio = _row("Comp. Ratio: ?")
+
+        self._build_catalog_tab()
+
+    # ------------------------------------------------------------------ #
+    #  GLOBAL CATALOG TAB                                                 #
+    # ------------------------------------------------------------------ #
+
+    CATALOG_VIDEO_COLOR = "#4caf50"
+    CATALOG_IMAGE_COLOR = "#00bfff"
+    CATALOG_OTHER_COLOR = "#5c5c5c"
+    CATALOG_DONUT_SIZE  = 300
+    # Catalog fonts (~30% smaller than the first oversized pass, to fit the panel).
+    CATALOG_ICON_FONT       = 11
+    CATALOG_TEXT_FONT       = 11
+    CATALOG_SMALL_FONT      = 9
+    CATALOG_DONUT_NUM_FONT  = 22
+    CATALOG_DONUT_SUB_FONT  = 10
+
+    # Icon + label key per stat row (icon column is fixed-width so all values left-align).
+    CATALOG_STAT_ROWS = (
+        ("\U0001F4C1", "Total Files", None),
+        ("\U0001F3AC", "Videos", CATALOG_VIDEO_COLOR),
+        ("\U0001F5BC\uFE0F", "Images", CATALOG_IMAGE_COLOR),
+        ("\U0001F3F7\uFE0F", "Keywords", None),
+    )
+
+    def _build_catalog_tab(self):
+        """Library-wide statistics: counts + a lightweight donut drawn on a tk.Canvas."""
+        self.tab_catalog = self.tabs.add("Catalog")
+
+        # Donut chart — plain tk.Canvas, no extra dependency (matplotlib avoided on purpose).
+        size = self.CATALOG_DONUT_SIZE
+        self.catalog_canvas = tk.Canvas(
+            self.tab_catalog,
+            width=size,
+            height=size,
+            bg="#2b2b2b",
+            highlightthickness=0,
+        )
+        self.catalog_canvas.pack(pady=(16, 12))
+
+        # Two side-by-side columns under the donut to keep the panel short:
+        # left = counts, a thin divider, right = disk usage.
+        columns = ctk.CTkFrame(self.tab_catalog, fg_color="transparent")
+        columns.pack(fill="both", expand=True, padx=14, pady=(10, 0))
+        columns.grid_columnconfigure(0, weight=1, uniform="catalog_cols")
+        columns.grid_columnconfigure(1, weight=0)  # divider
+        columns.grid_columnconfigure(2, weight=1, uniform="catalog_cols")
+
+        icon_font = ctk.CTkFont(size=self.CATALOG_ICON_FONT)
+        stat_font = ctk.CTkFont(size=self.CATALOG_TEXT_FONT)
+
+        # --- Left column: counts (centered icon cell + left-aligned value column) ---
+        stats_frame = ctk.CTkFrame(columns, fg_color="transparent")
+        stats_frame.grid(row=0, column=0, sticky="nw")
+        stats_frame.grid_columnconfigure(0, minsize=26)
+        stats_frame.grid_columnconfigure(1, weight=1)
+        self._catalog_value_labels = {}
+        for i, (icon, key, color) in enumerate(self.CATALOG_STAT_ROWS):
+            ctk.CTkLabel(
+                stats_frame, text=icon, font=icon_font, anchor="center"
+            ).grid(row=i, column=0, sticky="nsew", padx=(0, 6), pady=3)
+            val = ctk.CTkLabel(
+                stats_frame, text=f"{key}: \u2014", font=stat_font, anchor="w",
+                **({"text_color": color} if color else {}),
+            )
+            val.grid(row=i, column=1, sticky="w", pady=3)
+            self._catalog_value_labels[key] = val
+
+        # --- Vertical divider between the two columns ---
+        ctk.CTkFrame(columns, width=1, fg_color="gray30").grid(
+            row=0, column=1, sticky="ns", padx=8
+        )
+
+        # --- Right column: disk usage (auto, computed during idle, cached to disk) ---
+        disk_col = ctk.CTkFrame(columns, fg_color="transparent")
+        disk_col.grid(row=0, column=2, sticky="nw")
+
+        # Heading: no icon (it blended into the rows) + colon so it reads as a title.
+        self.catalog_disk_header = ctk.CTkLabel(
+            disk_col, text="Disk usage:",
+            font=ctk.CTkFont(size=self.CATALOG_TEXT_FONT + 1, weight="bold"),
+            text_color="gray80", anchor="w",
+        )
+        self.catalog_disk_header.pack(anchor="w", pady=(0, 4))
+
+        # Drives sit directly under the heading.
+        self.catalog_disk_frame = ctk.CTkFrame(disk_col, fg_color="transparent")
+        self.catalog_disk_frame.pack(fill="x")
+        self.catalog_disk_frame.grid_columnconfigure(0, minsize=26)
+        self.catalog_disk_frame.grid_columnconfigure(1, weight=1)
+        self._catalog_disk_labels = []
+
+        # "As of" timestamp goes to the very bottom, separated under both columns.
+        self.catalog_disk_status = ctk.CTkLabel(
+            self.tab_catalog,
+            text="Disk usage is calculated automatically when idle\u2026",
+            font=ctk.CTkFont(size=self.CATALOG_SMALL_FONT),
+            text_color="gray50", anchor="w",
+        )
+        self.catalog_disk_status.pack(anchor="w", padx=16, pady=(14, 0))
+
+        self._draw_catalog_donut(0, 0, 0, 0)
+
+    def update_catalog_stats(self, stats):
+        """Populate the Catalog tab from a Database.get_global_catalog_stats() dict."""
+        if not stats:
+            return
+        total = int(stats.get("total_files", 0) or 0)
+        videos = int(stats.get("video_count", 0) or 0)
+        images = int(stats.get("image_count", 0) or 0)
+        keywords = int(stats.get("unique_keyword_count", 0) or 0)
+
+        labels = getattr(self, "_catalog_value_labels", {})
+        values = {
+            "Total Files": total,
+            "Videos": videos,
+            "Images": images,
+            "Keywords": keywords,
+        }
+        for key, value in values.items():
+            if key in labels:
+                labels[key].configure(text=f"{key}: {value:,}")
+
+        other = max(0, total - videos - images)
+        self._draw_catalog_donut(videos, images, other, total)
+
+    def update_disk_usage(self, usage, computed_at=None):
+        """Render per-drive disk usage (dict drive->bytes). computed_at is an epoch float."""
+        frame = getattr(self, "catalog_disk_frame", None)
+        if frame is None or not frame.winfo_exists():
+            return
+
+        for lbl in self._catalog_disk_labels:
+            lbl.destroy()
+        self._catalog_disk_labels.clear()
+
+        status = getattr(self, "catalog_disk_status", None)
+        if not usage:
+            if status is not None:
+                status.configure(text="No accessible files yet.")
+            return
+
+        if status is not None:
+            if computed_at:
+                when = time.strftime("%H:%M", time.localtime(computed_at))
+                status.configure(text=f"As of {when}")
+            else:
+                status.configure(text="")
+
+        icon_font = ctk.CTkFont(size=self.CATALOG_ICON_FONT)
+        disk_font = ctk.CTkFont(size=self.CATALOG_TEXT_FONT)
+        for i, drive in enumerate(sorted(usage)):
+            ic = ctk.CTkLabel(frame, text="\U0001F4BD", font=icon_font, anchor="center")
+            ic.grid(row=i, column=0, sticky="nsew", padx=(0, 6), pady=2)
+            val = ctk.CTkLabel(
+                frame, text=f"{drive}   {_format_bytes(usage[drive])}",
+                font=disk_font, anchor="w",
+            )
+            val.grid(row=i, column=1, sticky="w", pady=2)
+            self._catalog_disk_labels.extend([ic, val])
+
+    def _draw_catalog_donut(self, videos, images, other, total):
+        canvas = getattr(self, "catalog_canvas", None)
+        if canvas is None or not canvas.winfo_exists():
+            return
+        canvas.delete("all")
+
+        size = self.CATALOG_DONUT_SIZE
+        pad = 28
+        ring_width = 40
+        bbox = (pad, pad, size - pad, size - pad)
+        cx = cy = size / 2
+
+        if total <= 0:
+            canvas.create_oval(*bbox, outline="#3a3a3a", width=ring_width)
+            canvas.create_text(cx, cy, text="0", fill="#888888",
+                               font=("Segoe UI", self.CATALOG_DONUT_NUM_FONT, "bold"))
+            return
+
+        segments = [
+            (videos, self.CATALOG_VIDEO_COLOR),
+            (images, self.CATALOG_IMAGE_COLOR),
+            (other, self.CATALOG_OTHER_COLOR),
+        ]
+
+        # A single segment covering the whole ring: tk.create_arc draws nothing at
+        # extent ±360, so fall back to a full oval in that case.
+        non_zero = [(v, c) for v, c in segments if v > 0]
+        if len(non_zero) == 1:
+            canvas.create_oval(*bbox, outline=non_zero[0][1], width=ring_width)
+        else:
+            start = 90.0
+            for value, color in segments:
+                if value <= 0:
+                    continue
+                extent = -360.0 * (value / total)  # negative = clockwise
+                canvas.create_arc(*bbox, start=start, extent=extent,
+                                  style="arc", outline=color, width=ring_width)
+                start += extent
+
+        canvas.create_text(cx, cy - 8, text=f"{total:,}",
+                           fill="#e0e0e0", font=("Segoe UI", self.CATALOG_DONUT_NUM_FONT, "bold"))
+        canvas.create_text(cx, cy + 27, text="files",
+                           fill="#888888", font=("Segoe UI", self.CATALOG_DONUT_SUB_FONT))
 
     def _app_controller(self):
         container = getattr(self, "master", None)
@@ -559,15 +785,14 @@ class InfoPanelFrame(ctk.CTkFrame):
             lbl.pack(anchor="w", padx=10)
             self.exif_labels.append(lbl)
 
-        # === DATABASE TAB ===
+        # === DATABASE section (merged into the General tab) ===
         for lbl in self.database_labels:
             lbl.destroy()
         self.database_labels.clear()
 
+        # Name/Resolution already shown in the General basics above — not repeated here.
         db_fields = [
-            ("Filename", metadata.get("filename")),
             ("Path", metadata.get("file_path")),
-            ("Resolution", resolution),
             ("Duration", _format_duration(metadata.get("duration"))),
             ("Rating", rating),
             ("Keywords", keywords_final),
@@ -576,7 +801,7 @@ class InfoPanelFrame(ctk.CTkFrame):
         ]
 
         for label, value in db_fields:
-            lbl = ctk.CTkLabel(self.tab_database, text=f"{label}: {value}", anchor="w")
+            lbl = ctk.CTkLabel(self.database_section, text=f"{label}: {value}", anchor="w")
             lbl.pack(anchor="w", padx=10, pady=1)
             self.database_labels.append(lbl)
 
