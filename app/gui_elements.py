@@ -2113,14 +2113,117 @@ def create_search_window(app):
     keyword_listbox = ctk.CTkTextbox(search_window, height=150, width=50)
     keyword_listbox.pack(fill=ctk.X, padx=10, pady=10)
 
-    # Populate the textbox with existing keywords (strip CSV leftovers; sort for stable left edge)
-    keywords = app.database.get_all_keywords()
-    cleaned = sorted({(k or "").strip() for k in keywords if (k or "").strip()})
-    for kw in cleaned:
-        keyword_listbox.insert(ctk.END, f"{kw}\n")
+    def refresh_keyword_list():
+        """Re-read keywords from the DB and repaint the textbox (stable, sorted order)."""
+        keywords = app.database.get_all_keywords()
+        cleaned = sorted({(k or "").strip() for k in keywords if (k or "").strip()})
+        keyword_listbox.delete("1.0", ctk.END)
+        for kw in cleaned:
+            keyword_listbox.insert(ctk.END, f"{kw}\n")
+
+    refresh_keyword_list()
 
     # Bind double-click event to add selected keyword to search entry
     keyword_listbox.bind("<Double-Button-1>", lambda e: select_keyword_from_textbox(e, keyword_listbox, search_entry))
+
+    # Right-click context menu: manage keywords globally (delete / rename across all files)
+    keyword_menu = Menu(search_window, tearoff=0)
+
+    def _keyword_at_event(event):
+        """Return the keyword text on the row under the pointer, or '' if none."""
+        try:
+            index = keyword_listbox.index(f"@{event.x},{event.y}")
+            line_number = int(index.split(".")[0])
+            return keyword_listbox.get(f"{line_number}.0", f"{line_number}.end").strip()
+        except Exception:
+            return ""
+
+    def _dialog_parent():
+        # Drop the always-on-top flag while a modal dialog is open so it isn't hidden behind it.
+        try:
+            search_window.attributes("-topmost", False)
+        except Exception:
+            pass
+
+    def _restore_topmost():
+        try:
+            search_window.attributes("-topmost", True)
+            search_window.lift()
+            search_window.focus_force()
+        except Exception:
+            pass
+
+    def delete_keyword_globally(keyword):
+        if not keyword:
+            return
+        affected = app.database.count_files_with_keyword(keyword)
+        if affected == 0:
+            _dialog_parent()
+            messagebox.showinfo("Delete keyword", f"'{keyword}' is not used by any file.", parent=search_window)
+            _restore_topmost()
+            refresh_keyword_list()
+            return
+        _dialog_parent()
+        confirm = messagebox.askyesno(
+            "Delete keyword",
+            f"Delete the keyword '{keyword}' from {affected} file(s)?\n\nThis cannot be undone.",
+            icon="warning",
+            parent=search_window,
+        )
+        _restore_topmost()
+        if not confirm:
+            return
+        affected_paths = app.database.delete_keyword_global(keyword)
+        refresh_keyword_list()
+        if hasattr(app, "refresh_keyword_displays_for_paths"):
+            try:
+                app.refresh_keyword_displays_for_paths(affected_paths)
+            except Exception:
+                pass
+        logging.info(f"Search menu: deleted keyword '{keyword}' from {len(affected_paths)} file(s)")
+
+    def rename_keyword_globally(keyword):
+        if not keyword:
+            return
+        affected = app.database.count_files_with_keyword(keyword)
+        _dialog_parent()
+        dialog = ctk.CTkInputDialog(
+            text=f"Rename '{keyword}' (used by {affected} file(s)) to:",
+            title="Rename keyword",
+        )
+        new_name = dialog.get_input()
+        _restore_topmost()
+        if new_name is None:
+            return
+        new_name = new_name.strip()
+        if not new_name or new_name == keyword:
+            return
+        affected_paths = app.database.rename_keyword_global(keyword, new_name)
+        refresh_keyword_list()
+        if hasattr(app, "refresh_keyword_displays_for_paths"):
+            try:
+                app.refresh_keyword_displays_for_paths(affected_paths)
+            except Exception:
+                pass
+        logging.info(f"Search menu: renamed keyword '{keyword}' -> '{new_name}' in {len(affected_paths)} file(s)")
+
+    def show_keyword_menu(event):
+        keyword = _keyword_at_event(event)
+        if not keyword:
+            return
+        keyword_menu.delete(0, ctk.END)
+        keyword_menu.add_command(label=f"Add '{keyword}' to search", command=lambda: _add_keyword_to_entry(keyword, search_entry))
+        keyword_menu.add_separator()
+        keyword_menu.add_command(label=f"Rename '{keyword}' everywhere…", command=lambda: rename_keyword_globally(keyword))
+        keyword_menu.add_command(label=f"Delete '{keyword}' everywhere", command=lambda: delete_keyword_globally(keyword))
+        try:
+            keyword_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            keyword_menu.grab_release()
+
+    # Button-3 is right-click on Windows/Linux; Button-2 covers right-click on macOS.
+    keyword_listbox.bind("<Button-3>", show_keyword_menu)
+    keyword_listbox.bind("<Button-2>", show_keyword_menu)
 
     # Add instructions for using comparison operators
     instructions_label = ctk.CTkLabel(
@@ -2129,7 +2232,8 @@ def create_search_window(app):
              "1. Use 'AND' or 'OR' for combining multiple terms.\n"
              "2. Use '=', '!=', '<=', '>=', '<', or '>' to compare numerical fields (e.g., rating).\n"
              "3. Type filters results to All, Videos, or Images.\n"
-             "4. Double-click a keyword to add it to the search field.",
+             "4. Double-click a keyword to add it to the search field.\n"
+             "5. Right-click a keyword to rename or delete it across all files.",
         wraplength=720, justify="left"
     )
     instructions_label.pack(fill=ctk.X, padx=10, pady=5)
@@ -2187,18 +2291,23 @@ def create_search_window(app):
     return search_window
 
 
+def _add_keyword_to_entry(keyword, entry):
+    """Append a keyword to the search entry, comma-separating from existing text."""
+    keyword = (keyword or "").strip()
+    if not keyword:
+        return
+    if entry.get():
+        entry.insert(ctk.END, f", {keyword}")
+    else:
+        entry.insert(ctk.END, keyword)
+
+
 def select_keyword_from_textbox(event, textbox, entry):
     # Get the index of the line clicked
     index = textbox.index(f"@{event.x},{event.y}")
     line_number = int(index.split('.')[0])
     line_text = textbox.get(f"{line_number}.0", f"{line_number}.end")
-
-    # Add the keyword to the search entry
-    current_text = entry.get()
-    if current_text:
-        entry.insert(ctk.END, f", {line_text.strip()}")
-    else:
-        entry.insert(ctk.END, line_text.strip())
+    _add_keyword_to_entry(line_text, entry)
 
 
 

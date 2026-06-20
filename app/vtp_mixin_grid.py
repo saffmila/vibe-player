@@ -3361,6 +3361,53 @@ class VtpGridMixin:
 
 
 
+    def refresh_keyword_displays_for_paths(self, paths):
+        """Repaint under-thumb captions for the given files after a global keyword change.
+
+        Accepts any path casing; matching is done on normalized paths. Only files that are
+        currently rendered in the grid are refreshed (others repaint naturally on next render).
+        """
+        if not paths:
+            return
+        try:
+            affected = {self.database.normalize_path(p) for p in paths if p}
+        except Exception:
+            affected = set(paths)
+        if not affected:
+            return
+
+        if getattr(self, "_vg_active", False):
+            for path in list(self.thumbnail_labels.keys()):
+                try:
+                    if self.database.normalize_path(path) in affected:
+                        self._vg_refresh_file_labels(path)
+                except Exception:
+                    continue
+            return
+
+        for path, info in list(self.thumbnail_labels.items()):
+            try:
+                if self.database.normalize_path(path) not in affected or not info:
+                    continue
+                row, col = info["row"], info["col"]
+                thumbnail_frame = info["canvas"].master
+                self.update_thumbnail_label(
+                    file_path=path,
+                    file_name=os.path.basename(path),
+                    thumbnail_frame=thumbnail_frame,
+                    canvas=info["canvas"],
+                    row=row,
+                    col=col,
+                    index=info["index"],
+                    labelBGColor="gray",
+                    thumb_backFill=False,
+                    canvas_height=240,
+                    canvas_width=320,
+                    is_folder=os.path.isdir(path),
+                )
+            except Exception:
+                continue
+
     def remove_all_keywords_from_selection(self):
         """Remove all keywords from all selected thumbnails."""
         for file_path, _, _ in self.selected_thumbnails:

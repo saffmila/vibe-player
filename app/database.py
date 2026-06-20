@@ -358,8 +358,76 @@ class Database:
         except Exception as e:
             logging.error(f"Error updating keywords for {file_path}: {e}")
 
+    @staticmethod
+    def _split_keywords(raw):
+        """Split a stored comma-separated keyword string into a clean token list."""
+        if not raw:
+            return []
+        return [kw.strip() for kw in raw.split(",") if kw.strip()]
 
+    def count_files_with_keyword(self, keyword):
+        """Return how many files currently contain the exact keyword (case-insensitive token match)."""
+        target = (keyword or "").strip().lower()
+        if not target:
+            return 0
+        count = 0
+        # Narrow with LIKE first, then confirm with exact token match to avoid substring false positives.
+        rows = self.db.query(
+            "SELECT keywords FROM files WHERE keywords LIKE :like",
+            like=f"%{keyword.strip()}%",
+        )
+        for row in rows:
+            tokens = [t.lower() for t in self._split_keywords(row.get("keywords"))]
+            if target in tokens:
+                count += 1
+        return count
 
+    def delete_keyword_global(self, keyword):
+        """Remove the exact keyword from every file that has it. Returns list of affected file paths."""
+        target = (keyword or "").strip().lower()
+        if not target:
+            return []
+        affected = []
+        rows = list(self.db.query(
+            "SELECT id, file_path, keywords FROM files WHERE keywords LIKE :like",
+            like=f"%{keyword.strip()}%",
+        ))
+        for row in rows:
+            tokens = self._split_keywords(row.get("keywords"))
+            kept = [t for t in tokens if t.lower() != target]
+            if len(kept) == len(tokens):
+                continue
+            new_value = ", ".join(sorted(set(kept)))
+            self.table.update({"id": row["id"], "keywords": new_value}, ["id"])
+            if row.get("file_path"):
+                self._invalidate_cache(row["file_path"])
+                affected.append(row["file_path"])
+        logging.info(f"Deleted keyword '{keyword}' from {len(affected)} file(s)")
+        return affected
+
+    def rename_keyword_global(self, old_keyword, new_keyword):
+        """Rename the exact keyword to a new value across every file. Returns list of affected file paths."""
+        old_target = (old_keyword or "").strip().lower()
+        new_clean = (new_keyword or "").strip()
+        if not old_target or not new_clean:
+            return []
+        affected = []
+        rows = list(self.db.query(
+            "SELECT id, file_path, keywords FROM files WHERE keywords LIKE :like",
+            like=f"%{old_keyword.strip()}%",
+        ))
+        for row in rows:
+            tokens = self._split_keywords(row.get("keywords"))
+            if old_target not in [t.lower() for t in tokens]:
+                continue
+            replaced = [new_clean if t.lower() == old_target else t for t in tokens]
+            new_value = ", ".join(sorted(set(replaced)))
+            self.table.update({"id": row["id"], "keywords": new_value}, ["id"])
+            if row.get("file_path"):
+                self._invalidate_cache(row["file_path"])
+                affected.append(row["file_path"])
+        logging.info(f"Renamed keyword '{old_keyword}' -> '{new_keyword}' in {len(affected)} file(s)")
+        return affected
 
     def remove_duplicates_from_db(db_path="catalog.db"):
         """
