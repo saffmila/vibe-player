@@ -36,16 +36,50 @@ _OPENCV_FRAGILE_VIDEO_EXTS = (
 class Tooltip:
     """Lightweight tooltip for compact icon controls."""
 
-    def __init__(self, widget, text):
+    def __init__(self, widget, text, delay_ms=500, anchor="center"):
         self.widget = widget
         self.text = text
+        self.delay_ms = delay_ms
+        self.anchor = anchor          # "center" (výchozí) nebo "w" (k levé hraně widgetu)
         self.tip_window = None
-        self.widget.bind("<Enter>", self._show, add="+")
+        self._show_job = None
+        self.widget.bind("<Enter>", self._schedule, add="+")
         self.widget.bind("<Leave>", self._hide, add="+")
         self.widget.bind("<ButtonPress>", self._hide, add="+")
 
+    def _schedule(self, _event=None):
+        """Zobrazení tooltipu s malým zpožděním, aby neblikal při přejíždění myší."""
+        self._cancel_scheduled()
+        if self.delay_ms and self.delay_ms > 0:
+            self._show_job = self.widget.after(self.delay_ms, self._show)
+        else:
+            self._show()
+
+    def _cancel_scheduled(self):
+        if self._show_job is not None:
+            try:
+                self.widget.after_cancel(self._show_job)
+            except Exception:
+                pass
+            self._show_job = None
+
+    def _resolve_text(self):
+        """Text může být statický řetězec nebo callable vracející řetězec
+        (užitečné, když se obsah mění za běhu, např. cesta k aktuálnímu videu)."""
+        text = self.text
+        if callable(text):
+            try:
+                text = text()
+            except Exception:
+                text = ""
+        return text or ""
+
     def _show(self, _event=None):
         if self.tip_window is not None:
+            return
+
+        text = self._resolve_text()
+        if not text:
             return
 
         self.tip_window = tw = tk.Toplevel(self.widget)
@@ -59,7 +93,7 @@ class Tooltip:
 
         tk.Label(
             tw,
-            text=self.text,
+            text=text,
             bg="#0f1115",
             fg="#ffffff",
             relief="flat",
@@ -76,6 +110,7 @@ class Tooltip:
         tw.lift()
 
     def _hide(self, _event=None):
+        self._cancel_scheduled()
         if self.tip_window is not None:
             self.tip_window.destroy()
             self.tip_window = None
@@ -92,7 +127,11 @@ class Tooltip:
         )
         margin = 8
 
-        x = widget_x + (widget_w - tip_width) // 2
+        if self.anchor == "w":
+            # Zarovnání k levé hraně widgetu (text v širokém labelu je vlevo).
+            x = widget_x
+        else:
+            x = widget_x + (widget_w - tip_width) // 2
         min_x = monitor_x + margin
         max_x = monitor_x + monitor_w - tip_width - margin
         if max_x < min_x:

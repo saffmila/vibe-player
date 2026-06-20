@@ -825,6 +825,10 @@ class TimelineBarWidget(ctk.CTkFrame):
             menu.add_separator()
 
         # --- PLAYBACK ---
+        has_video = bool(self.video_path and os.path.isfile(self.video_path))
+        menu.add_command(label="▶ Play",
+                         command=self.play_video,
+                         state="normal" if has_video else "disabled")
         menu.add_command(label=f"Play from here ({self.format_time(clicked_time)})",
                          command=lambda: self.seek_and_play(clicked_time))
         menu.add_separator()
@@ -1321,6 +1325,21 @@ class TimelineBarWidget(ctk.CTkFrame):
                 if hasattr(active_player, 'play_video'):
                     active_player.play_video()
 
+    def play_video(self):
+        """Otevře/přehraje aktuální video timeline widgetu od začátku.
+
+        Použito z RMB menu jako prosté 'Play' – uživatel může přehrát video,
+        které má ve widgetu, i když mezitím browsoval v jiných složkách.
+        """
+        active_player = getattr(self.controller, "current_video_window", None)
+        if not active_player:
+            if self.video_path and os.path.isfile(self.video_path):
+                self.controller.open_video_player(
+                    self.video_path, os.path.basename(self.video_path)
+                )
+        elif hasattr(active_player, "play_video"):
+            active_player.play_video()
+
     def _delayed_seek(self, timestamp):
         """Helper for seek after player opens."""
         if self.on_seek:
@@ -1381,6 +1400,8 @@ class TimelineBarWidget(ctk.CTkFrame):
 
         self.info_label = ctk.CTkLabel(self.toolbar_frame, text="Loading info...", anchor="w", font=toolbar_font)
         self.info_label.pack(side="left", fill="x", expand=True, padx=10, pady=(0, 2))
+        # Hover nad názvem videa ukáže celou cestu k souboru (uživatel pak ví, kde video je).
+        Tooltip(self.info_label, lambda: self.video_path or "", anchor="w")
 
         self.zoom_label = ctk.CTkLabel(
             self.toolbar_frame,
