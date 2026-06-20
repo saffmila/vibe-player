@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
+import platform
 import tkinter as tk
 from tkinter import ttk
 from typing import Any, Callable
@@ -793,7 +794,7 @@ def show_about_window(app):
     about_window = ctk.CTkToplevel(app)
     app.about_window = about_window
     about_window.title("About Vibe Player")
-    about_window.geometry("700x560")
+    about_window.geometry("640x740")
     about_window.attributes('-topmost', True)
 
     def _close_about():
@@ -802,47 +803,158 @@ def show_about_window(app):
 
     about_window.protocol("WM_DELETE_WINDOW", _close_about)
 
-    text = (
-        "Vibe Video Player\n"
-        "Version 1.0\n\n"
-        "Author: Milan Saffek\n\n"
-        "Technical Background:\n"
-        "This player is powered by the VLC Media Player engine (via python-vlc) "
-        "and features a modern interface built with CustomTkinter.\n\n"
-        "License & Open Source:\n"
-        "Vibe Player is Open Source software. You can find the source code, report bugs, "
-        "or download the latest updates on our GitHub repository.\n\n"
-        "Support the Project:\n"
-        "If you enjoy using Vibe Player, consider supporting its further development. "
-        "Your contributions help keep the project alive!\n\n"
-        "Special Thanks:\n"
-        "A huge thanks to the open-source community and the developers of VLC and "
-        "CustomTkinter. Created with passion for the community."
-    )
+    ACCENT = "#4A9EFF"        # blue for titles / section headers / links
+    ACCENT_HOVER = "#7FBEFF"  # lighter blue on hover
+    BODY = "#E8E8E8"          # light/white body text
+    MUTED = "#9AA0A6"         # subtle (version, copyright)
 
-    frame = ctk.CTkFrame(about_window)
-    frame.pack(fill="both", expand=True, padx=12, pady=12)
-
-    ctk.CTkLabel(
-        frame,
-        text=text,
-        justify="left",
-        anchor="w",
-        wraplength=650
-    ).pack(fill="x", padx=14, pady=(14, 10))
-
-    btns = ctk.CTkFrame(frame)
-    btns.pack(fill="x", padx=14, pady=(0, 8))
-
-    coffee_url = getattr(app, "coffee_url", "https://buymeacoffee.com/")
-    paypal_url = getattr(app, "paypal_url", "https://www.paypal.com/donate")
+    APP_NAME = "Vibe Video Player"
+    APP_VERSION = "1.0"
+    coffee_url = getattr(app, "coffee_url", "https://buymeacoffee.com/saffmila")
     github_url = getattr(app, "help_url", "https://github.com/saffmila/vibe-player")
 
-    ctk.CTkButton(btns, text="Buy Me a Coffee", command=lambda: webbrowser.open(coffee_url, new=2)).pack(side="left", padx=(0, 8))
-    ctk.CTkButton(btns, text="Donate via PayPal", command=lambda: webbrowser.open(paypal_url, new=2)).pack(side="left", padx=(0, 8))
-    ctk.CTkButton(btns, text="Open GitHub", command=lambda: webbrowser.open(github_url, new=2)).pack(side="left")
+    def _collect_system_info():
+        lines = [f"{APP_NAME} {APP_VERSION}"]
+        try:
+            lines.append(f"OS: {platform.platform()}")
+        except Exception:
+            pass
+        try:
+            lines.append(f"Python: {platform.python_version()}")
+        except Exception:
+            pass
+        try:
+            lines.append(f"CustomTkinter: {getattr(ctk, '__version__', 'unknown')}")
+        except Exception:
+            pass
+        try:
+            import vlc  # type: ignore
+            ver = vlc.libvlc_get_version()
+            if isinstance(ver, bytes):
+                ver = ver.decode("utf-8", "ignore")
+            lines.append(f"VLC: {ver}")
+        except Exception:
+            pass
+        return "\n".join(lines)
 
-    ctk.CTkButton(frame, text="Close", command=_close_about).pack(pady=(8, 12))
+    def _copy_system_info():
+        try:
+            about_window.clipboard_clear()
+            about_window.clipboard_append(_collect_system_info())
+            copy_btn.configure(text="Copied!")
+            about_window.after(1500, lambda: copy_btn.winfo_exists() and copy_btn.configure(text="Copy System Info"))
+        except Exception as e:
+            logging.info(f"[ABOUT] Failed to copy system info: {e}")
+
+    # --- Bottom: copyright + action bar (pinned, so they stay visible) ---
+    ctk.CTkLabel(
+        about_window,
+        text=f"\u00a9 2026 Milan Saffek  \u00b7  Open Source  \u00b7  Built with passion",
+        font=ctk.CTkFont(size=11), text_color=MUTED,
+    ).pack(side="bottom", pady=(0, 12))
+
+    ctk.CTkButton(
+        about_window, text="Close", command=_close_about, width=140
+    ).pack(side="bottom", pady=(0, 6))
+
+    btns = ctk.CTkFrame(about_window, fg_color="transparent")
+    btns.pack(side="bottom", pady=(8, 4))
+    ctk.CTkButton(
+        btns, text="Buy Me a Coffee", width=150,
+        command=lambda: webbrowser.open(coffee_url, new=2)
+    ).pack(side="left", padx=6)
+    ctk.CTkButton(
+        btns, text="Open GitHub", width=130,
+        command=lambda: webbrowser.open(github_url, new=2)
+    ).pack(side="left", padx=6)
+    copy_btn = ctk.CTkButton(
+        btns, text="Copy System Info", width=150,
+        fg_color="transparent", border_width=1, command=_copy_system_info
+    )
+    copy_btn.pack(side="left", padx=6)
+
+    # --- Main content ---
+    frame = ctk.CTkFrame(about_window, fg_color="transparent")
+    frame.pack(fill="both", expand=True, padx=20, pady=(18, 6))
+
+    def _divider():
+        ctk.CTkFrame(frame, height=1, fg_color="#3A3A3A").pack(fill="x", padx=50, pady=9)
+
+    def _section(title, body, body_bold=False):
+        ctk.CTkLabel(
+            frame, text=title,
+            font=ctk.CTkFont(size=15, weight="bold"), text_color=ACCENT,
+        ).pack(pady=(2, 3))
+        ctk.CTkLabel(
+            frame, text=body, justify="center", wraplength=540,
+            font=ctk.CTkFont(size=13, weight="bold" if body_bold else "normal"),
+            text_color=BODY,
+        ).pack(pady=(0, 2))
+
+    # Header: logo + title + version (with build month) + author (accent blue)
+    icon_dir = os.path.join(getattr(app, "default_directory", "."), "icons")
+    logo_image = None
+    for _name in ("vibe_player.png", "vibe_player.ico"):
+        _p = os.path.join(icon_dir, _name)
+        if os.path.exists(_p):
+            try:
+                _img = Image.open(_p).convert("RGBA")
+                logo_image = ctk.CTkImage(light_image=_img, dark_image=_img, size=(72, 72))
+                break
+            except Exception as e:
+                logging.info(f"[ABOUT] Failed to load logo {_p}: {e}")
+    if logo_image is not None:
+        ctk.CTkLabel(frame, image=logo_image, text="").pack(pady=(2, 4))
+        # Keep a strong reference so Tk doesn't garbage-collect the image.
+        about_window._about_logo = logo_image
+
+    ctk.CTkLabel(
+        frame, text=APP_NAME,
+        font=ctk.CTkFont(size=28, weight="bold"), text_color=ACCENT,
+    ).pack(pady=(0, 0))
+    ctk.CTkLabel(
+        frame, text=f"Version {APP_VERSION}  \u00b7  June 2026",
+        font=ctk.CTkFont(size=13), text_color=MUTED,
+    ).pack(pady=(2, 4))
+    ctk.CTkLabel(
+        frame, text="by Milan Saffek",
+        font=ctk.CTkFont(size=16, weight="bold"), text_color=ACCENT,
+    ).pack(pady=(0, 6))
+
+    _divider()
+    _section(
+        "Technical Background",
+        "This player is powered by the VLC Media Player engine (via python-vlc) "
+        "and features a modern interface built with CustomTkinter.",
+    )
+    _divider()
+    _section(
+        "License & Open Source",
+        "Vibe Player is Open Source software. You can find the source code, report bugs, "
+        "or download the latest updates on our GitHub repository.",
+    )
+    # Clickable GitHub link
+    link = ctk.CTkLabel(
+        frame, text=github_url,
+        font=ctk.CTkFont(size=13, underline=True), text_color=ACCENT, cursor="hand2",
+    )
+    link.pack(pady=(2, 2))
+    link.bind("<Button-1>", lambda _e: webbrowser.open(github_url, new=2))
+    link.bind("<Enter>", lambda _e: link.configure(text_color=ACCENT_HOVER))
+    link.bind("<Leave>", lambda _e: link.configure(text_color=ACCENT))
+    _divider()
+    _section(
+        "Support the Project",
+        "If you enjoy using Vibe Player, consider supporting its further development.\n"
+        "Your contributions help keep the project alive!",
+        body_bold=True,
+    )
+    _divider()
+    _section(
+        "Special Thanks",
+        "A huge thanks to the open-source community and the developers of VLC and "
+        "CustomTkinter. Created with passion for the community.",
+    )
 
 
 def build_edit_menuOld(app):
