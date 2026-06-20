@@ -567,6 +567,30 @@ class VtpDndMixin:
         rename_all = False
         skip_all = False
 
+        # Pre-flight validation: reject the WHOLE batch before touching the filesystem if the
+        # destination lives inside (or equals) any source folder. Doing this check per-item
+        # inside the loop below would first move the "innocent" siblings (e.g. images selected
+        # alongside the folder) and only then error out on the folder — leaving a half-done op.
+        dest_norm = os.path.normcase(os.path.normpath(dest))
+        for src in sources:
+            if not os.path.isdir(src):
+                continue
+            src_norm = os.path.normcase(os.path.normpath(src))
+            if dest_norm == src_norm or dest_norm.startswith(src_norm + os.sep):
+                logging.warning(
+                    f"[DnD] BLOCKED (pre-flight) - destination is inside source: {src} -> {dest}"
+                )
+                self.after(0, lambda s=src, d=dest: self.universal_dialog(
+                    title="DnD warning",
+                    message=(
+                        "Destination folder is inside the source folder.\n\n"
+                        "Nothing was moved or copied.\n\n"
+                        f"Source: {s}\nDestination: {d}"
+                    ),
+                    cancel_text="OK"
+                ))
+                return
+
         for src in sources:
             dst = os.path.join(dest, os.path.basename(src))
             src_norm = os.path.normcase(os.path.normpath(src))
@@ -892,6 +916,12 @@ class VtpDndMixin:
     def _dnd_mark_tree_press(self, event):
         self._dnd_press_ts = time.monotonic()
         self._dnd_press_kind = "tree"
+        try:
+            self._dnd_press_x_root = int(event.x_root)
+            self._dnd_press_y_root = int(event.y_root)
+        except Exception:
+            self._dnd_press_x_root = None
+            self._dnd_press_y_root = None
         item = self.tree.identify_row(event.y) if hasattr(self, "tree") else None
         self._dnd_press_path = self.tree.set(item, "path") if item else None
         try:
@@ -938,6 +968,52 @@ class VtpDndMixin:
             return bool(ctypes.windll.user32.GetKeyState(0x01) & 0x8000)  # VK_LBUTTON
         except Exception:
             return False
+
+    def _dnd_cursor_pos(self) -> tuple[int, int] | None:
+        """Current global cursor position (x, y) in screen pixels, or None."""
+        try:
+            class _POINT(ctypes.Structure):
+                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+            pt = _POINT()
+            if ctypes.windll.user32.GetCursorPos(ctypes.byref(pt)):
+                return (int(pt.x), int(pt.y))
+        except Exception:
+            pass
+        return None
+
+    def _dnd_movement_exceeds_threshold(
+        self, min_dist_px: float, max_wait_ms: float
+    ) -> bool:
+        """
+        Distinguish an intentional drag from an accidental micro-move during a click.
+
+        tkinterdnd2's <<DragInitCmd>> is a one-shot fired by Windows OLE as soon as the
+        cursor crosses the tiny system drag threshold (~4px) with LMB held — so a small
+        hand shake on a folder/expander click already triggers it. We busy-poll here and
+        only accept the drag once the cursor has actually travelled min_dist_px from the
+        press point. Returns False if the button is released first (= click) or if the
+        cursor never moves far enough within max_wait_ms (= long press without intent).
+        """
+        px = getattr(self, "_dnd_press_x_root", None)
+        py = getattr(self, "_dnd_press_y_root", None)
+        if px is None or py is None:
+            # No baseline recorded — don't block, fall back to legacy behavior.
+            return True
+        threshold_sq = float(min_dist_px) * float(min_dist_px)
+        deadline = time.monotonic() + (float(max_wait_ms) / 1000.0)
+        while True:
+            if not self._dnd_is_left_button_down():
+                return False
+            pos = self._dnd_cursor_pos()
+            if pos is not None:
+                dx = pos[0] - px
+                dy = pos[1] - py
+                if (dx * dx + dy * dy) >= threshold_sq:
+                    return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.005)
 
     def _dnd_modifiers_down(self) -> bool:
         """Return True when Shift/Ctrl is currently pressed."""
@@ -1083,6 +1159,16 @@ class VtpDndMixin:
                 float(self._dnd_hold_ms_tree),
                 press_path,
                 path
+            )
+            return
+        if not self._dnd_movement_exceeds_threshold(
+            getattr(self, "_dnd_drag_min_distance_px_tree", 12),
+            getattr(self, "_dnd_drag_distance_timeout_ms", 800),
+        ):
+            logging.info(
+                "[DnD] DRAG OUT blocked (tree): movement below threshold (%spx) — treated as click, press_path=%r",
+                getattr(self, "_dnd_drag_min_distance_px_tree", 12),
+                press_path,
             )
             return
         if not path or not os.path.exists(path):

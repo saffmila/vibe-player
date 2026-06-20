@@ -280,6 +280,11 @@ class VideoThumbnailPlayer(
         self._dnd_hold_ms_multi = 35
         # Tree DragInit fires before thumbnail DragInit; a long hold would block tree DnD.
         self._dnd_hold_ms_tree = 30
+        # Anti-accidental drag: tree DnD only starts after the cursor actually travels this far
+        # from the press point. A click (or a small hand shake on a folder / expander) never
+        # crosses it, while an intentional drag does. The timeout caps the busy-poll window.
+        self._dnd_drag_min_distance_px_tree = 12
+        self._dnd_drag_distance_timeout_ms = 800
         self._dnd_press_ts = 0.0
         self._dnd_press_kind = None   # "thumb" | "tree" | None
         self._dnd_press_path = None
