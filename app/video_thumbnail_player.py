@@ -4766,10 +4766,11 @@ class VideoThumbnailPlayer(
         """Update info panel asynchronously (non-blocking)."""
         if not self.preview_on:
               return
-        
-        if not os.path.exists(path):
-            logging.info(f"[ERROR] update_panel_info: path does not exist: {path}")
-            return
+
+        # Latest-click-wins token: rapid folder clicking spawns one worker per click,
+        # so drop results from superseded selections instead of flickering through them.
+        seq = getattr(self, "_panel_info_seq", 0) + 1
+        self._panel_info_seq = seq
 
         # Reset Video tab immediately so stale data from previous file isn't visible
         if self.info_panel and path.lower().endswith(VIDEO_FORMATS):
@@ -4777,6 +4778,15 @@ class VideoThumbnailPlayer(
 
         def worker():
             try:
+                # os.path.exists() can block for seconds on a stalled network drive (j:\),
+                # so keep it off the UI thread to avoid freezing the app on a click.
+                if not os.path.exists(path):
+                    logging.info(f"[ERROR] update_panel_info: path does not exist: {path}")
+                    return
+
+                if seq != getattr(self, "_panel_info_seq", seq):
+                    return  # a newer selection superseded this one
+
                 metadata = get_file_metadata(path)
                 if not isinstance(metadata, dict):
                     logging.info(f"[ERROR] Metadata for {path} is invalid: {metadata}")
@@ -4823,7 +4833,10 @@ class VideoThumbnailPlayer(
                 metadata["rating"] = rating
                 metadata["keywords"] = keywords
 
-                self.after(0, lambda: self.info_panel.update_info(metadata, rating, keywords) if self.info_panel else None)
+                if seq != getattr(self, "_panel_info_seq", seq):
+                    return  # a newer selection superseded this one while we worked
+                self.after(0, lambda: self.info_panel.update_info(metadata, rating, keywords)
+                           if (self.info_panel and seq == getattr(self, "_panel_info_seq", seq)) else None)
             except Exception as e:
                 logging.info(f"[ERROR] Failed to update panel info for {path}: {e}")
 

@@ -5341,7 +5341,16 @@ class VtpGridMixin:
                 return
 
         self.select_thumbnail(index, shift=shift, ctrl=ctrl, trigger_preview=False, click_widget=label)
-        if file_path and os.path.isdir(file_path):
+        # Use the already-known folder flag from video_files instead of os.path.isdir():
+        # on a mapped network drive (e.g. j:\) a stat call can block the UI thread for
+        # seconds when the SMB share stalls, freezing the whole app on a folder click.
+        is_dir = False
+        if file_path:
+            if 0 <= index < len(self.video_files):
+                is_dir = bool(self.video_files[index].get('is_folder', False))
+            else:
+                is_dir = os.path.isdir(file_path)
+        if file_path and is_dir:
             self.current_directory = file_path
             self._schedule_tree_sync_for_current_dir()
 
