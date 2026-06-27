@@ -2433,6 +2433,19 @@ class VideoThumbnailPlayer(
                         parent,
                         exc_info=True,
                     )
+                # Re-check the green (cached) tree icon: if this ancestor no longer has
+                # any media after the removal, clear its stale green icon. The verifier
+                # is a no-op for folders that are not green or still contain media.
+                try:
+                    verify = getattr(self, "_verify_selected_folder_cache_status_async", None)
+                    if callable(verify):
+                        verify(parent)
+                except Exception:
+                    logging.debug(
+                        "[FolderPreview] ancestor cache verify failed for %s",
+                        parent,
+                        exc_info=True,
+                    )
 
             new_parent = os.path.dirname(parent)
             if not new_parent or new_parent == parent:

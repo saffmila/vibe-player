@@ -1498,17 +1498,21 @@ class VtpGridMixin:
 
     def _folder_has_media_cached(self, folder_path: str) -> bool:
         key = self.database.normalize_path(folder_path)
-        try:
-            mtime = os.path.getmtime(folder_path)
-        except OSError:
-            mtime = None
+        # Use the same signature as the wide filmstrip (folder mtime + immediate
+        # sub-directory mtimes). Keying on the folder's own mtime alone missed media
+        # added one level down (e.g. into a subfolder), so a parent's parent kept
+        # showing no filmstrip for it.
+        mtime = self._wide_strip_dir_signature(folder_path)
         cached = self._folder_media_presence_cache.get(key)
-        # Entries are (dir_mtime, has_media). Re-evaluate when the folder's own mtime
-        # changed (e.g. media copied directly into a previously empty folder) so its
-        # wide filmstrip starts showing up without needing a manual cache reset.
+        # Entries are (dir_signature, has_media). Re-evaluate when the signature
+        # changed so a folder that gained media starts showing its wide filmstrip.
         if isinstance(cached, tuple) and cached[0] == mtime:
             return cached[1]
-        has_media = self.folder_contains_media(folder_path)
+        # Bounded probe (depth/dir/time limited) instead of an unbounded recursive
+        # walk: this runs on the main thread for every folder item, and re-runs when
+        # mtime changes, so an unbounded walk on a huge tree froze the UI. Media beyond
+        # the preview's reach wouldn't render a filmstrip anyway, so this stays correct.
+        has_media = bool(self._get_folder_content_for_preview(folder_path, num_files=1))
         self._folder_media_presence_cache[key] = (mtime, has_media)
         return has_media
 

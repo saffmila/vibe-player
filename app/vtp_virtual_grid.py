@@ -2249,11 +2249,37 @@ class VtpVirtualGridMixin:
         _blocked = getattr(self, "_folder_cache_auto_mark_is_blocked", None)
         if callable(_blocked) and _blocked(cd):
             return
-        try:
-            self.database.update_cache_status(cd, True)
-            self.refresh_folder_icon(cd)
-        except Exception as e:
-            logging.debug("[VGrid] folder cache flag update failed: %s", e)
+
+        # Only flag a folder green when it actually has media (directly or nested).
+        # Marking an empty/emptied folder green made it fight the selection-time
+        # verifier (which clears media-less folders), causing the icon to flicker
+        # green<->default on parent folders after their thumbs were removed.
+        #
+        # The media probe is a bounded scan run off the main thread: a recursive,
+        # unbounded check here froze the UI when opening large trees.
+        def _mark_worker(folder=cd):
+            try:
+                has_media = bool(
+                    self._get_folder_content_for_preview(folder, num_files=1)
+                )
+            except Exception:
+                has_media = True
+
+            def _apply():
+                try:
+                    if getattr(self, "current_directory", None) != folder:
+                        return
+                    self.database.update_cache_status(folder, bool(has_media))
+                    self.refresh_folder_icon(folder)
+                except Exception as e:
+                    logging.debug("[VGrid] folder cache flag update failed: %s", e)
+
+            try:
+                self.after(0, _apply)
+            except Exception:
+                pass
+
+        threading.Thread(target=_mark_worker, daemon=True).start()
 
     def _vg_try_finish_folder_cache_mark(self, render_id) -> None:
         """When async generation for this view is done, set DB/tree green for current_directory."""
