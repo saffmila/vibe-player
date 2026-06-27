@@ -342,7 +342,7 @@ class VtpLegacyDragMixin:
 
             # Finalize drop on the main thread
             def finalize():
-                self.finalize_drop(target_path, moved_items)
+                self.finalize_drop(target_path, moved_items, copy_mode=copy_mode)
                 # Restart the watcher
                 try:
                     logging.info("Resuming directory watcher...")
@@ -645,6 +645,10 @@ class VtpLegacyDragMixin:
                 else:
                     shutil.copytree(source_path, new_path)
                 logging.info(f"Copied {source_path} to {new_path}")
+                # Record copies too so finalize_drop refreshes the view / rebuilds the
+                # target folder's wide preview instead of bailing out (it used to only
+                # track moves, so a copy onto a folder left a stale filmstrip).
+                moved_items.append(source_path)
             else:
                 shutil.move(source_path, new_path)
                 logging.info(f"Moved {source_path} to {new_path}")
@@ -677,16 +681,16 @@ class VtpLegacyDragMixin:
         else:
             logging.info(f"DEBUG: Cache directory not found: {cache_path}")
 
-    def finalize_drop(self, target_path, moved_items):
+    def finalize_drop(self, target_path, moved_items, copy_mode=False):
         """Perform final updates after dropping items."""
         logging.info(f"Finalizing drop to target path: {target_path}")
 
-        # Debug: List moved items
+        # Debug: List transferred items
         if moved_items:
-            logging.info(f"Moved items: {moved_items}")
+            logging.info(f"Transferred items: {moved_items}")
         else:
-            logging.info("No items moved. Skipping cleanup.")
-            return  # Exit early if no items were moved
+            logging.info("No items transferred. Skipping cleanup.")
+            return  # Exit early if nothing was moved or copied
 
         # Cleanup stale references in selected thumbnails
         logging.info(f"Selected thumbnails before cleanup: {len(self.selected_thumbnails)}")
@@ -706,15 +710,26 @@ class VtpLegacyDragMixin:
             )
             self.current_directory = refresh_path
 
-        # Refresh the tree for all moved items
-        for moved_item in moved_items:
-            self.update_tree_view(moved_item, target_path)
-            self.refresh_folder_icon(os.path.dirname(moved_item))
+        # Move relocates the source tree node; a copy must leave the source in place.
+        if not copy_mode:
+            for moved_item in moved_items:
+                self.update_tree_view(moved_item, target_path)
+                self.refresh_folder_icon(os.path.dirname(moved_item))
         self.refresh_folder_icon(target_path)
+
+        # The target folder gained media, so its (and ancestors') wide filmstrip must
+        # rebuild — otherwise the cached strip stays as if nothing was added.
+        if hasattr(self, "_invalidate_folder_preview_caches"):
+            try:
+                self._invalidate_folder_preview_caches(target_path)
+            except Exception:
+                logging.debug(
+                    "[Drop] folder preview invalidate failed for %s", target_path, exc_info=True
+                )
 
         # Refresh views
         if refresh_path and os.path.isdir(refresh_path):
-            self.display_thumbnails(refresh_path, preserve_scroll=True)
+            self.display_thumbnails(refresh_path, force_refresh=True, preserve_scroll=True)
             logging.info(f"Thumbnails refreshed for current directory: {refresh_path}")
         else:
             logging.info("Skipping thumbnail refresh; directory no longer exists: %s", refresh_path)
@@ -942,8 +957,17 @@ class VtpLegacyDragMixin:
                 for thumb_path, thumb_name, thumb_label in self.selected_thumbnails
                 if os.path.exists(thumb_path)
             ]
+        # The destination folder (and its ancestors) gained media, so their wide
+        # filmstrips/preview icons must rebuild to include the pasted files.
+        if hasattr(self, "_invalidate_folder_preview_caches"):
+            try:
+                self._invalidate_folder_preview_caches(dest_dir)
+            except Exception:
+                logging.debug(
+                    "[Paste] folder preview invalidate failed for %s", dest_dir, exc_info=True
+                )
         if self.current_directory:
-            self.display_thumbnails(self.current_directory, preserve_scroll=True)
+            self.display_thumbnails(self.current_directory, force_refresh=True, preserve_scroll=True)
         if self.current_directory and os.path.exists(self.current_directory):
             try:
                 self.start_directory_watcher(self.current_directory)

@@ -1498,9 +1498,19 @@ class VtpGridMixin:
 
     def _folder_has_media_cached(self, folder_path: str) -> bool:
         key = self.database.normalize_path(folder_path)
-        if key not in self._folder_media_presence_cache:
-            self._folder_media_presence_cache[key] = self.folder_contains_media(folder_path)
-        return self._folder_media_presence_cache[key]
+        try:
+            mtime = os.path.getmtime(folder_path)
+        except OSError:
+            mtime = None
+        cached = self._folder_media_presence_cache.get(key)
+        # Entries are (dir_mtime, has_media). Re-evaluate when the folder's own mtime
+        # changed (e.g. media copied directly into a previously empty folder) so its
+        # wide filmstrip starts showing up without needing a manual cache reset.
+        if isinstance(cached, tuple) and cached[0] == mtime:
+            return cached[1]
+        has_media = self.folder_contains_media(folder_path)
+        self._folder_media_presence_cache[key] = (mtime, has_media)
+        return has_media
 
 
     def set_wide_folder_columns(self, num_columns):
@@ -3809,11 +3819,29 @@ class VtpGridMixin:
             f"!folder_wide_{os.path.basename(folder_path)}_h{target_height}_g{gap_val}_r{RADIUS}.png",
         )
 
+        folder_mtime = self._wide_strip_dir_signature(folder_path)
+
         if os.path.exists(wide_thumbnail_path):
             try:
                 with Image.open(wide_thumbnail_path) as img:
-                    img.verify() 
-                return wide_thumbnail_path
+                    img.load()
+                    stored_sources = img.info.get("vtp_sources")
+                    stored_mtime = img.info.get("vtp_mtime")
+                # Only trust the cached strip when (a) every file it was composed from
+                # still exists (so deleting media drops out) and (b) the folder has not
+                # changed since (so newly added files get composited in). Legacy caches
+                # lack this metadata and are regenerated once to attach it.
+                if stored_sources:
+                    cached_sources = [p for p in stored_sources.split("\n") if p]
+                    sources_ok = bool(cached_sources) and all(
+                        os.path.exists(p) for p in cached_sources
+                    )
+                    mtime_ok = (
+                        folder_mtime is None
+                        or (stored_mtime is not None and stored_mtime == repr(folder_mtime))
+                    )
+                    if sources_ok and mtime_ok:
+                        return wide_thumbnail_path
             except Exception:
                 pass
 
@@ -3822,16 +3850,20 @@ class VtpGridMixin:
             return None
 
         thumbnails = []
-        thumbnail_size = (self.thumbnail_size[0] // 2, self.thumbnail_size[1] // 2)
-        
+        # Use the SAME size, capture time and DB as the regular grid thumbnails so the
+        # filmstrip reuses the exact cached thumbnail (same frame / same cache file)
+        # instead of generating its own at a different timestamp.
+        thumbnail_size = self.thumbnail_size
+
         for file_path in source_file_paths:
             thumb = None
             if file_path.lower().endswith(VIDEO_FORMATS):
                 thumb = create_video_thumbnail(
                     file_path, thumbnail_size, self.thumbnail_format,
-                    self.capture_method_var.get(), thumbnail_time=self.thumbnail_time,
+                    self.capture_method_var.get(),
+                    thumbnail_time=self.calculate_thumbnail_time(file_path),
                     cache_enabled=self.cache_enabled, overwrite=False,
-                    cache_dir=self.thumbnail_cache_path
+                    cache_dir=self.thumbnail_cache_path, database=self.database,
                 )
             elif file_path.lower().endswith(IMAGE_FORMATS):
                 thumb = create_image_thumbnail(
@@ -3875,7 +3907,16 @@ class VtpGridMixin:
             wide_image.paste(rounded_thumb, (x_offset, 0))
             x_offset += thumb_width + GAP
 
-        wide_image.save(wide_thumbnail_path, format="PNG", compress_level=1)
+        # Persist which files this strip was built from so a later cache hit can
+        # detect deleted media and regenerate instead of serving a stale filmstrip.
+        from PIL.PngImagePlugin import PngInfo
+        meta = PngInfo()
+        meta.add_text("vtp_sources", "\n".join(source_file_paths))
+        if folder_mtime is not None:
+            meta.add_text("vtp_mtime", repr(folder_mtime))
+        wide_image.save(
+            wide_thumbnail_path, format="PNG", compress_level=1, pnginfo=meta
+        )
         return wide_thumbnail_path
 
 

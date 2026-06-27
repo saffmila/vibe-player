@@ -101,6 +101,9 @@ class VtpVirtualGridMixin:
         self._folder_preview_scan_budget_s = 0.75
         self._folder_preview_empty_retry_s = 30.0
         self._folder_preview_empty_seen_at: dict[tuple, float] = {}
+        # wide_key -> folder mtime at the moment its filmstrip was built, so an
+        # in-memory cached strip can be detected as stale after files are added.
+        self._vg_wide_built_mtime: dict[str, float] = {}
         self._start_folder_preview_worker()
 
         # ------------------------------------------------------------------
@@ -412,6 +415,45 @@ class VtpVirtualGridMixin:
             f"\x00size={int(wide_w)}x{int(wide_h)}"
             f"\x00g={gap}\x00r={radius}"
         )
+
+    def _wide_strip_dir_signature(self, folder_path: str):
+        """Cheap change signature for a wide folder's filmstrip.
+
+        Combines the folder's own mtime with the mtimes of its immediate child
+        directories (a single ``scandir``). Wide-folder media usually lives in the
+        folder or one level down, so this catches added/removed files there without
+        walking the whole subtree, while staying cheap enough for the render path.
+        """
+        try:
+            latest = os.path.getmtime(folder_path)
+        except OSError:
+            return None
+        try:
+            with os.scandir(folder_path) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            m = entry.stat(follow_symlinks=False).st_mtime
+                            if m > latest:
+                                latest = m
+                    except OSError:
+                        continue
+        except OSError:
+            pass
+        return latest
+
+    def _vg_wide_strip_is_stale(self, folder_path: str, wide_key: str) -> bool:
+        """True when the folder changed since its in-memory filmstrip was built.
+
+        Adding files to a folder (or an immediate subfolder) bumps the signature, so a
+        strip cached in memory (which otherwise short-circuits regeneration) is rebuilt
+        to include the new media.
+        """
+        built = self._vg_wide_built_mtime.get(wide_key)
+        if built is None:
+            return False
+        current = self._wide_strip_dir_signature(folder_path)
+        return current is not None and current != built
 
     @staticmethod
     def _vg_flatten_rgba_for_tk(img: Image.Image, bg_rgb: tuple[int, int, int]) -> Image.Image:
@@ -2151,7 +2193,7 @@ class VtpVirtualGridMixin:
                 nprev = int(getattr(self, "vg_wide_preview_count", 5))
                 wide_key = self._vg_wide_cache_key(fp, nprev)
                 cached = thumbnail_cache.get(wide_key, memory_cache=self.memory_cache)
-                if cached is None:
+                if cached is None or self._vg_wide_strip_is_stale(fp, wide_key):
                     items_to_generate.append(item)
             elif thumbnail_cache.get(fp, memory_cache=self.memory_cache) is None:
                 items_to_generate.append(item)
@@ -2314,6 +2356,11 @@ class VtpVirtualGridMixin:
                         wide_key = self._vg_wide_cache_key(file_path, nprev)
                         thumbnail_cache.set(wide_key, wide_ctk,
                                             memory_cache=self.memory_cache)
+                        sig = self._wide_strip_dir_signature(file_path)
+                        if sig is None:
+                            self._vg_wide_built_mtime.pop(wide_key, None)
+                        else:
+                            self._vg_wide_built_mtime[wide_key] = sig
                         self.after(0, lambda fp=file_path:
                                    self._vg_apply_generated_thumb(fp))
                         wide_applied = True

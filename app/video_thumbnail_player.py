@@ -2405,6 +2405,21 @@ class VideoThumbnailPlayer(
                         parent,
                         exc_info=True,
                     )
+                # Adding/removing media changes whether a folder qualifies for a wide
+                # filmstrip and its aggregate stats; drop those memoized results so the
+                # folder re-evaluates instead of staying stuck as a plain (or stale) icon.
+                try:
+                    pkey = self.database.normalize_path(parent)
+                    if hasattr(self, "_folder_media_presence_cache"):
+                        self._folder_media_presence_cache.pop(pkey, None)
+                    if hasattr(self, "_wide_folder_stats_cache"):
+                        self._wide_folder_stats_cache.pop(pkey, None)
+                except Exception:
+                    logging.debug(
+                        "[FolderPreview] invalidate presence/stats pop failed for %s",
+                        parent,
+                        exc_info=True,
+                    )
                 try:
                     cache = getattr(getattr(self, "thumbnail_cache", None), "cache", None)
                     if isinstance(cache, dict):
