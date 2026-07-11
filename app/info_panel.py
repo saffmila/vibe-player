@@ -17,6 +17,8 @@ import time
 db = Database()
 import logging
 
+from utils import create_context_menu
+
 
 def _format_resolution(width, height):
     try:
@@ -471,14 +473,7 @@ class InfoPanelFrame(ctk.CTkFrame):
         self._update_preview_zoom_button_state()
         if self.preview_zoom_button is None or self.preview_zoom_button.cget("state") == "disabled":
             return
-        menu = tk.Menu(
-            self,
-            tearoff=0,
-            bg="#2b2b2b",
-            fg="white",
-            activebackground="#444",
-            selectcolor="#d0d0d0",
-        )
+        menu = create_context_menu(getattr(self, "controller", None), self)
         in_strips = getattr(self.preview_mode_var, "get", lambda: "Video")() == "Strips"
         state = "normal" if in_strips and self._preview_strips_viewer() is not None else "disabled"
         menu.add_command(label="Zoom In", command=lambda: self._preview_zoom_action("zoom_in"), state=state)

@@ -121,7 +121,7 @@ from video_operations import VideoPlayer, get_audio_devices, prewarm_vlc_instanc
 from timeline_manager import TimelineManager
 from timeline_bar_widget import TimelineBarWidget
 from multi_timeline_viewer import MultiTimelineViewer
-from utils import create_menu
+from utils import create_menu, create_context_menu
 import win32api
 import string
 
@@ -2065,7 +2065,7 @@ class VideoThumbnailPlayer(
             logging.info("DEBUG: No valid file path resolved for the context menu.")
             return
 
-        menu = tk.Menu(self, tearoff=0)
+        menu = create_context_menu(self, self)
         _hk = getattr(self, "hotkeys_map", None) or DEFAULT_HOTKEYS
 
         # Add context menu options
@@ -2153,7 +2153,7 @@ class VideoThumbnailPlayer(
 
     def show_empty_thumbnail_view_context_menu(self, event):
         """Right-click on empty thumbnail area (no item under cursor): minimal menu (Paste)."""
-        menu = tk.Menu(self, tearoff=0)
+        menu = create_context_menu(self, self)
         self.add_clipboard_paste_cascade(menu, getattr(self, "current_directory", None))
         menu.tk_popup(event.x_root, event.y_root)
 

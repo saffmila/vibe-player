@@ -29,7 +29,7 @@ from file_operations import (
     get_video_duration_mediainfo,
     probe_first_video_stream,
 )
-from utils import Tooltip, create_menu, parse_srt_file
+from utils import Tooltip, create_menu, create_context_menu, parse_srt_file
 from hotkeys import DEFAULT_HOTKEYS, menu_accel
 
 
@@ -788,14 +788,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         seg_hit = self._get_segment_hover_at(cx, cy)
         marker_under_cursor = self._bookmark_marker_at(cx, cy)
 
-        menu = tk.Menu(
-            self,
-            tearoff=0,
-            bg="#2b2b2b",
-            fg="white",
-            activebackground="#444",
-            selectcolor="#d0d0d0",
-        )
+        menu = create_context_menu(self.controller, self)
         if seg_hit is not None:
             seg_idx = int(seg_hit["index"])
             if 0 <= seg_idx < len(self.segments):
@@ -2818,14 +2811,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.redraw_timeline()
 
     def show_zoom_menu(self, event=None):
-        menu = tk.Menu(
-            self,
-            tearoff=0,
-            bg="#2b2b2b",
-            fg="white",
-            activebackground="#444",
-            selectcolor="#d0d0d0",
-        )
+        menu = create_context_menu(getattr(self, "controller", None), self)
         menu.add_command(label="Zoom In", command=self.zoom_in)
         menu.add_command(label="Zoom Out", command=self.zoom_out)
         menu.add_separator()
@@ -3043,14 +3029,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.snap_btn.config(text=f"📐 {self.snap_type}")
 
     def show_snap_menu(self, event=None):
-        menu = tk.Menu(
-            self,
-            tearoff=0,
-            bg="#2b2b2b",
-            fg="white",
-            activebackground="#444",
-            selectcolor="#d0d0d0",
-        )
+        menu = create_context_menu(getattr(self, "controller", None), self)
         snap_var = tk.StringVar(value=self.snap_type)
         for snap in self.snap_types:
             menu.add_radiobutton(

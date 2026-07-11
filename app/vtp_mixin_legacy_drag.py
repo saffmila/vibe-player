@@ -16,6 +16,7 @@ from clipboard_file_list import (
 )
 from gui_elements import get_conflict_rename_path, open_conflict_dialog
 from hotkeys import DEFAULT_HOTKEYS, format_accelerator_menu
+from utils import create_context_menu
 
 
 class VtpLegacyDragMixin:
@@ -900,7 +901,7 @@ class VtpLegacyDragMixin:
 
     def add_clipboard_paste_cascade(self, menu: tk.Menu, dest_dir: str | None) -> None:
         """Append a Paste submenu (Copy here / Move here) to a context menu."""
-        paste_sub = tk.Menu(menu, tearoff=0)
+        paste_sub = create_context_menu(self, menu)
         can_paste = bool(
             clipboard_has_pastable_paths() and dest_dir and os.path.isdir(dest_dir)
         )

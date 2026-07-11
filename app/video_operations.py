@@ -29,7 +29,7 @@ import tkinter.font as tkfont
 import sys
 import ctypes
 # from gui_elements import create_menu
-from utils import create_menu
+from utils import create_context_menu
 import logging
 
 import tkinterdnd2 as dnd
@@ -3399,7 +3399,7 @@ class VideoPlayer:
         return x_root, y_root
 
     def show_video_menu(self, event=None, *, x_root=None, y_root=None):
-        menu = create_menu(self.controller, self.video_window)
+        menu = create_context_menu(self.controller, self.video_window)
         self._guard_menu_commands(menu)
 
         if callable(getattr(self.controller, "open_library", None)):
@@ -3458,7 +3458,7 @@ class VideoPlayer:
 
         menu.add_separator()
 
-        speed_menu = tk.Menu(menu, tearoff=0)
+        speed_menu = create_context_menu(self.controller, menu)
         self._guard_menu_commands(speed_menu)
         speeds = [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2]
         for spd in speeds:
@@ -3500,7 +3500,7 @@ class VideoPlayer:
         The menu is positioned directly under the button that called it.
         """
         # Create the menu using the helper function, parented to the controller
-        menu = create_menu(self.controller, self.controls_frame)
+        menu = create_context_menu(self.controller, self.controls_frame)
         self._guard_menu_commands(menu)
 
         # Add commands that call existing methods within this VideoPlayer instance

@@ -346,24 +346,31 @@ def get_video_size(video_path: str) -> tuple[int | None, int | None]:
                 pass
 
 
-def create_menu(app: Any, parent: Any) -> Menu:
-    """
-    Build a themed Tkinter menu and wrap add_* so menu use triggers the app's
-    interaction guard when present.
-    """
-    menu = Menu(parent, tearoff=0)
+CONTEXT_MENU_BG = "#2B2B2B"
+CONTEXT_MENU_FG = "#FFFFFF"
+CONTEXT_MENU_ACTIVE_BG = "#404040"
+CONTEXT_MENU_ACTIVE_FG = "#FFFFFF"
+CONTEXT_MENU_SELECT_COLOR = "#d0d0d0"
+CONTEXT_MENU_FONT = ("Segoe UI", 12)
+
+
+def apply_context_menu_style(menu: Menu) -> None:
+    """Apply the standard dark popup-menu styling used across the app."""
     menu.configure(
-        background=app.BackroundColor,
-        foreground=app.thumb_TextColor,
-        activebackground="#404040",
-        activeforeground="white",
-        relief="sunken",
+        background=CONTEXT_MENU_BG,
+        foreground=CONTEXT_MENU_FG,
+        activebackground=CONTEXT_MENU_ACTIVE_BG,
+        activeforeground=CONTEXT_MENU_ACTIVE_FG,
+        relief="flat",
         activeborderwidth=0,
         borderwidth=0,
-        font=("Helvetica", 12),
-        # Checkmarks / radio dots stay visible on dark menu backgrounds (Windows Tk).
-        selectcolor="#d0d0d0",
+        font=CONTEXT_MENU_FONT,
+        selectcolor=CONTEXT_MENU_SELECT_COLOR,
     )
+
+
+def _wrap_menu_interaction_guard(menu: Menu, app: Any) -> None:
+    """Wrap menu callbacks so the app can ignore stray mouse-up after menu use."""
 
     def wrap_method(original_method: Any) -> Any:
         def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -383,6 +390,36 @@ def create_menu(app: Any, parent: Any) -> Menu:
     menu.add_checkbutton = wrap_method(menu.add_checkbutton)
     menu.add_radiobutton = wrap_method(menu.add_radiobutton)
 
+
+def create_context_menu(app: Any, parent: Any) -> Menu:
+    """
+    Build a dark-themed popup/context menu for RMB menus and cascaded submenus.
+    """
+    menu = Menu(parent, tearoff=0)
+    apply_context_menu_style(menu)
+    if app is not None:
+        _wrap_menu_interaction_guard(menu, app)
+    return menu
+
+
+def create_menu(app: Any, parent: Any) -> Menu:
+    """
+    Build a themed Tkinter menu and wrap add_* so menu use triggers the app's
+    interaction guard when present.
+    """
+    menu = Menu(parent, tearoff=0)
+    menu.configure(
+        background=app.BackroundColor,
+        foreground=app.thumb_TextColor,
+        activebackground=CONTEXT_MENU_ACTIVE_BG,
+        activeforeground=CONTEXT_MENU_ACTIVE_FG,
+        relief="sunken",
+        activeborderwidth=0,
+        borderwidth=0,
+        font=CONTEXT_MENU_FONT,
+        selectcolor=CONTEXT_MENU_SELECT_COLOR,
+    )
+    _wrap_menu_interaction_guard(menu, app)
     return menu
 
 

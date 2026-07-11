@@ -20,7 +20,7 @@ import webbrowser
 import customtkinter as ctk
 
 from app_settings import TaggingSettings
-from utils import create_menu
+from utils import create_menu, create_context_menu
 import logging
 from hotkeys import DEFAULT_HOTKEYS, action_label, format_accelerator_menu, iter_help_sections, menu_accel
 
@@ -2244,7 +2244,7 @@ def create_search_window(app):
     keyword_listbox.bind("<Double-Button-1>", lambda e: select_keyword_from_textbox(e, keyword_listbox, search_entry))
 
     # Right-click context menu: manage keywords globally (delete / rename across all files)
-    keyword_menu = Menu(search_window, tearoff=0)
+    keyword_menu = create_context_menu(app, search_window)
 
     def _keyword_at_event(event):
         """Return the keyword text on the row under the pointer, or '' if none."""

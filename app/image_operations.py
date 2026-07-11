@@ -21,6 +21,7 @@ from screeninfo import get_monitors
 import tkinter as tk
 
 from gui_elements import CTkFlatContextMenu
+from utils import create_context_menu
 
 
 class ImageViewerLegacy:
@@ -693,7 +694,7 @@ class ImageViewerLegacy:
             self.vbar.grid() if image_height > canvas_height else self.vbar.grid_remove()
 
     def show_context_menu(self, event):
-        menu = tk.Menu(self.image_window, tearoff=0)
+        menu = create_context_menu(self.controller, self.image_window)
         
         def hk_label(name, default):
             if hasattr(self.controller, 'hotkeys_map'):

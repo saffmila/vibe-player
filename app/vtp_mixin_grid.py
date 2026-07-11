@@ -24,7 +24,7 @@ from file_operations import *
 from gui_elements import create_search_window
 from image_operations import create_image_viewer
 from video_operations import VideoPlayer
-from utils import get_video_size
+from utils import create_context_menu, get_video_size
 from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS, preview_skip_subdir
 from virtual_folders import load_virtual_folders
 from hotkeys import DEFAULT_HOTKEYS, menu_accel, rename_accelerators_label
@@ -3071,7 +3071,7 @@ class VtpGridMixin:
         """
         Show a context menu specifically for thumbnail (file) actions.
         """
-        menu = tk.Menu(self, tearoff=0)
+        menu = create_context_menu(self, self)
         _hk = getattr(self, "hotkeys_map", None) or DEFAULT_HOTKEYS
 
         video_name = os.path.basename(file_path)
@@ -3180,8 +3180,8 @@ class VtpGridMixin:
         # Add to / Remove from Virtual Library
         virtual_libraries = load_virtual_folders()["virtual_folders"].keys()
         if virtual_libraries:
-            add_menu = tk.Menu(menu, tearoff=0)
-            remove_menu = tk.Menu(menu, tearoff=0)
+            add_menu = create_context_menu(self, menu)
+            remove_menu = create_context_menu(self, menu)
             for name in virtual_libraries:
                 add_menu.add_command(label=name, command=lambda name=name: self.add_to_virtual_library(self.selected_thumbnails, name))
                 remove_menu.add_command(label=name, command=lambda name=name: self.remove_from_virtual_library(self.selected_thumbnails, name))
