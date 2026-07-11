@@ -73,6 +73,24 @@ def _dnd_tk_surface(widget):
     return None
 
 
+def get_gpu_names() -> list[str]:
+    """Return installed GPU names from Windows WMI (empty list on failure)."""
+    try:
+        result = subprocess.run(
+            ["wmic", "path", "win32_VideoController", "get", "name"],
+            capture_output=True, text=True, timeout=5,
+        )
+        names = [
+            line.strip()
+            for line in result.stdout.splitlines()
+            if line.strip() and line.strip().lower() != "name"
+        ]
+        return names
+    except Exception as e:
+        logging.warning(f"[GPU] Failed to enumerate GPUs: {e}")
+        return []
+
+
 def get_gpu_vendor() -> str:
     """
     Detects the GPU vendor by querying Windows WMI.
@@ -80,18 +98,11 @@ def get_gpu_vendor() -> str:
     Returns 'NVIDIA', 'AMD', or 'OTHER' based on the installed GPU name.
     Falls back to 'OTHER' if detection fails.
     """
-    try:
-        result = subprocess.run(
-            ["wmic", "path", "win32_VideoController", "get", "name"],
-            capture_output=True, text=True, timeout=5
-        )
-        output = result.stdout.upper()
-        if "NVIDIA" in output:
-            return "NVIDIA"
-        if "AMD" in output or "RADEON" in output:
-            return "AMD"
-    except Exception as e:
-        logging.warning(f"[GPU] Failed to detect GPU vendor: {e}")
+    output = " ".join(get_gpu_names()).upper()
+    if "NVIDIA" in output:
+        return "NVIDIA"
+    if "AMD" in output or "RADEON" in output:
+        return "AMD"
     return "OTHER"
 
 def get_audio_devices():
@@ -161,10 +172,16 @@ def _build_vlc_options(
         vlc_options = [
             '--vout=direct3d11',
             '--avcodec-hw=d3d11va',
+            # VLC defaults to linear upscaling; RTX VSR requires explicit super mode.
+            '--d3d11-upscale-mode=super',
             '--file-logging',
             '--logfile=vlc-log.txt',
         ]
-        logging.info(f"[GPU Upscale] Args: --vout=direct3d11 --avcodec-hw=d3d11va  (vendor={gpu_vendor})")
+        logging.info(
+            "[GPU Upscale] Args: --vout=direct3d11 --avcodec-hw=d3d11va "
+            "--d3d11-upscale-mode=super  (vendor=%s)",
+            gpu_vendor,
+        )
     else:
         vlc_options = [
             f'--vout={effective_video_output}',
@@ -174,19 +191,29 @@ def _build_vlc_options(
         ]
 
     # Optional video quality filters configured in app preferences.
-    # VLC accepts multiple filters as a colon-separated chain.
-    filter_chain = []
-    if not legacy_mpeg_profile and getattr(controller, "vlc_enable_postproc", False):
-        filter_chain.append("postproc")
-        postproc_q = int(getattr(controller, "vlc_postproc_quality", 6))
-        postproc_q = max(0, min(6, postproc_q))
-        vlc_options.append(f'--postproc-q={postproc_q}')
-    if not legacy_mpeg_profile and getattr(controller, "vlc_enable_gradfun", False):
-        filter_chain.append("gradfun")
-    if filter_chain:
-        vlc_options.append(f'--video-filter={":".join(filter_chain)}')
-    if not legacy_mpeg_profile and getattr(controller, "vlc_enable_deinterlace", False):
-        vlc_options.append('--deinterlace=1')
+    # CPU filters break the D3D11 GPU pipeline required for RTX VSR / AMD FSR.
+    if effective_gpu_upscale and (
+        getattr(controller, "vlc_enable_postproc", False)
+        or getattr(controller, "vlc_enable_gradfun", False)
+        or getattr(controller, "vlc_enable_deinterlace", False)
+    ):
+        logging.warning(
+            "[GPU Upscale] Skipping VLC video filters while GPU upscaling is active "
+            "(postproc/gradfun/deinterlace force CPU processing and disable VSR)."
+        )
+    elif not legacy_mpeg_profile:
+        filter_chain = []
+        if getattr(controller, "vlc_enable_postproc", False):
+            filter_chain.append("postproc")
+            postproc_q = int(getattr(controller, "vlc_postproc_quality", 6))
+            postproc_q = max(0, min(6, postproc_q))
+            vlc_options.append(f'--postproc-q={postproc_q}')
+        if getattr(controller, "vlc_enable_gradfun", False):
+            filter_chain.append("gradfun")
+        if filter_chain:
+            vlc_options.append(f'--video-filter={":".join(filter_chain)}')
+        if getattr(controller, "vlc_enable_deinterlace", False):
+            vlc_options.append('--deinterlace=1')
     if getattr(controller, "vlc_skiploopfilter_disable", False):
         vlc_options.append('--avcodec-skiploopfilter=0')
 
@@ -994,10 +1021,24 @@ class VideoPlayer:
 
         vlc_version = vlc.libvlc_get_version().decode("utf-8") if hasattr(vlc, "libvlc_get_version") else "unknown"
         gpu_vendor = get_gpu_vendor()
+        gpu_names = get_gpu_names()
 
         upscale_enabled = getattr(self, "use_gpu_upscale", False)
         vout = "--vout=direct3d11" if upscale_enabled else f"--vout={self.video_output}"
         hw_dec = "d3d11va (for RTX VSR)" if upscale_enabled else self.hardware_decoding
+        upscale_mode = "--d3d11-upscale-mode=super" if upscale_enabled else "linear (default)"
+        active_filters = []
+        if getattr(self.controller, "vlc_enable_postproc", False):
+            active_filters.append("postproc")
+        if getattr(self.controller, "vlc_enable_gradfun", False):
+            active_filters.append("gradfun")
+        if getattr(self.controller, "vlc_enable_deinterlace", False):
+            active_filters.append("deinterlace")
+        filters_note = (
+            "SKIPPED (incompatible with VSR)"
+            if upscale_enabled and active_filters
+            else (", ".join(active_filters) if active_filters else "none")
+        )
         player_state = str(self.player.get_state()) if self.player else "no player"
 
         # Check VLC version meets minimum requirement (3.0.19)
@@ -1008,12 +1049,18 @@ class VideoPlayer:
             vlc_ok = False
         vlc_status = "OK" if vlc_ok else f"TOO OLD – need 3.0.19+, you have {vlc_version}"
 
+        gpu_list = "\n".join(f"   • {name}" for name in gpu_names) if gpu_names else "   (detection failed)"
+
         lines = [
             f"VLC version:        {vlc_version}  [{vlc_status}]",
             f"GPU vendor:         {gpu_vendor}",
+            "Installed GPUs:",
+            gpu_list,
             f"GPU Upscale flag:   {'ENABLED' if upscale_enabled else 'disabled'}",
             f"Video output arg:   {vout}",
             f"HW decoding arg:    {hw_dec}",
+            f"Upscale mode arg:   {upscale_mode}",
+            f"VLC video filters:  {filters_note}",
             f"Player state:       {player_state}",
             "",
             "── RTX VSR checklist ─────────────────────────────────",
@@ -1021,17 +1068,23 @@ class VideoPlayer:
             f"{'✅' if upscale_enabled else '❌'} GPU Upscale enabled in Preferences",
             f"{'✅' if gpu_vendor == 'NVIDIA' else '⚠️'} NVIDIA GPU detected ({gpu_vendor})",
             "",
-            "⚠️  NVIDIA Control Panel steps required:",
+            "⚠️  NVIDIA Control Panel / NVIDIA App required:",
             "   Video → Adjust video image settings",
             "   → RTX video enhancement → Super Resolution → ON",
-            "   → Quality: 4 (Ultra Quality)",
+            "   → Enable VSR status indicator to confirm it is active",
+            "",
+            "⚠️  Which GPU is used (5090 vs 4090):",
+            "   Windows picks the GPU connected to the monitor showing the video.",
+            "   Set python.exe / VibePlayer.exe → High performance GPU in:",
+            "   Windows Settings → System → Display → Graphics",
             "",
             "⚠️  RTX VSR only activates when:",
             "   • Video resolution < display resolution (e.g. 1080p on 4K screen)",
             "   • VLC uses D3D11VA HW decoding (not software/dxva2)",
-            "   • VLC renders via Direct3D11 output",
+            "   • VLC renders via Direct3D11 with --d3d11-upscale-mode=super",
+            "   • No CPU video filters (postproc/gradfun) in the pipeline",
             "",
-            "Tip: check vlc-log.txt for detailed VLC errors.",
+            "Tip: check vlc-log.txt for 'Using Super Resolution scaler'.",
         ]
 
         report = "\n".join(lines)
@@ -1650,9 +1703,8 @@ class VideoPlayer:
         Creates a VLC instance with robust audio parameter validation
         to prevent errors and ghost instances.
 
-        If self.use_gpu_upscale is True, forces Direct3D11 output and enables
-        GPU upscaling (NVIDIA RTX Super Resolution or AMD FSR) with full
-        hardware acceleration via --avcodec-hw=any.
+        If self.use_gpu_upscale is True, forces Direct3D11 output, D3D11VA
+        hardware decoding, and --d3d11-upscale-mode=super for RTX VSR / AMD FSR.
         Requires VLC 3.0.19+ and GPU drivers with upscaling enabled in the
         NVIDIA Control Panel or AMD Software. A player restart is needed
         when this setting is toggled.
