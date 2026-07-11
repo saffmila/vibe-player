@@ -652,8 +652,13 @@ def build_file_menu(app, *_):
 
 def build_view_menu(app):
     view_menu = create_menu(app, app)
+    _hk = getattr(app, "hotkeys_map", None) or DEFAULT_HOTKEYS
 
-    view_menu.add_command(label="Show Playlist", command=app.Open_playlist)
+    _acc_pl = menu_accel(_hk, "show_playlist")
+    _pl_opts = {"label": "Show Playlist", "command": app.Open_playlist}
+    if _acc_pl:
+        _pl_opts["accelerator"] = _acc_pl
+    view_menu.add_command(**_pl_opts)
     
     if not hasattr(app, "wide_folders_check_var"):
         app.wide_folders_check_var = tk.BooleanVar(value=(app.folder_view_mode.get() == "Wide"))

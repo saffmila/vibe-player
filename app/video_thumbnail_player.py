@@ -3273,6 +3273,8 @@ class VideoThumbnailPlayer(
         # --- Playlists ---
         self.bind_all(self.hotkeys_map['add_to_playlist'], g(self.add_selected_to_playlist))
         self.bind_all(self.hotkeys_map['new_playlist'], g(lambda event: self.add_selected_to_playlist(event, new_playlist=True)))
+        self.bind_all(self.hotkeys_map['show_playlist'], g(lambda e: self.Open_playlist()))
+        self.bind_all(self.hotkeys_map['show_bookmark_manager'], g(lambda e: self.show_bookmark_manager()))
         
         # --- Window and UI ---
         self.bind_all(self.hotkeys_map['toggle_fullscreen'], g(self.toggle_fullscreen))

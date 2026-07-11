@@ -3097,11 +3097,15 @@ class VtpGridMixin:
                 and os.path.isfile(file_path)
                 and hasattr(self, "show_bookmark_manager")
             )
-            menu.add_command(
-                label="Show Bookmark Manager",
-                command=lambda fp=file_path: self.show_bookmark_manager(fp),
-                state="normal" if can_bookmark_manager else "disabled",
-            )
+            _bm_opts = {
+                "label": "Show Bookmark Manager",
+                "command": lambda fp=file_path: self.show_bookmark_manager(fp),
+                "state": "normal" if can_bookmark_manager else "disabled",
+            }
+            _bm_accel = menu_accel(_hk, "show_bookmark_manager")
+            if _bm_accel:
+                _bm_opts["accelerator"] = _bm_accel
+            menu.add_command(**_bm_opts)
 
         # menu.add_command(   label="Refresh Thumbnail",command=lambda: self.refresh_single_thumbnail(file_path,True))
         

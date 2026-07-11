@@ -22,6 +22,7 @@ BOOKMARK_MANAGER_DEFAULT_HEIGHT = 360
 BOOKMARK_MANAGER_MIN_HEIGHT = 180
 PLAY_POSITION_INDICATOR_COLOR = "#22C55E"
 BOOKMARK_PLAY_ICON_SLOT = "  "
+BOOKMARK_PLAY_ICON_EXTRA_PAD = 4
 PLAY_POSITION_INDICATOR_SIZE = 12
 
 
@@ -243,11 +244,21 @@ class BookmarkManager:
         secs = total_seconds % 60
         return f"{minutes:02d}:{secs:02d}"
 
+    def _play_icon_gap_text(self) -> str:
+        """Return the fixed text gap reserved for the playback-position icon."""
+        gap = BOOKMARK_PLAY_ICON_SLOT
+        if not self._list_font or BOOKMARK_PLAY_ICON_EXTRA_PAD <= 0:
+            return gap
+        target_width = self._list_font.measure(gap) + BOOKMARK_PLAY_ICON_EXTRA_PAD
+        while self._list_font.measure(gap) < target_width and len(gap) < 8:
+            gap += " "
+        return gap
+
     def _format_bookmark_display_text(self, formatted_time: str, label: str) -> str:
         """Format one list row with a fixed slot for the playback-position icon."""
         timestamp = f"[{formatted_time}]"
         if label:
-            return f"{timestamp}{BOOKMARK_PLAY_ICON_SLOT}{label}"
+            return f"{timestamp}{self._play_icon_gap_text()}{label}"
         return timestamp
 
     def _play_icon_slot_start_x(self, formatted_time: str) -> int:
@@ -255,9 +266,10 @@ class BookmarkManager:
         timestamp = f"[{formatted_time}]"
         if not self._list_font:
             return len(timestamp) * 7
+        gap_width = self._list_font.measure(self._play_icon_gap_text())
         return self._list_font.measure(timestamp) + max(
             0,
-            (self._list_font.measure(BOOKMARK_PLAY_ICON_SLOT) - PLAY_POSITION_INDICATOR_SIZE) // 2,
+            (gap_width - PLAY_POSITION_INDICATOR_SIZE) // 2,
         )
 
     def _populate_bookmark_list(self):

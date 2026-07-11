@@ -51,6 +51,7 @@ DEFAULT_HOTKEYS = {
     # --- Playlist ---
     'add_to_playlist': '<Shift-P>',
     'new_playlist': '<Shift-N>',
+    'show_playlist': '<Control-Shift-P>',
     
     # --- Window / UI ---
     'toggle_fullscreen': '<F11>',
@@ -95,6 +96,7 @@ DEFAULT_HOTKEYS = {
     'loop_toggle': '<Shift-L>',
     'bookmark_next': '<Alt-Right>',
     'bookmark_prev': '<Alt-Left>',
+    'show_bookmark_manager': '<Control-Shift-B>',
     'long_seek_forward': '<Shift-Right>',
     'long_seek_backward': '<Shift-Left>',
 
@@ -143,8 +145,9 @@ DOCUMENTED_EXTRA_HOTKEYS = {
 HOTKEY_HELP_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Playback & navigation", (
         "play_pause", "skip_next", "skip_back", "enter_action",
-        "bookmark_next", "bookmark_prev", "long_seek_forward", "long_seek_backward",
-        "add_to_playlist", "new_playlist", "toggle_fullscreen", "parent_dir", "refresh",
+        "bookmark_next", "bookmark_prev", "show_bookmark_manager",
+        "long_seek_forward", "long_seek_backward",
+        "add_to_playlist", "new_playlist", "show_playlist", "toggle_fullscreen", "parent_dir", "refresh",
     )),
     ("Thumbnail grid", (
         "thumbnail_move_up", "thumbnail_move_down", "thumbnail_move_left",
@@ -233,6 +236,7 @@ HOTKEY_LABELS: dict[str, str] = {
     "image_debug_monitor": "Print monitor debug",
     "add_to_playlist": "Add to playlist",
     "new_playlist": "Add to new playlist",
+    "show_playlist": "Show playlist",
     "toggle_fullscreen": "Toggle app fullscreen",
     "zoom_thumb": "Zoom thumbnails",
     "select_all": "Select all",
@@ -270,6 +274,7 @@ HOTKEY_LABELS: dict[str, str] = {
     "loop_toggle": "Toggle loop",
     "bookmark_next": "Next bookmark",
     "bookmark_prev": "Previous bookmark",
+    "show_bookmark_manager": "Show bookmark manager",
     "long_seek_forward": "Long seek forward",
     "long_seek_backward": "Long seek backward",
     "video_speed_up": "Speed up",

@@ -30,6 +30,7 @@ from file_operations import (
     probe_first_video_stream,
 )
 from utils import Tooltip, create_menu, parse_srt_file
+from hotkeys import DEFAULT_HOTKEYS, menu_accel
 
 
 # Hide subprocess console windows on Windows (matches the pattern used in file_operations.py).
@@ -976,11 +977,16 @@ class TimelineBarWidget(ctk.CTkFrame):
             and os.path.isfile(self.video_path)
             and hasattr(self.controller, "show_bookmark_manager")
         )
-        menu.add_command(
-            label="Show Bookmark Manager",
-            command=lambda: self.controller.show_bookmark_manager(self.video_path),
-            state="normal" if can_bookmark_manager else "disabled",
-        )
+        _hk = getattr(self.controller, "hotkeys_map", None) or DEFAULT_HOTKEYS
+        _bm_opts = {
+            "label": "Show Bookmark Manager",
+            "command": lambda: self.controller.show_bookmark_manager(self.video_path),
+            "state": "normal" if can_bookmark_manager else "disabled",
+        }
+        _bm_accel = menu_accel(_hk, "show_bookmark_manager")
+        if _bm_accel:
+            _bm_opts["accelerator"] = _bm_accel
+        menu.add_command(**_bm_opts)
 
         menu.add_separator()
         menu.add_command(label="Copy Timestamp", 

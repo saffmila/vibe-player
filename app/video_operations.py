@@ -36,6 +36,7 @@ import tkinterdnd2 as dnd
 from vtp_constants import VIDEO_FORMATS
 from vtp_mixin_dnd import VtpDndMixin
 from bookmark_manager import BookmarkManager, DEFAULT_BOOKMARK_COLOR
+from hotkeys import DEFAULT_HOTKEYS, menu_accel
 
 _audio_devices_cache = None
 _VLC_INSTANCE_INIT_LOCK = threading.Lock()
@@ -3417,11 +3418,16 @@ class VideoPlayer:
             and os.path.isfile(self.video_path)
             and hasattr(self.controller, "show_bookmark_manager")
         )
-        menu.add_command(
-            label="Show Bookmark Manager",
-            command=lambda: self.controller.show_bookmark_manager(self.video_path),
-            state="normal" if can_bookmark_manager else "disabled",
-        )
+        _hk = getattr(self.controller, "hotkeys_map", None) or DEFAULT_HOTKEYS
+        _bm_opts = {
+            "label": "Show Bookmark Manager",
+            "command": lambda: self.controller.show_bookmark_manager(self.video_path),
+            "state": "normal" if can_bookmark_manager else "disabled",
+        }
+        _bm_accel = menu_accel(_hk, "show_bookmark_manager")
+        if _bm_accel:
+            _bm_opts["accelerator"] = _bm_accel
+        menu.add_command(**_bm_opts)
 
         if getattr(self, "use_gpu_upscale", False):
             menu.add_separator()
@@ -3431,9 +3437,24 @@ class VideoPlayer:
             label="Save Frame as Image",
             command=lambda: save_capture_image(self.controller, self.video_path, self.player, method="ffmpeg")
         )
-        menu.add_command(label="Show Playlist", command=self.controller.Open_playlist)
-        menu.add_command(label="Add to Existing Playlist", command=self.controller.add_selected_to_playlist)
-        menu.add_command(label="Add to New Playlist", command=lambda: self.controller.add_selected_to_playlist(new_playlist=True))
+        _pl_opts = {"label": "Show Playlist", "command": self.controller.Open_playlist}
+        _pl_accel = menu_accel(_hk, "show_playlist")
+        if _pl_accel:
+            _pl_opts["accelerator"] = _pl_accel
+        menu.add_command(**_pl_opts)
+        _add_pl_opts = {"label": "Add to Existing Playlist", "command": self.controller.add_selected_to_playlist}
+        _add_pl_accel = menu_accel(_hk, "add_to_playlist")
+        if _add_pl_accel:
+            _add_pl_opts["accelerator"] = _add_pl_accel
+        menu.add_command(**_add_pl_opts)
+        _new_pl_opts = {
+            "label": "Add to New Playlist",
+            "command": lambda: self.controller.add_selected_to_playlist(new_playlist=True),
+        }
+        _new_pl_accel = menu_accel(_hk, "new_playlist")
+        if _new_pl_accel:
+            _new_pl_opts["accelerator"] = _new_pl_accel
+        menu.add_command(**_new_pl_opts)
 
         menu.add_separator()
 
