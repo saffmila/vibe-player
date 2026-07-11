@@ -8,6 +8,8 @@ A **no-nonsense, comfortable, and easy-to-use media player based on the famous V
 * **Searchable Database**: Your library is indexed and instantly searchable using custom keywords and labels.
 * **Advanced Media Controls**: Professional timeline featuring precise navigation, custom looping, and visual bookmark management.
 * **Smart Automated Tagging**: Automatically generates descriptive keywords for your media to keep your library organized without manual typing.
+<!-- New feature addition for this branch -->
+* **YouTube Pipeline Integration (Experimental)**: Streamlined thumbnail downloading and preview pipeline for online video links directly within your local grid.
 
 ### Two Ways to Run
 
