@@ -8,7 +8,7 @@ time-based bookmarks of the currently loaded video.
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import colorchooser, messagebox
+from tkinter import colorchooser, font as tkfont, messagebox
 from typing import Dict, List, Optional
 
 import customtkinter as ctk
@@ -20,6 +20,9 @@ LEGACY_AUTO_BOOKMARK_COLORS = {"#FFA500", "#FFD700", "#FFFFB3"}
 BOOKMARK_MANAGER_MIN_WIDTH = 320
 BOOKMARK_MANAGER_DEFAULT_HEIGHT = 360
 BOOKMARK_MANAGER_MIN_HEIGHT = 180
+PLAY_POSITION_INDICATOR_COLOR = "#22C55E"
+BOOKMARK_PLAY_ICON_SLOT = "  "
+PLAY_POSITION_INDICATOR_SIZE = 12
 
 
 class BookmarkManager:
@@ -38,6 +41,8 @@ class BookmarkManager:
 
         self.window = None
         self.bookmark_listbox = None
+        self.play_indicator_canvas = None
+        self._list_font = None
         self.button_panel = None
         self.filter_var = tk.StringVar()
         self.filter_entry = None
@@ -123,6 +128,8 @@ class BookmarkManager:
         self.filter_entry.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 2))
         self.filter_entry.bind("<KeyRelease>", self._on_filter_changed)
 
+        self._list_font = tkfont.Font(font=("Segoe UI", 12))
+
         self.bookmark_listbox = tk.Listbox(
             main_frame,
             bg="#2B2B2B",
@@ -133,12 +140,28 @@ class BookmarkManager:
             borderwidth=0,
             activestyle="none",
             exportselection=False,
-            font=("Segoe UI", 12),
+            font=self._list_font,
         )
         self.bookmark_listbox.grid(row=1, column=0, sticky="nsew", padx=6, pady=(2, 6))
 
+        self.play_indicator_canvas = tk.Canvas(
+            main_frame,
+            width=PLAY_POSITION_INDICATOR_SIZE,
+            height=PLAY_POSITION_INDICATOR_SIZE,
+            bg="#2B2B2B",
+            highlightthickness=0,
+            borderwidth=0,
+        )
+
         self.bookmark_listbox.bind("<<ListboxSelect>>", self._on_bookmark_select)
         self.bookmark_listbox.bind("<Double-1>", self._on_bookmark_double_click)
+        self.bookmark_listbox.bind("<Configure>", self._schedule_play_position_indicator_redraw, add="+")
+        self.bookmark_listbox.bind("<Expose>", self._schedule_play_position_indicator_redraw, add="+")
+        self.bookmark_listbox.bind("<MouseWheel>", self._schedule_play_position_indicator_redraw, add="+")
+        self.bookmark_listbox.bind("<Button-4>", self._schedule_play_position_indicator_redraw, add="+")
+        self.bookmark_listbox.bind("<Button-5>", self._schedule_play_position_indicator_redraw, add="+")
+        self.play_indicator_canvas.bind("<Button-1>", self._forward_listbox_click, add="+")
+        self.play_indicator_canvas.bind("<Double-Button-1>", self._forward_listbox_double_click, add="+")
 
         self._create_button_panel(main_frame)
         self._populate_bookmark_list()
@@ -220,6 +243,23 @@ class BookmarkManager:
         secs = total_seconds % 60
         return f"{minutes:02d}:{secs:02d}"
 
+    def _format_bookmark_display_text(self, formatted_time: str, label: str) -> str:
+        """Format one list row with a fixed slot for the playback-position icon."""
+        timestamp = f"[{formatted_time}]"
+        if label:
+            return f"{timestamp}{BOOKMARK_PLAY_ICON_SLOT}{label}"
+        return timestamp
+
+    def _play_icon_slot_start_x(self, formatted_time: str) -> int:
+        """Return the x offset where the play icon sits between timestamp and label."""
+        timestamp = f"[{formatted_time}]"
+        if not self._list_font:
+            return len(timestamp) * 7
+        return self._list_font.measure(timestamp) + max(
+            0,
+            (self._list_font.measure(BOOKMARK_PLAY_ICON_SLOT) - PLAY_POSITION_INDICATOR_SIZE) // 2,
+        )
+
     def _populate_bookmark_list(self):
         """Refresh the listbox display from the currently loaded bookmarks."""
         if not (self.is_open and self.bookmark_listbox):
@@ -234,7 +274,7 @@ class BookmarkManager:
                 continue
             self.visible_indices.append(idx)
             formatted_time = self._format_time(bookmark["time"])
-            display_text = f"[{formatted_time}] {label}" if label else f"[{formatted_time}]"
+            display_text = self._format_bookmark_display_text(formatted_time, label)
             self.bookmark_listbox.insert(tk.END, display_text)
 
         self._ensure_list_selection()
@@ -459,25 +499,119 @@ class BookmarkManager:
             self.active_bookmark_index = active_idx
             self._apply_list_row_styles()
 
+    def _schedule_play_position_indicator_redraw(self, event=None):
+        """Redraw the play-position marker after scroll or layout changes."""
+        if not (self.window and self.window.winfo_exists()):
+            return
+        self.window.after_idle(self._draw_play_position_indicator)
+
+    def _forward_listbox_click(self, event):
+        """Let clicks on the tiny play icon hit the listbox row underneath."""
+        listbox = self.bookmark_listbox
+        if not listbox:
+            return
+        listbox.focus_set()
+        listbox.event_generate(
+            "<Button-1>",
+            x=event.x_root - listbox.winfo_rootx(),
+            y=event.y_root - listbox.winfo_rooty(),
+            when="tail",
+        )
+
+    def _forward_listbox_double_click(self, event):
+        listbox = self.bookmark_listbox
+        if not listbox:
+            return
+        listbox.event_generate(
+            "<Double-Button-1>",
+            x=event.x_root - listbox.winfo_rootx(),
+            y=event.y_root - listbox.winfo_rooty(),
+            when="tail",
+        )
+
+    def _active_bookmark_list_index(self) -> Optional[int]:
+        """Return visible listbox index for the active playback bookmark, if any."""
+        if self.active_bookmark_index is None:
+            return None
+        for list_idx, bookmark_idx in enumerate(self.visible_indices):
+            if bookmark_idx == self.active_bookmark_index:
+                return list_idx
+        return None
+
+    def _draw_play_position_indicator(self):
+        """Draw a green play icon between the timestamp and bookmark label."""
+        canvas = self.play_indicator_canvas
+        listbox = self.bookmark_listbox
+        if not canvas or not listbox:
+            return
+
+        canvas.delete("play_position_indicator")
+        list_idx = self._active_bookmark_list_index()
+        if list_idx is None or self.active_bookmark_index is None:
+            canvas.place_forget()
+            return
+
+        bbox = listbox.bbox(list_idx)
+        if not bbox:
+            canvas.place_forget()
+            return
+
+        bookmark = self.bookmarks[self.active_bookmark_index]
+        formatted_time = self._format_time(bookmark["time"])
+        item_x, item_y, _item_w, row_height = bbox
+        icon_x = item_x + self._play_icon_slot_start_x(formatted_time)
+        icon_y = item_y + max((row_height - PLAY_POSITION_INDICATOR_SIZE) // 2, 0)
+
+        default_bg = "#2B2B2B"
+        selected_bg = "#2A6BB0"
+        selected_set = set(listbox.curselection())
+        if list_idx in selected_set:
+            row_bg = selected_bg
+        else:
+            color = self._normalize_hex_color(bookmark.get("color"))
+            if self.is_custom_bookmark_color(color):
+                row_bg = self._blend_hex(default_bg, color, 0.28)
+            else:
+                row_bg = default_bg
+        canvas.configure(bg=row_bg)
+
+        canvas.place(in_=listbox, x=icon_x, y=icon_y)
+
+        center_x = PLAY_POSITION_INDICATOR_SIZE // 2
+        center_y = PLAY_POSITION_INDICATOR_SIZE // 2
+        icon_half_height = 4
+        icon_half_width = 3
+        points = [
+            center_x - icon_half_width,
+            center_y - icon_half_height,
+            center_x - icon_half_width,
+            center_y + icon_half_height,
+            center_x + icon_half_width,
+            center_y,
+        ]
+        canvas.create_polygon(
+            points,
+            fill=PLAY_POSITION_INDICATOR_COLOR,
+            outline=PLAY_POSITION_INDICATOR_COLOR,
+            tags="play_position_indicator",
+        )
+
     def _apply_list_row_styles(self):
-        """Apply per-bookmark colors and active-playback row highlight."""
+        """Apply per-bookmark colors; playback position uses the play icon, not row bg."""
         if not self.bookmark_listbox:
             return
 
         default_bg = "#2B2B2B"
-        active_bg = "#404040"
         selected_bg = "#2A6BB0"
-        selected_active_bg = "#347BD0"
         selected_fg = "#FFFFFF"
         selected_set = set(self.bookmark_listbox.curselection())
 
         for list_idx, bookmark_idx in enumerate(self.visible_indices):
             bookmark = self.bookmarks[bookmark_idx]
-            is_active = bookmark_idx == self.active_bookmark_index
             is_selected = list_idx in selected_set
             color = self._normalize_hex_color(bookmark.get("color"))
             if is_selected:
-                row_bg = selected_active_bg if is_active else selected_bg
+                row_bg = selected_bg
                 row_fg = color if self.is_custom_bookmark_color(color) else selected_fg
                 self._configure_listbox_row(
                     list_idx,
@@ -489,11 +623,10 @@ class BookmarkManager:
                 continue
 
             if self.is_custom_bookmark_color(color):
-                mix = 0.42 if is_active else 0.28
-                row_bg = self._blend_hex(default_bg if not is_active else active_bg, color, mix)
+                row_bg = self._blend_hex(default_bg, color, 0.28)
                 row_fg = color
             else:
-                row_bg = active_bg if is_active else default_bg
+                row_bg = default_bg
                 row_fg = "white"
             self._configure_listbox_row(
                 list_idx,
@@ -502,6 +635,8 @@ class BookmarkManager:
                 selectbackground=selected_bg,
                 selectforeground=selected_fg,
             )
+
+        self._schedule_play_position_indicator_redraw()
 
     def _selected_bookmark_index(self) -> Optional[int]:
         if not self.bookmark_listbox:
@@ -726,5 +861,7 @@ class BookmarkManager:
             self.window.destroy()
             self.window = None
         self.bookmark_listbox = None
+        self.play_indicator_canvas = None
+        self._list_font = None
         self.filter_entry = None
         self.active_bookmark_index = None

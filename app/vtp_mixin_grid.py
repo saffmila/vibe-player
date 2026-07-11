@@ -3091,6 +3091,18 @@ class VtpGridMixin:
                 
         menu.add_command(label="Refresh Thumbnail", command=self.refresh_selected_thumbnails)
         
+        if mimetype and mimetype.startswith("video"):
+            can_bookmark_manager = bool(
+                file_path
+                and os.path.isfile(file_path)
+                and hasattr(self, "show_bookmark_manager")
+            )
+            menu.add_command(
+                label="Show Bookmark Manager",
+                command=lambda fp=file_path: self.show_bookmark_manager(fp),
+                state="normal" if can_bookmark_manager else "disabled",
+            )
+
         # menu.add_command(   label="Refresh Thumbnail",command=lambda: self.refresh_single_thumbnail(file_path,True))
         
 
