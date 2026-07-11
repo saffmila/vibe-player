@@ -13,7 +13,12 @@ from typing import Dict, List, Optional
 
 import customtkinter as ctk
 
-from utils import Tooltip
+from utils import (
+    Tooltip,
+    bind_toplevel_geometry_autosave,
+    persist_toplevel_geometry,
+    restore_toplevel_geometry,
+)
 
 DEFAULT_BOOKMARK_COLOR = "#FFFFFF"
 LEGACY_AUTO_BOOKMARK_COLORS = {"#FFA500", "#FFD700", "#FFFFB3"}
@@ -24,6 +29,7 @@ PLAY_POSITION_INDICATOR_COLOR = "#22C55E"
 BOOKMARK_PLAY_ICON_SLOT = "  "
 BOOKMARK_PLAY_ICON_EXTRA_PAD = 4
 PLAY_POSITION_INDICATOR_SIZE = 12
+BOOKMARK_MANAGER_GEOMETRY_KEY = "bookmark_manager_geometry"
 
 
 class BookmarkManager:
@@ -109,8 +115,16 @@ class BookmarkManager:
 
         self.window = ctk.CTkToplevel(self.parent)
         self.window.title("Bookmarks")
-        self.window.geometry(f"{BOOKMARK_MANAGER_MIN_WIDTH}x{BOOKMARK_MANAGER_DEFAULT_HEIGHT}")
+        default_geometry = f"{BOOKMARK_MANAGER_MIN_WIDTH}x{BOOKMARK_MANAGER_DEFAULT_HEIGHT}"
         self.window.minsize(BOOKMARK_MANAGER_MIN_WIDTH, BOOKMARK_MANAGER_MIN_HEIGHT)
+        restore_toplevel_geometry(
+            self.window,
+            BOOKMARK_MANAGER_GEOMETRY_KEY,
+            default_geometry,
+            min_width=BOOKMARK_MANAGER_MIN_WIDTH,
+            min_height=BOOKMARK_MANAGER_MIN_HEIGHT,
+        )
+        bind_toplevel_geometry_autosave(self.window, BOOKMARK_MANAGER_GEOMETRY_KEY)
         self.window.protocol("WM_DELETE_WINDOW", self.on_close)
         self.window.attributes("-topmost", True)
         self.is_open = True
@@ -870,6 +884,7 @@ class BookmarkManager:
                 pass
             self._poll_after_id = None
         if self.window:
+            persist_toplevel_geometry(self.window, BOOKMARK_MANAGER_GEOMETRY_KEY)
             self.window.destroy()
             self.window = None
         self.bookmark_listbox = None

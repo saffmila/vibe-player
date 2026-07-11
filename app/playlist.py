@@ -15,7 +15,13 @@ import sys
 import ctypes
 
 # Import the create_menu utility
-from utils import Tooltip, create_menu
+from utils import (
+    Tooltip,
+    bind_toplevel_geometry_autosave,
+    create_menu,
+    persist_toplevel_geometry,
+    restore_toplevel_geometry,
+)
 
 import tkinterdnd2 as dnd
 from vtp_constants import VIDEO_FORMATS
@@ -30,6 +36,7 @@ _PLAYLIST_WINDOW_WIDTH = 360
 _PLAYLIST_WINDOW_HEIGHT = 560
 _PLAYLIST_MIN_WIDTH = 320
 _PLAYLIST_MIN_HEIGHT = 360
+_PLAYLIST_GEOMETRY_KEY = "playlist_geometry"
 
 
 def _resolve_toplevel_hwnd(window) -> int | None:
@@ -114,8 +121,16 @@ class PlaylistManager:
         logging.info("Creating a new playlist window.")
         self.playlist_window = ctk.CTkToplevel(self.parent)
         self.playlist_window.title("Playlist")
-        self.playlist_window.geometry(f"{_PLAYLIST_WINDOW_WIDTH}x{_PLAYLIST_WINDOW_HEIGHT}")
+        default_geometry = f"{_PLAYLIST_WINDOW_WIDTH}x{_PLAYLIST_WINDOW_HEIGHT}"
         self.playlist_window.minsize(_PLAYLIST_MIN_WIDTH, _PLAYLIST_MIN_HEIGHT)
+        restore_toplevel_geometry(
+            self.playlist_window,
+            _PLAYLIST_GEOMETRY_KEY,
+            default_geometry,
+            min_width=_PLAYLIST_MIN_WIDTH,
+            min_height=_PLAYLIST_MIN_HEIGHT,
+        )
+        bind_toplevel_geometry_autosave(self.playlist_window, _PLAYLIST_GEOMETRY_KEY)
         self.playlist_window.configure(fg_color=_PLAYLIST_BG)
         self.is_playlist_open = True
         self.playlist_window.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -398,6 +413,7 @@ class PlaylistManager:
         """
         self.is_playlist_open = False
         if self.playlist_window:
+            persist_toplevel_geometry(self.playlist_window, _PLAYLIST_GEOMETRY_KEY)
             self.playlist_window.destroy()
             self.playlist_window = None
         logging.info("Playlist window closed.")

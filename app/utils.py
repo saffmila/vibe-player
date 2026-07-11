@@ -501,3 +501,118 @@ def parse_srt_file(path: str) -> list[dict[str, Any]]:
         start_seconds = h * 3600 + m * 60 + s
         subtitles.append({"start": start_seconds, "text": text})
     return subtitles
+
+
+_WINDOW_GEOMETRY_RE = re.compile(r"^(\d+)x(\d+)(?:\+(-?\d+)\+(-?\d+))?$")
+
+
+def _read_settings_dict() -> dict[str, Any]:
+    if not os.path.exists("settings.json"):
+        return {}
+    try:
+        with open("settings.json", "r", encoding="utf-8") as pref_file:
+            data = json.load(pref_file)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _patch_settings_dict(patch: dict[str, Any]) -> None:
+    settings = _read_settings_dict()
+    settings.update(patch)
+    with open("settings.json", "w", encoding="utf-8") as pref_file:
+        json.dump(settings, pref_file)
+
+
+def load_saved_window_geometry(settings_key: str, default_geometry: str) -> str:
+    """Return a saved ``WxH`` or ``WxH+X+Y`` geometry string."""
+    value = _read_settings_dict().get(settings_key)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return default_geometry
+
+
+def save_window_geometry(settings_key: str, geometry: str) -> None:
+    """Persist a toplevel geometry string under ``settings_key``."""
+    if not geometry or not isinstance(geometry, str):
+        return
+    _patch_settings_dict({settings_key: geometry.strip()})
+
+
+def normalize_window_geometry(
+    geometry: str,
+    *,
+    min_width: int,
+    min_height: int,
+    default_geometry: str,
+) -> str:
+    """Clamp size to minimums while preserving saved position when present."""
+    text = (geometry or "").strip() or default_geometry.strip()
+    match = _WINDOW_GEOMETRY_RE.match(text)
+    if not match:
+        return default_geometry
+    width = max(min_width, int(match.group(1)))
+    height = max(min_height, int(match.group(2)))
+    x_pos, y_pos = match.group(3), match.group(4)
+    if x_pos is not None and y_pos is not None:
+        return f"{width}x{height}+{x_pos}+{y_pos}"
+    return f"{width}x{height}"
+
+
+def restore_toplevel_geometry(
+    window,
+    settings_key: str,
+    default_geometry: str,
+    *,
+    min_width: int,
+    min_height: int,
+) -> None:
+    """Apply saved geometry to a toplevel window."""
+    geometry = normalize_window_geometry(
+        load_saved_window_geometry(settings_key, default_geometry),
+        min_width=min_width,
+        min_height=min_height,
+        default_geometry=default_geometry,
+    )
+    window.geometry(geometry)
+
+
+def persist_toplevel_geometry(window, settings_key: str) -> None:
+    """Save the current toplevel geometry, if the window still exists."""
+    try:
+        if window and window.winfo_exists():
+            save_window_geometry(settings_key, window.geometry())
+    except tk.TclError:
+        pass
+
+
+def bind_toplevel_geometry_autosave(window, settings_key: str, *, debounce_ms: int = 400) -> None:
+    """Debounced save of geometry while the user moves or resizes a toplevel."""
+    state = {"job": None, "last": None}
+
+    def _save():
+        state["job"] = None
+        try:
+            if not window.winfo_exists():
+                return
+            if str(window.state()) in {"iconic", "withdrawn"}:
+                return
+            geometry = window.geometry()
+            if geometry == state["last"]:
+                return
+            state["last"] = geometry
+            save_window_geometry(settings_key, geometry)
+        except tk.TclError:
+            pass
+
+    def _schedule(event):
+        if event.widget is not window:
+            return
+        if state["job"] is not None:
+            try:
+                window.after_cancel(state["job"])
+            except tk.TclError:
+                pass
+        state["job"] = window.after(debounce_ms, _save)
+
+    window.bind("<Configure>", _schedule, add="+")

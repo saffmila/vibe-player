@@ -3116,6 +3116,13 @@ class VtpGridMixin:
             _kw_opts["accelerator"] = _kw
         menu.add_command(**_kw_opts)
         menu.add_command(label="Remove Keywords", command=lambda: self.open_remove_keyword_window(file_path))
+
+        menu.add_separator()
+        _show_pl_opts = {"label": "Show Playlist", "command": self.Open_playlist}
+        _show_pl_accel = menu_accel(_hk, "show_playlist")
+        if _show_pl_accel:
+            _show_pl_opts["accelerator"] = _show_pl_accel
+        menu.add_command(**_show_pl_opts)
         _pl = menu_accel(_hk, "add_to_playlist")
         _pl_opts = {"label": "Add to Existing Playlist", "command": lambda: self.add_selected_to_playlist()}
         if _pl:
@@ -3129,6 +3136,8 @@ class VtpGridMixin:
         if _pn:
             _pn_opts["accelerator"] = _pn
         menu.add_command(**_pn_opts)
+
+        menu.add_separator()
         menu.add_command(label="Edit Rating", command=lambda: self.edit_rating(file_path))
         _rn = rename_accelerators_label(_hk)
         _rename_opts = {"label": "Rename", "command": lambda: self.rename_item(file_path)}
