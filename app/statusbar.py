@@ -217,6 +217,9 @@ class StatusBar(ctk.CTkFrame):
     
     def count_folders_and_files(self, dir_path):
         """Count folders, files, and total size under the given directory."""
+        if not dir_path or not os.path.isdir(dir_path):
+            return 0, 0, 0.0
+
         folder_count = 0
         file_count = 0
         total_size = 0

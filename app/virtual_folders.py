@@ -5,10 +5,19 @@ Loads and saves ``virtual_folders.json`` in the current working directory.
 """
 
 import json
-import os
 import logging
+import os
+import re
 
 VIRTUAL_FOLDER_JSON = "virtual_folders.json"
+_INVALID_LIBRARY_NAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def sanitize_virtual_library_name(name: str, *, fallback: str = "YouTube Playlist") -> str:
+    """Make a user-facing name safe as a virtual library key on Windows."""
+    cleaned = _INVALID_LIBRARY_NAME_RE.sub("_", (name or "").strip())
+    cleaned = cleaned.rstrip(". ").strip()
+    return cleaned or fallback
 
 def load_virtual_folders():
     if os.path.exists(VIRTUAL_FOLDER_JSON):

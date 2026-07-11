@@ -1818,6 +1818,75 @@ def create_preferences_window(app):
         text="Play broken videos (if possible)",
         variable=play_broken_videos_var,
     ).pack(anchor="w", padx=5, pady=5)
+
+    _add_preferences_separator(general_options_frame)
+    ctk.CTkLabel(
+        general_options_frame,
+        text="YouTube",
+        font=("Helvetica", 14, "bold"),
+    ).pack(anchor="w", padx=10, pady=(8, 2))
+    ctk.CTkLabel(
+        general_options_frame,
+        text=(
+            "If playback fails with a bot-check, export cookies while logged into "
+            "YouTube or pick a browser (close it first). Cookies file takes priority."
+        ),
+        font=("Helvetica", 11),
+        text_color=("gray35", "gray65"),
+        wraplength=520,
+        justify="left",
+    ).pack(anchor="w", padx=10, pady=(0, 6))
+
+    _yt_saved = {}
+    try:
+        if os.path.exists("settings.json"):
+            with open("settings.json", encoding="utf-8") as _yt_file:
+                _yt_saved = json.load(_yt_file) or {}
+    except (OSError, json.JSONDecodeError, TypeError):
+        _yt_saved = {}
+
+    youtube_cookies_file_var = ctk.StringVar(
+        value=str(_yt_saved.get("youtube_cookies_file") or "")
+    )
+    youtube_cookies_browser_var = ctk.StringVar(
+        value=str(_yt_saved.get("youtube_cookies_browser") or "")
+    )
+
+    yt_cookies_row = ctk.CTkFrame(general_options_frame, fg_color="transparent")
+    yt_cookies_row.pack(fill="x", padx=10, pady=(0, 4))
+    ctk.CTkLabel(yt_cookies_row, text="Cookies file:", width=110, anchor="w").pack(
+        side="left", padx=(0, 6)
+    )
+    ctk.CTkEntry(
+        yt_cookies_row, textvariable=youtube_cookies_file_var, height=30
+    ).pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+    def _browse_youtube_cookies_file():
+        path = filedialog.askopenfilename(
+            title="Select YouTube cookies.txt",
+            filetypes=[("Cookies text", "*.txt"), ("All files", "*.*")],
+        )
+        if path:
+            youtube_cookies_file_var.set(path)
+
+    ctk.CTkButton(
+        yt_cookies_row,
+        text="Browse…",
+        width=90,
+        command=_browse_youtube_cookies_file,
+    ).pack(side="left")
+
+    yt_browser_row = ctk.CTkFrame(general_options_frame, fg_color="transparent")
+    yt_browser_row.pack(fill="x", padx=10, pady=(0, 8))
+    ctk.CTkLabel(yt_browser_row, text="Browser:", width=110, anchor="w").pack(
+        side="left", padx=(0, 6)
+    )
+    ctk.CTkComboBox(
+        yt_browser_row,
+        values=["", "firefox", "edge", "chrome"],
+        variable=youtube_cookies_browser_var,
+        width=180,
+    ).pack(side="left")
     
     
     # Player Interface Settings
@@ -1927,6 +1996,12 @@ def create_preferences_window(app):
             app.search_results_page_size = max(1, int(search_results_page_size_var.get()))
         except (TypeError, ValueError):
             app.search_results_page_size = 250
+        from youtube_support import save_youtube_auth_settings
+
+        save_youtube_auth_settings(
+            youtube_cookies_file_var.get(),
+            youtube_cookies_browser_var.get(),
+        )
         # 1. Call the original save_preferences function (defined elsewhere)
         save_preferences(
             app,

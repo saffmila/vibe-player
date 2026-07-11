@@ -21,6 +21,9 @@ alembic==1.13.1
 dataset
 send2trash
 
+# YouTube playback (stream URL resolution for VLC)
+yt-dlp>=2024.1.0
+
 # Plugin dependencies
 tqdm==4.66.2
 transformers>=4.35

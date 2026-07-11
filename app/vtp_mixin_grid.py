@@ -27,6 +27,19 @@ from video_operations import VideoPlayer
 from utils import create_context_menu, get_video_size
 from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS, preview_skip_subdir
 from virtual_folders import load_virtual_folders
+from youtube_support import (
+    build_youtube_single_video_entry,
+    fetch_youtube_playlist_entries,
+    is_remote_media_url,
+    is_youtube_playlist_url,
+    is_youtube_url,
+    is_youtube_watch_url,
+    normalize_youtube_playlist_url,
+    normalize_youtube_watch_url,
+    extract_youtube_video_id,
+    resolve_youtube_playback,
+    resolve_youtube_playback_url,
+)
 from hotkeys import DEFAULT_HOTKEYS, menu_accel, rename_accelerators_label
 from bookmark_manager import BookmarkManager
 
@@ -34,6 +47,8 @@ from bookmark_manager import BookmarkManager
 def _norm_video_path(path) -> str:
     if not path:
         return ""
+    if is_remote_media_url(str(path)):
+        return str(path).strip()
     try:
         return os.path.normcase(os.path.normpath(os.path.abspath(path)))
     except (OSError, ValueError, TypeError):
@@ -52,6 +67,32 @@ def _video_player_is_live(player) -> bool:
         return bool(window.winfo_exists())
     except Exception:
         return False
+
+
+def _unpack_pending_open_video(pending):
+    if not pending:
+        return None
+    if len(pending) >= 5:
+        video_path, video_name, source_path, stream_http_headers, playback_pending = pending
+    elif len(pending) >= 4:
+        video_path, video_name, source_path, stream_http_headers = pending
+        playback_pending = False
+    elif len(pending) >= 3:
+        video_path, video_name, source_path = pending[0], pending[1], pending[2]
+        stream_http_headers = {}
+        playback_pending = False
+    else:
+        video_path, video_name = pending[0], pending[1]
+        source_path = video_path
+        stream_http_headers = {}
+        playback_pending = False
+    return (
+        video_path,
+        video_name,
+        source_path,
+        dict(stream_http_headers or {}),
+        bool(playback_pending),
+    )
 
 
 class _BookmarkSeekProxy:
@@ -291,7 +332,7 @@ class VtpGridMixin:
              return False # Indicate failure
 
         # Proceed only if dir_path is a string
-        if not dir_path.startswith("virtual_library://"):
+        if not dir_path.startswith("virtual_library://") and not is_youtube_url(dir_path):
             try:
                 # Ensure path exists before normalizing
                 if not os.path.exists(dir_path):
@@ -376,7 +417,55 @@ class VtpGridMixin:
         video_files_list = [] # Use a local list to gather items
         try:
             # Load file list (virtual or real)
-            if dir_path.startswith("virtual_library://"):
+            if is_youtube_url(dir_path) and not is_youtube_playlist_url(dir_path):
+                entry = build_youtube_single_video_entry(dir_path)
+                if entry is None:
+                    logging.error("Invalid or unsupported YouTube URL: %s", dir_path)
+                    self.after(
+                        0,
+                        lambda: messagebox.showerror(
+                            "YouTube",
+                            "Could not parse that YouTube link.\n"
+                            "Paste a video URL (youtube.com/watch or youtu.be).",
+                        ),
+                    )
+                    return None
+                video_files_list.append(entry)
+                logging.info("Prepared YouTube video: %s", entry.get("name"))
+            elif is_youtube_playlist_url(dir_path):
+                playlist_url = normalize_youtube_playlist_url(dir_path)
+                entries, playlist_error, playlist_warning, playlist_title = (
+                    fetch_youtube_playlist_entries(
+                        playlist_url,
+                        source_url=dir_path,
+                    )
+                )
+                if playlist_error:
+                    logging.error("YouTube playlist load failed: %s", playlist_error)
+                    self.after(
+                        0,
+                        lambda msg=playlist_error: messagebox.showerror("YouTube", msg),
+                    )
+                    return None
+                video_files_list.extend(entries)
+                logging.info("Prepared YouTube playlist with %d videos", len(entries))
+                self._youtube_playlist_title = playlist_title
+                if playlist_warning:
+                    self.after(
+                        0,
+                        lambda msg=playlist_warning: messagebox.showwarning("YouTube", msg),
+                    )
+                self.after(
+                    0,
+                    lambda n=len(entries), title=playlist_title: (
+                        self.status_bar.set_action_message(
+                            self._youtube_playlist_status_text(n, title)
+                        )
+                        if hasattr(self, "status_bar") and self.status_bar
+                        else None
+                    ),
+                )
+            elif dir_path.startswith("virtual_library://"):
                 # Process virtual library contents into the local list
                 library_name = dir_path.split("://")[1]
                 # Ensure load_virtual_folders() returns the expected structure
@@ -710,6 +799,12 @@ class VtpGridMixin:
         )
         if was_search_view and hasattr(self, "status_bar") and self.status_bar:
             self._show_return_to_search_status()
+
+        if is_youtube_playlist_url(dir_path):
+            self._youtube_playlist_url = normalize_youtube_playlist_url(dir_path)
+        else:
+            self._youtube_playlist_title = None
+            self._youtube_playlist_url = None
 
         # Capture before any clear — clear_thumbnails resets yview.
         if preserve_scroll:
@@ -2042,6 +2137,10 @@ class VtpGridMixin:
 
     def _can_attempt_video_playback(self, video_path, for_preview=False):
         """Central playback policy used by preview and main player open."""
+        if is_youtube_watch_url(video_path):
+            return True, ""
+        if is_remote_media_url(video_path):
+            return True, ""
         if bool(getattr(self, "play_broken_videos", True)):
             try:
                 if os.path.getsize(video_path) <= 0:
@@ -2061,7 +2160,67 @@ class VtpGridMixin:
             )
         return True, ""
 
+    def _media_title_for_path(self, file_path: str) -> str:
+        for item in getattr(self, "video_files", []) or []:
+            if item.get("path") == file_path:
+                name = item.get("name")
+                if name:
+                    return name
+        if is_remote_media_url(file_path):
+            return file_path
+        return os.path.basename(file_path)
 
+    def _is_playable_video_path(self, file_path: str) -> bool:
+        if is_youtube_watch_url(file_path):
+            return True
+        return file_path.lower().endswith(VIDEO_FORMATS)
+
+    def open_youtube_single_video(self, url: str) -> None:
+        """Resolve a single YouTube watch link and open the main player immediately."""
+        url = (url or "").strip()
+        if not is_youtube_watch_url(url):
+            messagebox.showerror(
+                "YouTube",
+                "Could not parse that YouTube link.\n"
+                "Paste a video URL (youtube.com/watch or youtu.be).",
+            )
+            return
+
+        if getattr(self, "_youtube_open_pending_url", None) == url:
+            logging.info("YouTube open already in progress for: %s", url)
+            return
+        self._youtube_open_pending_url = url
+        self._youtube_open_generation = int(getattr(self, "_youtube_open_generation", 0)) + 1
+
+        for attr in ("_open_video_job", "_open_video_create_job"):
+            job = getattr(self, attr, None)
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except (tk.TclError, ValueError):
+                    pass
+                setattr(self, attr, None)
+        self._pending_open_video = None
+
+        self.add_to_recent_directories(url)
+        watch_url = normalize_youtube_watch_url(url)
+        if not watch_url:
+            messagebox.showerror("YouTube", "Could not parse that YouTube link.")
+            return
+
+        video_id = extract_youtube_video_id(watch_url)
+        video_name = f"YouTube: {video_id}" if video_id else "YouTube"
+        self.current_directory = watch_url
+        self.video_files = [
+            {
+                "path": watch_url,
+                "name": video_name,
+                "is_folder": False,
+                "is_remote": True,
+                "remote_source": "youtube",
+            }
+        ]
+        self._begin_youtube_playback_resolve(watch_url, video_name, watch_url)
 
 
     def ensure_basic_thumbnails(self, folder_path, thumbnail_size, count=4):
@@ -3193,6 +3352,8 @@ class VtpGridMixin:
             menu.add_command(label="Add to Virtual Library", state=tk.DISABLED)
             menu.add_command(label="Remove from Virtual Library", state=tk.DISABLED)
 
+        self._append_save_youtube_playlist_menu(menu)
+
         menu.tk_popup(event.x_root, event.y_root)
 
 
@@ -3204,7 +3365,7 @@ class VtpGridMixin:
             """
             import os
             
-            target_path = os.path.normpath(file_path)
+            target_path = file_path if is_remote_media_url(file_path) else os.path.normpath(file_path)
             
             raw_selection = list(self.selected_thumbnails) if hasattr(self, "selected_thumbnails") else []
             
@@ -3216,7 +3377,14 @@ class VtpGridMixin:
                 else:
                     cleaned_selection.append(item)
             
-            selection_normalized = [os.path.normpath(str(p)) for p in cleaned_selection if p]
+            selection_normalized = []
+            for p in cleaned_selection:
+                if not p:
+                    continue
+                if is_remote_media_url(str(p)):
+                    selection_normalized.append(str(p).strip())
+                else:
+                    selection_normalized.append(os.path.normpath(str(p)))
             
             video_exts = VIDEO_FORMATS
             
@@ -3226,7 +3394,7 @@ class VtpGridMixin:
             if len(selection_normalized) > 1 and target_path in selection_normalized:
                 logging.info(f"[Multi-Play] Detected selection of {len(selection_normalized)} items.")
                 
-                playlist_videos = [p for p in selection_normalized if p.lower().endswith(video_exts)]
+                playlist_videos = [p for p in selection_normalized if self._is_playable_video_path(p)]
                 playlist_videos.sort()
                 
                 if playlist_videos:
@@ -3253,12 +3421,12 @@ class VtpGridMixin:
 
                     logging.info(f"[Multi-Play] Playlist populated with {len(playlist_videos)} videos. Starting at index {start_index}.")
                     
-                    self.open_video_player(target_path, os.path.basename(target_path))
+                    self.open_video_player(target_path, self._media_title_for_path(target_path))
                     return
 
             # Single-file play
             logging.info(f"[Single-Play] Playing single file: {target_path}")
-            self.open_video_player(target_path, os.path.basename(target_path))
+            self.open_video_player(target_path, self._media_title_for_path(target_path))
 
     @staticmethod
     def _parse_keyword_list_from_db(raw):
@@ -3514,11 +3682,11 @@ class VtpGridMixin:
             info_texts.append((file_path, meta_color))
 
         # Check if the 'file_size' option is enabled.
-        if self.file_info_vars.get("file_size").get():
+        if self.file_info_vars.get("file_size").get() and not is_remote_media_url(file_path):
             info_texts.append((f"{os.path.getsize(file_path)} bytes", meta_color))
 
         # Check if the 'date_time' option is enabled.
-        if self.file_info_vars.get("date_time").get():
+        if self.file_info_vars.get("date_time").get() and not is_remote_media_url(file_path):
             mod_time = time.localtime(os.path.getmtime(file_path))
             info_texts.append((time.strftime('%Y-%m-%d %H:%M:%S', mod_time), meta_color))
 
@@ -6083,9 +6251,22 @@ class VtpGridMixin:
         self._set_bookmark_manager_polling_suspended(False)
         self._pending_open_video = None
 
-    def open_video_player(self, video_path, video_name):
-        """Queue opening a video so VLC cleanup can finish before the next instance starts."""
-        self._pending_open_video = (video_path, video_name)
+    def _queue_open_video_player(
+        self,
+        video_path,
+        video_name,
+        source_path=None,
+        stream_http_headers=None,
+        playback_pending=False,
+    ):
+        """Queue opening a video after any pending player teardown."""
+        self._pending_open_video = (
+            video_path,
+            video_name,
+            source_path or video_path,
+            dict(stream_http_headers or {}),
+            bool(playback_pending),
+        )
         for attr in ("_open_video_job", "_open_video_create_job"):
             job = getattr(self, attr, None)
             if job is not None:
@@ -6096,15 +6277,85 @@ class VtpGridMixin:
                 setattr(self, attr, None)
         self._open_video_job = self.after(50, self._open_video_player_impl)
 
+    def open_video_player(self, video_path, video_name, source_path=None, stream_http_headers=None):
+        """Queue opening a video so VLC cleanup can finish before the next instance starts."""
+        if is_youtube_watch_url(video_path) and source_path is None:
+            self._begin_youtube_playback_resolve(video_path, video_name, video_path)
+            return
+        self._queue_open_video_player(
+            video_path, video_name, source_path, stream_http_headers
+        )
+
+    def _begin_youtube_playback_resolve(self, watch_url, video_name, source_path):
+        watch_url = (watch_url or "").strip()
+        source_path = (source_path or watch_url).strip()
+
+        self._youtube_open_generation = int(getattr(self, "_youtube_open_generation", 0)) + 1
+        open_generation = self._youtube_open_generation
+
+        self._queue_open_video_player(
+            "",
+            video_name,
+            source_path=source_path,
+            stream_http_headers={},
+            playback_pending=True,
+        )
+
+        def worker():
+            stream, playback_error = resolve_youtube_playback(watch_url)
+
+            def on_main():
+                if open_generation != getattr(self, "_youtube_open_generation", 0):
+                    logging.info("YouTube resolve superseded (gen %s)", open_generation)
+                    return
+                pending_url = getattr(self, "_youtube_open_pending_url", None)
+                if pending_url in (watch_url, source_path):
+                    self._youtube_open_pending_url = None
+                player = self.current_video_window
+                if player is None or not _video_player_is_live(player):
+                    logging.info("YouTube resolve finished but player is no longer live.")
+                    return
+                if not stream:
+                    player.fail_pending_playback(
+                        playback_error or "Could not resolve YouTube stream for playback."
+                    )
+                    return
+                resolved_name = (stream.title or video_name or "").strip() or video_name
+                player.apply_resolved_stream(
+                    stream.url,
+                    resolved_name,
+                    source_path=source_path,
+                    stream_http_headers=stream.http_headers,
+                    title=stream.title,
+                )
+
+            self.after(0, on_main)
+
+        self.io_executor.submit(worker)
+
     def _open_video_player_impl(self):
         self._open_video_job = None
-        pending = getattr(self, "_pending_open_video", None)
+        pending = _unpack_pending_open_video(getattr(self, "_pending_open_video", None))
         if not pending:
             return
-        video_path, video_name = pending
+        video_path, video_name, source_path, stream_http_headers, playback_pending = pending
+
+        if is_youtube_watch_url(video_path) and not playback_pending:
+            logging.error(
+                "Refusing YouTube watch page URL for VLC (expected resolved stream): %s",
+                video_path,
+            )
+            self._reset_video_open_state()
+            messagebox.showerror(
+                "YouTube",
+                "YouTube playback was not resolved to a stream URL.\n"
+                "Install yt-dlp in the same Python as this app:\n"
+                "pip install yt-dlp",
+            )
+            return
 
         self._preview_blocked = True
-        can_play, reason = self._can_attempt_video_playback(video_path, for_preview=False)
+        can_play, reason = self._can_attempt_video_playback(source_path, for_preview=False)
         if not can_play:
             self._reset_video_open_state()
             logging.warning("[Playback Blocked] %s | path=%s", reason, video_path)
@@ -6122,6 +6373,40 @@ class VtpGridMixin:
             self.stop_preview()
 
         old_player = self.current_video_window
+        if (
+            old_player is not None
+            and _video_player_is_live(old_player)
+            and not getattr(old_player, "embed", False)
+        ):
+            if playback_pending:
+                logging.info("[OpenVideo] Pending YouTube load on live player: %s", video_name)
+                self._pending_open_video = None
+                self.current_video_index = next(
+                    (index for (index, d) in enumerate(self.video_files) if d["path"] == source_path),
+                    None,
+                )
+                self.current_video_window = old_player
+                self.active_player = old_player
+                old_player.begin_pending_playback(video_name, source_path)
+                self._reset_video_open_state()
+                return
+            logging.info("[OpenVideo] In-place media switch to: %s", video_name)
+            self._pending_open_video = None
+            self.current_video_index = next(
+                (index for (index, d) in enumerate(self.video_files) if d["path"] == source_path),
+                None,
+            )
+            self.current_video_window = old_player
+            self.active_player = old_player
+            old_player.safe_switch_video(
+                video_path,
+                video_name,
+                source_path=source_path,
+                stream_http_headers=stream_http_headers,
+            )
+            self._reset_video_open_state()
+            return
+
         if old_player is not None:
             self.current_video_window = None
             self.active_player = None
@@ -6131,7 +6416,13 @@ class VtpGridMixin:
                 old_player.cleanup()
             except Exception as e:
                 logging.info("[OpenVideo] Old player cleanup: %s", e)
-            self._pending_open_video = pending
+            self._pending_open_video = (
+                video_path,
+                video_name,
+                source_path,
+                stream_http_headers,
+                playback_pending,
+            )
             self._open_video_create_job = self.after(200, self._create_video_player_window)
             return
 
@@ -6141,16 +6432,22 @@ class VtpGridMixin:
         open_start = time.perf_counter()
         dump_armed = False
         self._open_video_create_job = None
-        pending = getattr(self, "_pending_open_video", None)
+        pending = _unpack_pending_open_video(getattr(self, "_pending_open_video", None))
         if not pending:
             self._reset_video_open_state()
             return
         self._pending_open_video = None
-        video_path, video_name = pending
+        video_path, video_name, source_path, stream_http_headers, playback_pending = pending
 
         try:
             self._preview_blocked = True
-            logging.info(f"Opening video player for {video_name} with path {video_path}")  # Debug
+            logging.info(
+                "Opening video player for %s with path %s (source=%s, stream_headers=%d)",
+                video_name,
+                video_path[:80] + ("..." if len(video_path) > 80 else ""),
+                source_path,
+                len(stream_http_headers or {}),
+            )
             try:
                 faulthandler.dump_traceback_later(8, repeat=False)
                 dump_armed = True
@@ -6160,8 +6457,8 @@ class VtpGridMixin:
 
             index_start = time.perf_counter()
             self.current_video_index = next(
-                (index for (index, d) in enumerate(self.video_files) if d["path"] == video_path),
-                None
+                (index for (index, d) in enumerate(self.video_files) if d["path"] == source_path),
+                None,
             )
             logging.info("[OpenVideo TIMING] resolve current_video_index: %.3fs", time.perf_counter() - index_start)
 
@@ -6174,11 +6471,16 @@ class VtpGridMixin:
 
             ctor_start = time.perf_counter()
             logging.info("[OpenVideo] Creating VideoPlayer instance.")
+            use_gpu_upscale = bool(getattr(self, "gpu_upscale", False)) and not (
+                is_youtube_watch_url(source_path) or is_remote_media_url(video_path)
+            )
             self.current_video_window = VideoPlayer(
                 parent=self,
                 controller=self,
                 video_path=video_path,
                 video_name=video_name,
+                source_path=source_path,
+                stream_http_headers=stream_http_headers,
                 initial_volume=self.current_volume,
                 vlc_video_output=vlc_video_output,
                 vlc_audio_output=vlc_audio_output,
@@ -6186,7 +6488,8 @@ class VtpGridMixin:
                 vlc_audio_device=vlc_audio_device,
                 auto_play=self.auto_play,
                 subtitles_enabled=self.subtitles_enabled,
-                use_gpu_upscale=getattr(self, "gpu_upscale", False)
+                use_gpu_upscale=use_gpu_upscale,
+                playback_pending=playback_pending,
             )
             logging.info("[OpenVideo TIMING] VideoPlayer constructor: %.3fs", time.perf_counter() - ctor_start)
             self._demo_toast("demo_playback")
@@ -6199,7 +6502,7 @@ class VtpGridMixin:
             self.active_player = self.current_video_window
 
             if self.ShowTWidget and hasattr(self, "timeline_widget"):
-                self.timeline_widget.reload_all_markers_and_redraw(video_path)
+                self.timeline_widget.reload_all_markers_and_redraw(source_path)
 
             logging.info("[DEBUG] current_video_window created: %s", self.current_video_window)
             logging.info("[OpenVideo TIMING] total create window path: %.3fs", time.perf_counter() - open_start)

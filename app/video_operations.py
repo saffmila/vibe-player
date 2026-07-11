@@ -23,6 +23,7 @@ from file_operations import *
 from playlist import PlaylistManager
 import tempfile
 import os
+import hashlib
 import subprocess
 import time
 import tkinter.font as tkfont
@@ -283,12 +284,13 @@ class VideoPlayer:
     def __init__(self, parent, controller, video_path, video_name, initial_volume, 
                  vlc_video_output, vlc_audio_output, vlc_hw_decoding, vlc_audio_device,
                  auto_play=False, subtitles_enabled=False, playlist_manager=None, embed=False,
-                 show_video_button_bar=True, use_gpu_upscale=False):
+                 show_video_button_bar=True, use_gpu_upscale=False, source_path=None,
+                 stream_http_headers=None, playback_pending=False):
         init_start = time.perf_counter()
         logging.info(
             "[VideoPlayer Init] start name=%s path=%s embed=%s auto_play=%s",
             video_name,
-            video_path,
+            video_path[:80] + ("..." if isinstance(video_path, str) and len(video_path) > 80 else video_path),
             embed,
             auto_play,
         )
@@ -304,7 +306,10 @@ class VideoPlayer:
         self.show_video_button_bar = show_video_button_bar
         self.playlist_manager = playlist_manager
         self.video_path = video_path
+        self.source_path = source_path or video_path
+        self.stream_http_headers = dict(stream_http_headers or {})
         self.video_name = video_name
+        self.playback_pending = bool(playback_pending)
         self.auto_play = auto_play
         self.subtitles_enabled = subtitles_enabled 
         self.is_repeating = False
@@ -317,7 +322,7 @@ class VideoPlayer:
         self.listener = None  # Initialize the listener as None
         self.bookmarks = []
         if video_path:
-            self.bookmark_file = self._get_sidecar_bookmark_path(video_path)
+            self.bookmark_file = self._get_sidecar_bookmark_path(self.source_path)
             bookmarks_start = time.perf_counter()
             self.load_bookmarks()
             _log_player_timing("load_bookmarks", bookmarks_start)
@@ -419,6 +424,15 @@ class VideoPlayer:
         self._broken_playback_overlay.place_forget()
         self._broken_playback_overlay_img = None
         self._broken_playback_overlay_active = False
+        self._loading_playback_overlay = ctk.CTkLabel(
+            self._video_stack,
+            text="Loading YouTube video...",
+            fg_color="#000000",
+            text_color="#8fd3ff",
+            font=ctk.CTkFont(size=17, weight="bold"),
+        )
+        self._loading_playback_overlay.place_forget()
+        self._loading_playback_overlay_active = False
         self._broken_check_after_ids = []
         self._broken_decode_check_gen = 0
         self.open_full_app_overlay_button = None
@@ -658,6 +672,9 @@ class VideoPlayer:
                 w.after(350, self.raise_player_window)
             except Exception:
                 pass
+        if getattr(self, "playback_pending", False):
+            self._show_loading_playback_overlay()
+            return
         if self.video_path:
             if self.auto_play:
                 self.play_video()
@@ -773,7 +790,9 @@ class VideoPlayer:
         self._load_dropped_video_path(videos[0])
 
     def _load_dropped_video_path(self, path: str):
-        if not path or not os.path.isfile(path):
+        from youtube_support import is_remote_media_url
+
+        if not path or (not is_remote_media_url(path) and not os.path.isfile(path)):
             return
         name = os.path.basename(path)
         if self.player and self.instance:
@@ -858,6 +877,76 @@ class VideoPlayer:
                 pass
         self._broken_check_after_ids = []
 
+    def _hide_loading_playback_overlay(self) -> None:
+        ov = getattr(self, "_loading_playback_overlay", None)
+        if ov is None:
+            return
+        try:
+            ov.place_forget()
+        except Exception:
+            pass
+        self._loading_playback_overlay_active = False
+
+    def _show_loading_playback_overlay(self, message: str = "Loading YouTube video...") -> None:
+        ov = getattr(self, "_loading_playback_overlay", None)
+        if ov is None:
+            return
+        try:
+            ov.configure(text=message)
+            ov.place(relx=0, rely=0, relwidth=1, relheight=1)
+            ov.lift()
+            self._loading_playback_overlay_active = True
+        except Exception as exc:
+            logging.debug("[LoadingOverlay] show failed: %s", exc)
+
+    def begin_pending_playback(self, video_name: str, source_path: str) -> None:
+        """Reuse an open player window while a remote stream is still resolving."""
+        self.playback_pending = True
+        self.source_path = source_path
+        self.video_name = video_name
+        self.video_path = ""
+        self.playing = False
+        try:
+            self.video_window.title((video_name or "").lower())
+        except Exception:
+            pass
+        self._cancel_broken_decode_checks()
+        self._hide_broken_playback_overlay()
+        self._release_current_media(detach_hwnd=True)
+        self._show_loading_playback_overlay()
+        if not self.embed:
+            self.raise_player_window()
+
+    def apply_resolved_stream(
+        self,
+        path: str,
+        name: str,
+        source_path: str | None = None,
+        stream_http_headers: dict | None = None,
+        *,
+        title: str | None = None,
+    ) -> None:
+        display_name = (title or name or self.video_name or "").strip() or self.video_name
+        self._hide_loading_playback_overlay()
+        self.playback_pending = False
+        self.safe_switch_video(
+            path,
+            display_name,
+            source_path=source_path,
+            stream_http_headers=stream_http_headers,
+        )
+
+    def fail_pending_playback(self, error_message: str | None = None) -> None:
+        self._hide_loading_playback_overlay()
+        self.playback_pending = False
+        if error_message:
+            try:
+                from tkinter import messagebox
+
+                messagebox.showerror("YouTube", error_message)
+            except Exception as exc:
+                logging.warning("Could not show YouTube error dialog: %s", exc)
+
     def _hide_broken_playback_overlay(self) -> None:
         ov = getattr(self, "_broken_playback_overlay", None)
         if ov is None:
@@ -925,13 +1014,22 @@ class VideoPlayer:
         self._hide_broken_playback_overlay()
         self._broken_decode_check_gen = int(getattr(self, "_broken_decode_check_gen", 0)) + 1
         gen = self._broken_decode_check_gen
-        a1 = self.video_window.after(750, lambda: self._decode_placeholder_probe(gen, strict=False))
-        a2 = self.video_window.after(1900, lambda: self._decode_placeholder_probe(gen, strict=True))
+        from youtube_support import is_remote_media_url
+
+        remote = is_remote_media_url(getattr(self, "video_path", "")) or is_remote_media_url(
+            getattr(self, "source_path", "")
+        )
+        first_delay = 2500 if remote else 750
+        strict_delay = 8000 if remote else 1900
+        a1 = self.video_window.after(first_delay, lambda: self._decode_placeholder_probe(gen, strict=False))
+        a2 = self.video_window.after(strict_delay, lambda: self._decode_placeholder_probe(gen, strict=True))
         self._broken_check_after_ids = [a1, a2]
         logging.info("[BrokenOverlay] scheduled probes gen=%s ids=%s", gen, self._broken_check_after_ids)
 
     def _decode_placeholder_probe(self, generation: int, strict: bool = False) -> None:
         if getattr(self, "_cleaning_up", False):
+            return
+        if getattr(self, "_loading_playback_overlay_active", False):
             return
         if generation != getattr(self, "_broken_decode_check_gen", 0):
             return
@@ -962,6 +1060,15 @@ class VideoPlayer:
         if has_dims:
             return
         if not strict:
+            return
+
+        from youtube_support import is_remote_media_url
+
+        remote = is_remote_media_url(getattr(self, "video_path", "")) or is_remote_media_url(
+            getattr(self, "source_path", "")
+        )
+        if remote and st in (vlc.State.Buffering, vlc.State.Opening, vlc.State.Playing) and dur <= 0:
+            logging.info("[BrokenOverlay] strict: remote stream still opening, skip overlay")
             return
 
         # Final pass: no decoded video plane. Duration 0 is typical for badly damaged MP4
@@ -1841,6 +1948,42 @@ class VideoPlayer:
             except Exception:
                 pass
 
+    def _apply_stream_media_options(self, media) -> None:
+        """HTTP headers and caching for remote streams (YouTube via yt-dlp)."""
+        if media is None:
+            return
+        from youtube_support import is_remote_media_url
+
+        if not is_remote_media_url(getattr(self, "video_path", "")):
+            return
+
+        headers = dict(getattr(self, "stream_http_headers", None) or {})
+        for key, value in headers.items():
+            if value is None:
+                continue
+            opt_key = key.lower().replace("_", "-")
+            if opt_key == "user-agent":
+                opt = f":http-user-agent={value}"
+            elif opt_key in ("referer", "referrer"):
+                opt = f":http-referrer={value}"
+            else:
+                continue
+            try:
+                media.add_option(opt)
+            except Exception as exc:
+                logging.debug("[VLC] stream header option failed (%s): %s", opt_key, exc)
+
+        for opt in (":network-caching=3000", ":http-reconnect", ":live-caching=3000"):
+            try:
+                media.add_option(opt)
+            except Exception:
+                pass
+
+        logging.info(
+            "[VLC] Applied remote stream options (headers=%s)",
+            ", ".join(headers.keys()) or "none",
+        )
+
     def _ensure_preview_muted(self) -> None:
         """Keep embedded preview silent (call after play(); VLC may reset volume)."""
         if not self.embed or not getattr(self, "player", None):
@@ -2090,6 +2233,11 @@ class VideoPlayer:
         Example:
             ``E:/videos/clip.mp4`` -> ``E:/videos/clip_bookmarks.json``
         """
+        from youtube_support import is_remote_media_url
+
+        if is_remote_media_url(video_path):
+            digest = hashlib.sha256(video_path.encode("utf-8")).hexdigest()[:16]
+            return os.path.join("bookmarks", f"remote_{digest}_bookmarks.json")
         return os.path.splitext(video_path)[0] + "_bookmarks.json"
 
     def _get_legacy_bookmark_path(self, video_path: str) -> str:
@@ -2623,6 +2771,7 @@ class VideoPlayer:
             return
 
         media = self.instance.media_new(self.video_path)
+        self._apply_stream_media_options(media)
         self._apply_preview_media_options(media)
         self.player.set_media(media)
         self._mark_media_loaded()
@@ -3285,6 +3434,10 @@ class VideoPlayer:
     def _normalized_media_path(self, path):
         if not path:
             return None
+        from youtube_support import is_remote_media_url
+
+        if is_remote_media_url(path):
+            return path.strip()
         try:
             return os.path.normcase(os.path.abspath(path))
         except OSError:
@@ -4294,7 +4447,12 @@ class VideoPlayer:
 
 
     def preview_or_play(self):
-        if not self.video_path or not os.path.exists(self.video_path):
+        from youtube_support import is_remote_media_url
+
+        if not self.video_path:
+            logging.info("[DEBUG] preview_or_play skipped: no valid video_path")
+            return
+        if not is_remote_media_url(self.video_path) and not os.path.exists(self.video_path):
             logging.info("[DEBUG] preview_or_play skipped: no valid video_path")
             return
         
@@ -4367,6 +4525,7 @@ class VideoPlayer:
         media_start = time.perf_counter()
         media = self.instance.media_new(self.video_path)
         _log_vlc_timing("media_new", media_start)
+        self._apply_stream_media_options(media)
         self._apply_preview_media_options(media)
 
         if self.last_position:
@@ -4528,9 +4687,10 @@ class VideoPlayer:
         self._media_switch_in_progress = False
         if getattr(self, "_cleaning_up", False):
             return
+        timeline_path = getattr(self, "source_path", None) or path
         if self.timeline_widget:
             try:
-                self.timeline_widget.reload_all_markers_and_redraw(path)
+                self.timeline_widget.reload_all_markers_and_redraw(timeline_path)
             except Exception as e:
                 logging.info("[safe_switch] timeline reload: %s", e)
         self._refresh_loop_state_after_video_switch(keep_enabled=was_loop_active)
@@ -4538,11 +4698,11 @@ class VideoPlayer:
         ctrl = self.controller
         if ctrl and hasattr(ctrl, "refresh_bookmark_manager_if_open"):
             try:
-                ctrl.refresh_bookmark_manager_if_open(path)
+                ctrl.refresh_bookmark_manager_if_open(timeline_path)
             except Exception as e:
                 logging.info("[safe_switch] bookmark manager refresh: %s", e)
 
-    def safe_switch_video(self, path, name):
+    def safe_switch_video(self, path, name, source_path=None, stream_http_headers=None):
         """
         Switch to another file on the existing player (no window teardown).
 
@@ -4551,7 +4711,9 @@ class VideoPlayer:
         """
         logging.info("[DEBUG] Switching media to: %s", name)
 
-        if not path or not os.path.isfile(path):
+        from youtube_support import is_remote_media_url
+
+        if not path or (not is_remote_media_url(path) and not os.path.isfile(path)):
             logging.info("[safe_switch] skipped — path missing: %s", path)
             return
         if not self._ensure_vlc_player():
@@ -4574,10 +4736,13 @@ class VideoPlayer:
             self._release_current_media(detach_hwnd=True)
 
             self.video_path = path
+            self.source_path = source_path or path
+            if stream_http_headers is not None:
+                self.stream_http_headers = dict(stream_http_headers)
             self.video_name = name
             self.last_position = 0
             self._clear_bookmark_nav_anchor()
-            self.bookmark_file = self._get_sidecar_bookmark_path(path)
+            self.bookmark_file = self._get_sidecar_bookmark_path(self.source_path)
             self.load_bookmarks()
             try:
                 self.video_window.title((name or "").lower())
@@ -4585,6 +4750,8 @@ class VideoPlayer:
                 pass
 
             new_media = self.instance.media_new(path)
+            self._apply_stream_media_options(new_media)
+            self._apply_preview_media_options(new_media)
             self.player.set_media(new_media)
             self._mark_media_loaded()
             if hasattr(self, "video_label") and self.video_label.winfo_exists():
@@ -4605,13 +4772,16 @@ class VideoPlayer:
 
             if self.timeline_widget:
                 self.timeline_widget.clear_selection()
+                timeline_path = self.source_path
                 try:
                     self.video_window.after(
                         100,
-                        lambda p=path, wla=was_loop_active: self._finish_safe_switch_video(p, name, wla),
+                        lambda p=timeline_path, wla=was_loop_active, n=name: self._finish_safe_switch_video(
+                            p, n, wla
+                        ),
                     )
                 except Exception:
-                    self._finish_safe_switch_video(path, name, was_loop_active)
+                    self._finish_safe_switch_video(timeline_path, name, was_loop_active)
             else:
                 self._refresh_loop_state_after_video_switch(keep_enabled=was_loop_active)
                 self._schedule_decode_placeholder_checks()
@@ -4695,7 +4865,12 @@ class VideoPlayer:
             path = video_files[next_index]['path']
             name = video_files[next_index]['name']
 
-        self.safe_switch_video(path, name)
+        from youtube_support import is_youtube_watch_url
+
+        if is_youtube_watch_url(path):
+            self.controller.open_video_player(path, name)
+            return
+        self.safe_switch_video(path, name, source_path=path)
 
 
     
@@ -4716,7 +4891,12 @@ class VideoPlayer:
             path = video_files[previous_index]['path']
             name = video_files[previous_index]['name']
 
-        self.safe_switch_video(path, name)
+        from youtube_support import is_youtube_watch_url
+
+        if is_youtube_watch_url(path):
+            self.controller.open_video_player(path, name)
+            return
+        self.safe_switch_video(path, name, source_path=path)
 
 
 
@@ -4861,6 +5041,7 @@ class VideoPlayer:
         try:
             self._cancel_all_scheduled_callbacks()
             self._hide_broken_playback_overlay()
+            self._hide_loading_playback_overlay()
             self.hide_slider_hover_time_popup()
         except Exception as e:
             logging.debug("[Cleanup] UI cancel: %s", e)

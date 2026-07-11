@@ -31,6 +31,12 @@ from file_operations import (
     create_video_thumbnail,
 )
 from vtp_constants import VIDEO_FORMATS, IMAGE_FORMATS, preview_skip_subdir
+from youtube_support import (
+    extract_youtube_video_id,
+    fetch_youtube_thumbnail_pil,
+    is_youtube_watch_url,
+    youtube_thumbnail_url,
+)
 
 _OVERSCAN_ROWS = 3
 _OFFSCREEN_Y = -10000
@@ -2296,7 +2302,27 @@ class VtpVirtualGridMixin:
             if render_id != self._vg_render_id:
                 return
             thumb = None
-            if file_name.lower().endswith(VIDEO_FORMATS):
+            if is_youtube_watch_url(file_path):
+                thumb_url = youtube_thumbnail_url(extract_youtube_video_id(file_path) or "")
+                for item in self._vg_data:
+                    if item.get("path") == file_path and item.get("thumb_url"):
+                        thumb_url = item["thumb_url"]
+                        break
+                pil = fetch_youtube_thumbnail_pil(
+                    file_path,
+                    thumb_url,
+                    self.thumbnail_size,
+                    self.thumbnail_cache_path,
+                    cache_enabled=self.cache_enabled,
+                    overwrite=force_refresh,
+                    thumbnail_format=self.thumbnail_format,
+                )
+                if pil is not None:
+                    pil = pil.convert("RGB")
+                    w, h = self.thumbnail_size
+                    pil = pil.resize((w, h), Image.Resampling.LANCZOS)
+                    thumb = ctk.CTkImage(light_image=pil, dark_image=pil)
+            elif file_name.lower().endswith(VIDEO_FORMATS):
                 # Always resolve capture time like normal loads. If thumbnail_time is None (most
                 # display_thumbnails calls), leaving actual_time unset made create_video_thumbnail
                 # default to 0.1 *seconds* instead of slider % / DB timestamp — wrong frame after refresh.
@@ -2316,7 +2342,7 @@ class VtpVirtualGridMixin:
                     cache_dir=self.thumbnail_cache_path, overwrite=force_refresh,
                 )
             if thumb is None:
-                if file_name.lower().endswith(VIDEO_FORMATS):
+                if is_youtube_watch_url(file_path) or file_name.lower().endswith(VIDEO_FORMATS):
                     thumb = self._create_corrupted_thumbnail_image(
                         "Thumbnail could not be generated"
                     )

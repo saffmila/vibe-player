@@ -79,7 +79,13 @@ from playlist import PlaylistManager
 
 from statusbar import StatusBar
 from database import Database
-from virtual_folders import load_virtual_folders, save_virtual_folders, add_to_virtual_folder, create_virtual_folder
+from virtual_folders import (
+    load_virtual_folders,
+    save_virtual_folders,
+    add_to_virtual_folder,
+    create_virtual_folder,
+    sanitize_virtual_library_name,
+)
 from clipboard_file_list import clipboard_has_pastable_paths, clipboard_paste_is_move
 import json
 import sqlite3
@@ -135,6 +141,13 @@ from vtp_mixin_preferences import VtpPreferencesMixin
 from vtp_mixin_tagging import VtpTaggingMixin
 from vtp_mixin_window_layout import VtpWindowLayoutMixin
 from vtp_virtual_grid import VtpVirtualGridMixin
+from youtube_support import (
+    is_remote_media_url,
+    is_youtube_playlist_url,
+    is_youtube_url,
+    is_youtube_watch_url,
+    normalize_youtube_playlist_url,
+)
 
 from screeninfo import get_monitors
 from hotkeys import DEFAULT_HOTKEYS, menu_accel, rename_accelerators_label
@@ -538,6 +551,10 @@ class VideoThumbnailPlayer(
         self._debounce_job: str | None = None
         # CTkComboBox dropdown mouse-up can "fall through" to tree/thumbs below.
         self._ignore_pointer_navigation_until = 0.0
+        self._suppress_quick_access_navigation = False
+        self._youtube_open_pending_url = None
+        self._youtube_playlist_title = None
+        self._youtube_playlist_url = None
         # While syncing tree selection to current_directory, ignore folder loads from <<TreeviewSelect>>.
         self._suppress_tree_select_navigation = False
         # True: delete to Recycle Bin; False: permanent delete.
@@ -1912,7 +1929,7 @@ class VideoThumbnailPlayer(
                             
                             # Check 3: Does the file path (thumb[0]) actually exist?
                             # We cast to str() just in case it's not a string, os.path.exists is flexible.
-                            if os.path.exists(str(thumb[0])):
+                            if os.path.exists(str(thumb[0])) or is_remote_media_url(str(thumb[0])):
                                 cleaned_thumbnails.append(thumb)
                                 
                         # else: thumb is an empty list/tuple, e.g., [], so we drop it.
@@ -2156,6 +2173,7 @@ class VideoThumbnailPlayer(
     def show_empty_thumbnail_view_context_menu(self, event):
         """Right-click on empty thumbnail area (no item under cursor): minimal menu (Paste)."""
         menu = create_context_menu(self, self)
+        self._append_save_youtube_playlist_menu(menu)
         self.add_clipboard_paste_cascade(menu, getattr(self, "current_directory", None))
         menu.tk_popup(event.x_root, event.y_root)
 
@@ -2810,6 +2828,71 @@ class VideoThumbnailPlayer(
 
 
                                 
+    def _is_viewing_youtube_playlist(self) -> bool:
+        current = getattr(self, "current_directory", "") or ""
+        return is_youtube_playlist_url(current)
+
+    def _youtube_playlist_status_text(self, count: int, title: str | None = None) -> str:
+        name = (title or getattr(self, "_youtube_playlist_title", None) or "").strip()
+        if name:
+            return f"YouTube playlist: {name} — {count} videos"
+        return f"YouTube playlist: {count} videos"
+
+    def _append_save_youtube_playlist_menu(self, menu) -> None:
+        if not self._is_viewing_youtube_playlist():
+            return
+        paths = self._youtube_playlist_watch_urls()
+        if not paths:
+            return
+        menu.add_separator()
+        menu.add_command(
+            label="Save playlist as Virtual Library...",
+            command=self.save_youtube_playlist_as_virtual_library,
+        )
+
+    def _youtube_playlist_watch_urls(self) -> list[str]:
+        paths: list[str] = []
+        for item in getattr(self, "video_files", []) or []:
+            if not isinstance(item, dict):
+                continue
+            path = item.get("path")
+            if path and is_youtube_watch_url(path):
+                paths.append(path)
+        return paths
+
+    def save_youtube_playlist_as_virtual_library(self) -> None:
+        if not self._is_viewing_youtube_playlist():
+            return
+        paths = self._youtube_playlist_watch_urls()
+        if not paths:
+            messagebox.showwarning("Virtual Library", "No YouTube videos to save.")
+            return
+
+        default_name = sanitize_virtual_library_name(
+            getattr(self, "_youtube_playlist_title", None) or "YouTube Playlist"
+        )
+        count = len(paths)
+
+        def on_confirm(folder_name):
+            folder_name = sanitize_virtual_library_name(str(folder_name or ""))
+            if not folder_name:
+                return
+            create_virtual_folder(folder_name)
+            self.add_to_virtual_library([(path,) for path in paths], folder_name)
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.set_action_message(
+                    f"Saved {count} video(s) to Virtual Library: {folder_name}"
+                )
+
+        self.universal_dialog(
+            title="Save as Virtual Library",
+            message=f"Save {count} video(s) from this YouTube playlist:",
+            confirm_callback=on_confirm,
+            input_field=True,
+            default_input=default_name,
+            confirm_text="Save",
+        )
+
     def create_virtual_library(self):
         """
         Prompts the user to enter a name for a new virtual library
@@ -3608,6 +3691,12 @@ class VideoThumbnailPlayer(
         self.hover_popup = None
     
     def get_file_info(self, path):
+        if is_youtube_url(path):
+            title = self._media_title_for_path(path)
+            return f"{title}\nSource: YouTube\nURL: {path}"
+        if is_remote_media_url(path):
+            title = self._media_title_for_path(path)
+            return f"{title}\nSource: remote stream\nURL: {path}"
         file_name = os.path.basename(path)
         file_size = os.path.getsize(path)
         file_mtime = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(path)))
@@ -3617,10 +3706,23 @@ class VideoThumbnailPlayer(
         return file_info
 
     def quick_access_selected(self, event):
+        if getattr(self, "_suppress_quick_access_navigation", False):
+            return
         if time.monotonic() < getattr(self, "_ignore_pointer_navigation_until", 0.0):
             return
-        selected_path = self.quick_access_combo.get()
+        selected_path = self.quick_access_combo.get().strip()
         logging.info(f"Selected path from quick access: {selected_path}")  # Debug info
+        if is_youtube_url(selected_path):
+            if is_youtube_playlist_url(selected_path):
+                playlist_url = normalize_youtube_playlist_url(selected_path)
+                if hasattr(self, "status_bar") and self.status_bar:
+                    self.status_bar.set_action_message("Loading YouTube playlist...")
+                self.display_thumbnails(playlist_url)
+                self.current_directory = playlist_url
+                self.add_to_recent_directories(playlist_url)
+            else:
+                self.open_youtube_single_video(selected_path)
+            return
         if os.path.isdir(selected_path):
             self.display_thumbnails(selected_path)
             self.current_directory = selected_path
@@ -3647,7 +3749,12 @@ class VideoThumbnailPlayer(
         self.quick_access_combo.configure(values=self.recent_directories[::-1])
 
         # Set the selected path directly (current_directory may not be updated yet at this point)
-        self.quick_access_combo.set(path)
+        # CTkComboBox fires command= on .set() — suppress to avoid re-navigating / reopening player.
+        self._suppress_quick_access_navigation = True
+        try:
+            self.quick_access_combo.set(path)
+        finally:
+            self._suppress_quick_access_navigation = False
         logging.info(f"Quick access updated with path: {path}")  # Debug info
 
 
@@ -3974,8 +4081,8 @@ class VideoThumbnailPlayer(
         ext = os.path.splitext(file_path)[1].lower()
         if ext in (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff"):
             self.open_image_viewer(file_path, os.path.basename(file_path))
-        elif ext in VIDEO_FORMATS:
-            self.open_video_player(file_path, os.path.basename(file_path))
+        elif self._is_playable_video_path(file_path):
+            self.open_video_player(file_path, self._media_title_for_path(file_path))
         else:
             logging.info("[DEBUG] Unsupported file type for ENTER.")
 
@@ -4124,11 +4231,18 @@ class VideoThumbnailPlayer(
                 press_ctrl = getattr(self, "_thumb_last_press_ctrl", False)
                 if not press_shift and not press_ctrl:
                     try:
-                        nfp = os.path.normcase(os.path.normpath(file_path))
+                        if is_remote_media_url(file_path):
+                            nfp = file_path.strip()
+                        else:
+                            nfp = os.path.normcase(os.path.normpath(file_path))
                         idx = next(
                             i
                             for i, vf in enumerate(self.video_files)
-                            if os.path.normcase(os.path.normpath(vf.get("path", ""))) == nfp
+                            if (
+                                vf.get("path", "").strip() == nfp
+                                if is_remote_media_url(file_path)
+                                else os.path.normcase(os.path.normpath(vf.get("path", ""))) == nfp
+                            )
                         )
                     except StopIteration:
                         idx = None
@@ -4169,7 +4283,7 @@ class VideoThumbnailPlayer(
             is_strips = strips_mode and strips_mode.get() == "Strips"
             selected_video_paths = [
                 p for p, _, _ in self.selected_thumbnails
-                if p.lower().endswith(VIDEO_FORMATS)
+                if self._is_playable_video_path(p)
             ]
             logging.info(
                 "[MultiTimeline] is_strips=%s  sel_count=%d  ShowTWidget=%s  "
@@ -4315,7 +4429,7 @@ class VideoThumbnailPlayer(
         """
         Note: Handles the logic for a double-click event: opening the file.
         """
-        is_video = file_path.lower().endswith(VIDEO_FORMATS)
+        is_video = self._is_playable_video_path(file_path)
         is_image = file_path.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.gif'))
 
         # Safely stop any running preview before opening the main player.
@@ -4329,7 +4443,7 @@ class VideoThumbnailPlayer(
                 logging.warning(f"Error stopping preview on double-click: {e}")
 
         if is_video:
-            self.open_video_player(file_path, os.path.basename(file_path))
+            self.open_video_player(file_path, self._media_title_for_path(file_path))
         elif is_image:
             self.open_image_viewer(file_path, os.path.basename(file_path))
 
@@ -4810,6 +4924,9 @@ class VideoThumbnailPlayer(
 
         def worker():
             try:
+                if is_remote_media_url(path):
+                    return
+
                 # os.path.exists() can block for seconds on a stalled network drive (j:\),
                 # so keep it off the UI thread to avoid freezing the app on a click.
                 if not os.path.exists(path):
