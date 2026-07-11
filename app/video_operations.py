@@ -397,6 +397,7 @@ class VideoPlayer:
         self._slider_poll_after_id = None
         self._opening_raise_after_id = None
         self._open_full_app_overlay_hide_job = None
+        self._show_and_play_after_id = None
         self._cleaning_up = False
         self._cleanup_done = False
 
@@ -644,6 +645,10 @@ class VideoPlayer:
         Zobrazí okno a spustí přehrávání. Volá se až poté, co je __init__ hotový
         a okno je plně připraveno operačním systémem.
         """
+        self._show_and_play_after_id = None
+        if not self._is_playback_allowed():
+            logging.info("[show_and_play] skipped — player closed or window gone.")
+            return
         if not self.embed:
             self._begin_opening_raise_guard()
             self.raise_player_window()
@@ -788,8 +793,37 @@ class VideoPlayer:
             pass
         self.play_video()
 
+    def _is_playback_allowed(self) -> bool:
+        """False when the player is closing or its window is already gone (standalone mode)."""
+        if getattr(self, "_cleaning_up", False) or getattr(self, "_cleanup_done", False):
+            return False
+        if self.embed:
+            return True
+        vw = getattr(self, "video_window", None)
+        if vw is None:
+            return False
+        try:
+            return vw.winfo_exists()
+        except Exception:
+            return False
+
+    def _cancel_show_and_play(self) -> None:
+        """Cancel deferred show_and_play scheduled on the main app (survives window destroy)."""
+        aid = getattr(self, "_show_and_play_after_id", None)
+        self._show_and_play_after_id = None
+        if not aid:
+            return
+        ctrl = getattr(self, "controller", None)
+        if ctrl is None:
+            return
+        try:
+            ctrl.after_cancel(aid)
+        except (tk.TclError, ValueError):
+            pass
+
     def _cancel_all_scheduled_callbacks(self) -> None:
         """Cancel Tk after() jobs that touch VLC — otherwise teardown races cause 0xC0000005."""
+        self._cancel_show_and_play()
         vw = getattr(self, "video_window", None)
 
         def _cancel_attr(attr: str) -> None:
@@ -1778,6 +1812,8 @@ class VideoPlayer:
 
     def _ensure_vlc_player(self) -> bool:
         """Lazily create VLC Instance and MediaPlayer (must run on the Tk main thread)."""
+        if not self._is_playback_allowed():
+            return False
         if self.instance and self.player:
             return True
         ensure_start = time.perf_counter()
@@ -2579,6 +2615,9 @@ class VideoPlayer:
     def display_first_frame(self):
         if not self.video_path:
             logging.info("[VideoPlayer] display_first_frame: no video_path, skipped.")
+            return
+        if not self._is_playback_allowed():
+            logging.info("[VideoPlayer] display_first_frame: skipped — player closed.")
             return
         if not self._ensure_vlc_player():
             return
@@ -4274,6 +4313,9 @@ class VideoPlayer:
         logging.info(f"[DEBUG] play_video: playing={self.playing}")
         if not self.video_path:
             return
+        if not self._is_playback_allowed():
+            logging.info("[DEBUG] play_video: skipped — player closed or window gone.")
+            return
 
         self._reconcile_window_mode_before_play()
 
@@ -4730,6 +4772,11 @@ class VideoPlayer:
         Does not call player.release() — caller does that after the Tk window is gone.
         """
         logging.info("[Cleanup][VLC] shutdown start detach_hwnd=%s player=%r", detach_hwnd, player)
+        try:
+            player.audio_set_mute(True)
+            player.audio_set_volume(0)
+        except Exception as e:
+            logging.info("[Cleanup][VLC] pre-stop mute failed: %s", e)
         if detach_hwnd and os.name == "nt" and hasattr(player, "set_hwnd"):
             try:
                 logging.info("[Cleanup][VLC] before player.set_hwnd(0)")

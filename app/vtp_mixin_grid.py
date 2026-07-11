@@ -5912,6 +5912,8 @@ class VtpGridMixin:
             self.current_video_window = None
             self.active_player = None
             try:
+                if hasattr(old_player, "_cancel_show_and_play"):
+                    old_player._cancel_show_and_play()
                 old_player.cleanup()
             except Exception as e:
                 logging.info("[OpenVideo] Old player cleanup: %s", e)
@@ -5976,7 +5978,7 @@ class VtpGridMixin:
             self._demo_toast("demo_playback")
             vp = self.current_video_window
             if vp is not None:
-                self.after(1, vp.show_and_play)
+                vp._show_and_play_after_id = self.after(1, vp.show_and_play)
 
             if self.ShowTWidget and hasattr(self, "timeline_widget"):
                 self.current_video_window.timeline_widget = self.timeline_widget
@@ -6082,6 +6084,8 @@ class VtpGridMixin:
         if win is not None:
             self.current_video_window = None
             self.active_player = None
+            if hasattr(win, "_cancel_show_and_play"):
+                win._cancel_show_and_play()
             win.close_video_player()
             logging.info("[DEBUG] current_video_window closed/set to None")
         if release_preview:
