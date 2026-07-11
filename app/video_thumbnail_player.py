@@ -532,6 +532,8 @@ class VideoThumbnailPlayer(
         self._is_loading = False
         # Cancellation token: incremented on every new load; each async phase checks it.
         self._render_id = 0
+        # Lazy media-dimension backfill (background ffprobe/PIL; cancelled on folder change).
+        self._dimensions_backfill_seq = 0
         # Debounce job for TreeView folder selection
         self._debounce_job: str | None = None
         # CTkComboBox dropdown mouse-up can "fall through" to tree/thumbs below.

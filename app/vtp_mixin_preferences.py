@@ -13,6 +13,7 @@ from app_settings import TaggingSettings
 from database import Database
 from gui_elements import (
     TogglePanelFrame,
+    apply_file_info_display,
     create_preferences_window,
     open_autotag_settings_window,
     setup_gui,
@@ -283,6 +284,7 @@ class VtpPreferencesMixin:
                 self.image_viewer_use_pyglet = bool(
                     settings.get("image_viewer_use_pyglet", False)
                 )
+                apply_file_info_display(self, settings.get("file_info_display"))
                 # Splitter positions (fractions 0-1)
                 self._saved_main_sash_fraction = settings.get("splitter_main_fraction")
                 self._saved_left_sash_fraction = settings.get("splitter_left_fraction")

@@ -820,6 +820,7 @@ class VtpGridMixin:
                     self.adjust_scroll_region_and_filler()
 
                 self._is_loading = False
+                self._schedule_lazy_dimensions_backfill()
 
             self.after(0, finalize_on_main_thread)
 
@@ -1098,6 +1099,7 @@ class VtpGridMixin:
             shown_count = int(getattr(self, "_search_loaded_count", 0) or len(getattr(self, "current_search_results", []) or []))
             self.status_bar.set_action_message(self._format_search_status_detail(shown_count))
         self._schedule_search_scrollregion_refresh()
+        self._schedule_lazy_dimensions_backfill()
 
     def _append_search_results_render(self, new_results, start_index, force_refresh=False, thumbnail_time=None):
         """Append one page of search results without rebuilding already visible widgets."""
@@ -3542,10 +3544,222 @@ class VtpGridMixin:
                 info_texts.append((keywords, "#8ecae6"))
 
         return info_texts
-    
-    
 
+    def _dimensions_display_enabled(self) -> bool:
+        try:
+            return bool(self.file_info_vars.get("dimensions").get())
+        except Exception:
+            return False
 
+    def _iter_paths_missing_dimensions(self, paths=None):
+        """Yield media file paths whose DB row lacks width/height."""
+        if paths is None:
+            items = getattr(self, "video_files", None) or getattr(self, "_vg_data", []) or []
+            paths = [it.get("path") for it in items if not it.get("is_folder")]
+
+        for path in paths or []:
+            if not path:
+                continue
+            lower = path.lower()
+            if not (lower.endswith(VIDEO_FORMATS) or lower.endswith(IMAGE_FORMATS)):
+                continue
+            entry = self.database.get_entry(path)
+            if entry and entry.get("width") and entry.get("height"):
+                continue
+            yield path
+
+    def _prioritize_visible_dimension_paths(self, paths: list[str]) -> list[str]:
+        """Process on-screen thumbnails first so dimensions appear where the user is looking."""
+        if not paths or not getattr(self, "_vg_active", False):
+            return paths
+
+        visible_set = set()
+        vg_data = getattr(self, "_vg_data", []) or []
+        for slot in getattr(self, "_vg_std_pool", []) or []:
+            idx = int(slot.get("data_idx", -1))
+            if 0 <= idx < len(vg_data):
+                fp = vg_data[idx].get("path")
+                if fp:
+                    visible_set.add(fp)
+
+        if not visible_set:
+            return paths
+
+        visible = [p for p in paths if p in visible_set]
+        rest = [p for p in paths if p not in visible_set]
+        return visible + rest
+
+    def _schedule_lazy_dimensions_backfill(self, paths=None):
+        """Fetch missing width/height off the main thread; does not block folder scan."""
+        missing = list(self._iter_paths_missing_dimensions(paths))
+        if not missing:
+            return
+
+        missing = self._prioritize_visible_dimension_paths(missing)
+        seq = getattr(self, "_dimensions_backfill_seq", 0) + 1
+        self._dimensions_backfill_seq = seq
+        directory = getattr(self, "current_directory", None)
+
+        def worker():
+            self._worker_lazy_dimensions_backfill(missing, seq, directory)
+
+        try:
+            self.executor.submit(worker)
+        except Exception:
+            worker()
+
+    def _worker_lazy_dimensions_backfill(self, paths, seq, directory):
+        batch: list[tuple[str, int, int]] = []
+        batch_size = 8
+
+        def flush_batch():
+            if not batch:
+                return
+            payload = list(batch)
+            batch.clear()
+            self.after(0, lambda u=payload, s=seq: self._apply_lazy_dimensions_backfill(u, s))
+
+        for i, path in enumerate(paths):
+            if seq != getattr(self, "_dimensions_backfill_seq", seq):
+                return
+            if directory and getattr(self, "current_directory", None) != directory:
+                return
+
+            try:
+                lower = path.lower()
+                if lower.endswith(VIDEO_FORMATS):
+                    width, height = get_video_size(path)
+                elif lower.endswith(IMAGE_FORMATS):
+                    width, height = self.get_image_size(path)
+                else:
+                    continue
+
+                if not (width and height):
+                    continue
+
+                width_i, height_i = int(width), int(height)
+                try:
+                    self.database.update_file_metadata(path, width=width_i, height=height_i)
+                except Exception as e:
+                    logging.debug("Dimension backfill DB update failed for %s: %s", path, e)
+                    continue
+
+                batch.append((path, width_i, height_i))
+                if len(batch) >= batch_size:
+                    flush_batch()
+            except Exception as e:
+                logging.debug("Dimension backfill failed for %s: %s", path, e)
+
+            if (i + 1) % 4 == 0:
+                time.sleep(0.02)
+
+        flush_batch()
+
+    def _invalidate_vg_item_metadata(self, file_path: str) -> None:
+        if not getattr(self, "_vg_active", False) or not getattr(self, "_vg_data", None):
+            return
+        norm_fn = getattr(self, "_vg_norm_path", None)
+        norm = norm_fn(file_path) if callable(norm_fn) else os.path.normcase(os.path.normpath(file_path))
+        data_idx = getattr(self, "_vg_data_index_by_path", {}).get(norm, -1)
+        if data_idx < 0:
+            return
+        item = self._vg_data[data_idx]
+        item.pop("_vg_info_parts", None)
+        item.pop("_vg_info_key", None)
+        try:
+            item["_vg_db_entry"] = self.database.get_entry(file_path)
+        except Exception:
+            item["_vg_db_entry"] = None
+
+    def _refresh_legacy_file_labels(self, file_path: str) -> None:
+        normalized = os.path.normcase(os.path.normpath(file_path))
+        thumb_info = None
+        resolved_path = file_path
+        for key, val in list(getattr(self, "thumbnail_labels", {}).items()):
+            if os.path.normcase(os.path.normpath(key)) == normalized:
+                thumb_info = val
+                resolved_path = key
+                break
+        if not thumb_info:
+            return
+
+        canvas = thumb_info.get("canvas")
+        if canvas is None or not canvas.winfo_exists():
+            return
+
+        file_name = os.path.basename(resolved_path)
+        for item in getattr(self, "video_files", []) or []:
+            item_path = item.get("path")
+            if item_path and os.path.normcase(os.path.normpath(item_path)) == normalized:
+                file_name = item.get("name", file_name)
+                break
+
+        is_folder = bool(getattr(canvas, "is_folder", False))
+        if isinstance(canvas, tk.Canvas):
+            thumbnail_frame = canvas.master
+        else:
+            thumbnail_frame = canvas
+            canvas = thumb_info.get("canvas")
+
+        if not thumbnail_frame or not thumbnail_frame.winfo_exists():
+            return
+
+        thumb_w, thumb_h = self.thumbnail_size
+        try:
+            canvas_width = int(canvas.winfo_width() or thumb_w)
+            canvas_height = int(canvas.winfo_height() or thumb_h)
+        except Exception:
+            canvas_width, canvas_height = thumb_w, thumb_h
+
+        try:
+            self.update_thumbnail_label(
+                resolved_path,
+                file_name,
+                thumbnail_frame,
+                canvas,
+                thumb_info.get("row", 0),
+                thumb_info.get("col", 0),
+                thumb_info.get("index", 0),
+                self.labelBGColor,
+                True,
+                canvas_height,
+                canvas_width,
+                is_folder=is_folder,
+            )
+        except Exception as e:
+            logging.debug("Legacy label refresh failed for %s: %s", file_path, e)
+
+    def _apply_lazy_dimensions_backfill(self, updates, seq):
+        if seq != getattr(self, "_dimensions_backfill_seq", seq):
+            return
+        if not updates:
+            return
+
+        for path, _w, _h in updates:
+            self._invalidate_vg_item_metadata(path)
+
+        if not self._dimensions_display_enabled():
+            return
+
+        visible_set = set()
+        if getattr(self, "_vg_active", False):
+            vg_data = getattr(self, "_vg_data", []) or []
+            for slot in getattr(self, "_vg_std_pool", []) or []:
+                idx = int(slot.get("data_idx", -1))
+                if 0 <= idx < len(vg_data):
+                    fp = vg_data[idx].get("path")
+                    if fp:
+                        visible_set.add(fp)
+
+        for path, _w, _h in updates:
+            try:
+                if getattr(self, "_vg_active", False):
+                    if path in visible_set:
+                        self._vg_refresh_file_labels(path)
+                else:
+                    self._refresh_legacy_file_labels(path)
+            except Exception as e:
+                logging.debug("Dimension label refresh failed for %s: %s", path, e)
 
 
     def contains_media_files(self,path):
