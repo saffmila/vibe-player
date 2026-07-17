@@ -280,7 +280,24 @@ class VtpPreferencesMixin:
                     )
                 self.dnd_confirm_dialogs = bool(settings.get("dnd_confirm_dialogs", False))
                 self.delete_to_trash = bool(settings.get("delete_to_trash", True))
-                self.auto_refresh_folder = bool(settings.get("auto_refresh_folder", True))
+                self.auto_refresh_folder = bool(settings.get("auto_refresh_folder", False))
+                if not self.auto_refresh_folder and hasattr(self, "stop_directory_watcher"):
+                    try:
+                        self.stop_directory_watcher()
+                    except Exception:
+                        pass
+                _SORT_CHOICES = ("Filename", "Size", "Date", "Dimensions", "File Type")
+                sort_val = settings.get("sort_option", "Filename")
+                if sort_val not in _SORT_CHOICES:
+                    sort_val = "Filename"
+                self._pending_sort_option = sort_val
+                if getattr(self, "sort_option", None) is not None:
+                    self.sort_option.set(sort_val)
+                    if getattr(self, "sort_dropdown", None) is not None:
+                        try:
+                            self.sort_dropdown.set(sort_val)
+                        except Exception:
+                            pass
                 self.image_viewer_use_pyglet = bool(
                     settings.get("image_viewer_use_pyglet", False)
                 )
@@ -346,7 +363,10 @@ class VtpPreferencesMixin:
             self.memory_cache = True  # Default if no settings file exists
             self.dnd_confirm_dialogs = False
             self.delete_to_trash = True
-            self.auto_refresh_folder = True
+            self.auto_refresh_folder = False
+            self._pending_sort_option = "Filename"
+            if getattr(self, "sort_option", None) is not None:
+                self.sort_option.set("Filename")
             self.image_viewer_use_pyglet = False
             #load audio device only it wasnt loaded before
             if "audio_device" in settings:

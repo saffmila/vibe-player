@@ -327,14 +327,23 @@ class VtpGridMixin:
         if callable(_nav_clear):
             _nav_clear(prev_cd, dir_path)
 
-        # Defer watcher start — never stop/join Observer inline during folder init
-        # (that deadlocks with Tk when the previous watch was on the app/log folder).
-        schedule_watch = getattr(self, "_schedule_directory_watcher", None)
-        if callable(schedule_watch):
+        # Immediately stop the previous folder watcher + cancel debounce so
+        # ComfyUI/Explorer events from the old path cannot flood Tk during load.
+        stop_watch = getattr(self, "stop_directory_watcher", None)
+        if callable(stop_watch):
             try:
-                schedule_watch(dir_path)
+                stop_watch()
             except Exception:
-                logging.debug("schedule directory watcher failed", exc_info=True)
+                logging.debug("stop_directory_watcher during nav failed", exc_info=True)
+
+        # Optional auto-watch of the new folder (off by default).
+        if getattr(self, "auto_refresh_folder", False):
+            schedule_watch = getattr(self, "_schedule_directory_watcher", None)
+            if callable(schedule_watch):
+                try:
+                    schedule_watch(dir_path)
+                except Exception:
+                    logging.debug("schedule directory watcher failed", exc_info=True)
 
         return True # Indicate successful initialization
 
@@ -3089,10 +3098,11 @@ class VtpGridMixin:
         
             
         mimetype, _ = mimetypes.guess_type(file_path)
+        lower_path = file_path.lower()
 
-        if mimetype and mimetype.startswith("video"):
+        if (mimetype and mimetype.startswith("video")) or lower_path.endswith(VIDEO_FORMATS):
             menu.add_command(label="▶ Play Video", command=lambda:  self.play_video_selection(file_path) )   #self.open_video_player(file_path, video_name)
-        elif mimetype and mimetype.startswith("image"):
+        elif (mimetype and mimetype.startswith("image")) or lower_path.endswith(IMAGE_FORMATS):
             menu.add_command(label="🖼 Show Image", command=lambda: self.open_image_viewer(file_path, os.path.basename(file_path)))
 
         else:
@@ -3663,6 +3673,44 @@ class VtpGridMixin:
             if db_entry:
                 width = db_entry.get('width')
                 height = db_entry.get('height')
+
+            # Historical bug: create_image_thumbnail stored thumbnail size after
+            # Image.thumbnail() mutated the PIL image. Heal those rows once.
+            lower = file_path.lower()
+            if lower.endswith(IMAGE_FORMATS):
+                _THUMB_SIZES = {
+                    (160, 120),
+                    (240, 180),
+                    (320, 240),
+                    (400, 300),
+                    (480, 360),
+                }
+                ts = getattr(self, "thumbnail_size", None)
+                if ts:
+                    try:
+                        _THUMB_SIZES.add((int(ts[0]), int(ts[1])))
+                    except (TypeError, ValueError):
+                        pass
+                stale = (
+                    width
+                    and height
+                    and (int(width), int(height)) in _THUMB_SIZES
+                )
+                if stale or not (width and height):
+                    try:
+                        with Image.open(file_path) as im:
+                            try:
+                                im = ImageOps.exif_transpose(im) or im
+                            except Exception:
+                                pass
+                            width, height = im.size
+                        if hasattr(self, "database") and self.database:
+                            self.database.update_file_metadata(
+                                file_path, width=width, height=height
+                            )
+                    except Exception:
+                        pass
+
             if width and height:
                 info_texts.append((f"{width}x{height}", meta_color))
 

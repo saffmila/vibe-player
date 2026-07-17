@@ -15,6 +15,7 @@ import customtkinter as ctk
 from database import Database
 from utils import get_video_size
 from utils import ThumbnailCache
+from vtp_constants import IMAGE_FORMATS
 import subprocess
 from io import BytesIO
 import shutil
@@ -654,7 +655,13 @@ def create_image_thumbnail(image_path, thumbnail_size, cache_enabled=True, datab
             return ctk.CTkImage(light_image=_cached_img, dark_image=_cached_img)
 
         image = Image.open(image_path)
-        
+        try:
+            image = ImageOps.exif_transpose(image) or image
+        except Exception:
+            pass
+        # Capture ORIGINAL size before thumbnail() mutates the image in-place.
+        orig_width, orig_height = image.size
+
         image.thumbnail(thumbnail_size, Image.LANCZOS)
 
         save_format = "JPEG" if thumbnail_format.lower() == "jpg" else thumbnail_format.upper()
@@ -669,8 +676,30 @@ def create_image_thumbnail(image_path, thumbnail_size, cache_enabled=True, datab
         
 
         if database:
-            width, height = image.size
-            database.add_entry(os.path.basename(image_path), image_path, width, height)
+            # Always store/refresh true source dimensions (not the thumbnail size).
+            existing = None
+            try:
+                existing = database.get_entry(image_path)
+            except Exception:
+                existing = None
+            if existing is None:
+                database.add_entry(
+                    os.path.basename(image_path), image_path, orig_width, orig_height
+                )
+            elif (
+                existing.get("width") != orig_width
+                or existing.get("height") != orig_height
+            ):
+                try:
+                    database.update_file_metadata(
+                        image_path, width=orig_width, height=orig_height
+                    )
+                except Exception:
+                    logging.debug(
+                        "Failed to update image dimensions in DB for %s",
+                        image_path,
+                        exc_info=True,
+                    )
         
         # After generating the thumbnail
         if thumbnail is not None:
@@ -1352,9 +1381,13 @@ def get_file_info(path):
     file_mtime = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(path)))
     
     if os.path.isfile(path):
-        if path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
-            image = Image.open(path)
-            width, height = image.size
+        if path.lower().endswith(IMAGE_FORMATS):
+            with Image.open(path) as image:
+                try:
+                    image = ImageOps.exif_transpose(image) or image
+                except Exception:
+                    pass
+                width, height = image.size
             dimensions = f"{width}x{height}"
         elif path.lower().endswith(_OPENCV_FRAGILE_VIDEO_EXTS):
             dimensions = "Unknown"
@@ -1386,8 +1419,12 @@ def get_file_metadata(path):
 
         if os.path.isfile(path):
             ext = path.lower()
-            if ext.endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
+            if ext.endswith(IMAGE_FORMATS):
                 with Image.open(path) as img:
+                    try:
+                        img = ImageOps.exif_transpose(img) or img
+                    except Exception:
+                        pass
                     metadata["width"], metadata["height"] = img.size
                     try:
                         exif_data = img.getexif()

@@ -21,6 +21,7 @@ from screeninfo import get_monitors
 import tkinter as tk
 
 from gui_elements import CTkFlatContextMenu
+from vtp_constants import IMAGE_FORMATS
 
 
 class ImageViewerLegacy:
@@ -266,7 +267,7 @@ class ImageViewerLegacy:
 
     def skip(self, direction):
         try:
-            all_files = [f for f in self.controller.video_files if f['path'].lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp'))]
+            all_files = [f for f in self.controller.video_files if f['path'].lower().endswith(IMAGE_FORMATS)]
             # Najít index pomocí cesty k souboru
             current_index = next((i for i, f in enumerate(all_files) if f['path'] == self.image_path), None)
             
@@ -548,7 +549,7 @@ class ImageViewerLegacy:
         index_str = ""
         try:
             # Toto je trochu hack, saháme do controlleru, ale je to rychlé
-            all_files = [f for f in self.controller.video_files if f['path'].lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp'))]
+            all_files = [f for f in self.controller.video_files if f['path'].lower().endswith(IMAGE_FORMATS)]
             total = len(all_files)
             # Najdeme index aktuálního
             idx = next((i for i, f in enumerate(all_files) if f['path'] == self.image_path), -1)
@@ -1687,9 +1688,8 @@ class ImageViewerGPU:
 
     def skip(self, direction):
         try:
-            exts  = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')
             files = [f for f in self.controller.video_files
-                     if f['path'].lower().endswith(exts)]
+                     if f['path'].lower().endswith(IMAGE_FORMATS)]
             idx   = next((i for i, f in enumerate(files)
                           if f['path'] == self.image_path), None)
             if idx is None:
@@ -1752,9 +1752,8 @@ class ImageViewerGPU:
             return self._hud_index_str
         self._hud_cache_path = self.image_path
         try:
-            exts  = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')
             files = [f for f in self.controller.video_files
-                     if f['path'].lower().endswith(exts)]
+                     if f['path'].lower().endswith(IMAGE_FORMATS)]
             idx   = next((i for i, f in enumerate(files)
                           if f['path'] == self.image_path), -1)
             self._hud_index_str = f"[{idx+1}/{len(files)}] " if idx != -1 else ""

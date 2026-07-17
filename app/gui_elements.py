@@ -20,6 +20,7 @@ import webbrowser
 import customtkinter as ctk
 
 from app_settings import TaggingSettings
+from folder_favorites import build_favorites_menu, rebuild_favorites_menu
 from utils import create_menu
 import logging
 from hotkeys import DEFAULT_HOTKEYS, action_label, format_accelerator_menu, iter_help_sections, menu_accel
@@ -486,6 +487,27 @@ def setup_menu(app):
         app.rating_button.winfo_rootx(), 
         app.rating_button.winfo_rooty() + app.rating_button.winfo_height()
     ))
+
+    # --- Favorites Menu (pinned folder locations) ---
+    app._favorites_menu = build_favorites_menu(app)
+    app.favorites_button = ctk.CTkLabel(
+        app.menu_bar,
+        text="Favorites",
+        text_color=app.thumb_TextColor,
+        font=("Helvetica", 14),
+        cursor="hand2",
+    )
+    app.favorites_button.pack(side="left", padx=10, pady=2)
+    app.favorites_button.bind(
+        "<Button-1>",
+        lambda e: (
+            rebuild_favorites_menu(app),
+            app._favorites_menu.tk_popup(
+                app.favorites_button.winfo_rootx(),
+                app.favorites_button.winfo_rooty() + app.favorites_button.winfo_height(),
+            ),
+        ),
+    )
 
     # --- Help Menu ---
     app._help_menu = build_help_menu(app)
@@ -1171,22 +1193,34 @@ def setup_gui(app):
         app.refresh_dir_button.pack(side=ctk.LEFT, padx=4, pady=5)
 
     # --- Sort Dropdown ---
-    app.sort_option = ctk.StringVar(value="Filename")
-    sort_dropdown = ctk.CTkComboBox(
+    _SORT_CHOICES = ["Filename", "Size", "Date", "Dimensions", "File Type"]
+    _saved_sort = getattr(app, "_pending_sort_option", None)
+    if _saved_sort not in _SORT_CHOICES:
+        _saved_sort = "Filename"
+    app.sort_option = ctk.StringVar(value=_saved_sort)
+
+    def _on_sort_option_chosen(choice):
+        app._toolbar_combo_begin()
+        if hasattr(app, "save_preferences"):
+            try:
+                app.save_preferences()
+            except Exception:
+                logging.debug("Failed to save sort preference", exc_info=True)
+        app.display_thumbnails(app.current_directory, preserve_scroll=True)
+
+    app.sort_dropdown = ctk.CTkComboBox(
         app.toolbar_frame,
         variable=app.sort_option,
-        values=["Filename", "Size", "Date", "Dimensions", "File Type"],
-        command=lambda choice: (
-            app._toolbar_combo_begin(),
-            app.display_thumbnails(app.current_directory, preserve_scroll=True),
-        ),
+        values=_SORT_CHOICES,
+        command=_on_sort_option_chosen,
         width=110,
         dropdown_font=DROPDOWN_FONT,
         fg_color=dropdown_frame_color,
         border_color=dropdown_frame_color,
         button_color=dropdown_button_color
     )
-    sort_dropdown.pack(side=ctk.LEFT, padx=(45, 6), pady=5)
+    app.sort_dropdown.set(app.sort_option.get())
+    app.sort_dropdown.pack(side=ctk.LEFT, padx=(45, 6), pady=5)
 
     # --- Thumbnail Size Dropdown ---
     thumbnail_size_choices = ["160x120", "240x180", "320x240", "400x300", "480x360"]
@@ -1926,7 +1960,7 @@ def create_preferences_window(app):
         font=("Helvetica", 14),
     ).pack(anchor="w", padx=8, pady=(4, 2))
     auto_refresh_folder_var = ctk.BooleanVar(
-        value=bool(getattr(app, "auto_refresh_folder", True))
+        value=bool(getattr(app, "auto_refresh_folder", False))
     )
     ctk.CTkCheckBox(
         adv_body,
@@ -1935,7 +1969,10 @@ def create_preferences_window(app):
     ).pack(anchor="w", padx=12, pady=4)
     ctk.CTkLabel(
         adv_body,
-        text="Uses a short debounce. Toolbar Refresh / F5 still works anytime.",
+        text=(
+            "Experimental — reloads the whole grid (can flicker). "
+            "Prefer toolbar Refresh / F5. Uses a long debounce when enabled."
+        ),
         font=("Helvetica", 12),
         text_color=("gray30", "gray70"),
         justify="left",
@@ -2069,7 +2106,12 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
         "search_results_page_size": int(getattr(app, "search_results_page_size", 250)),
         "dnd_confirm_dialogs": getattr(app, "dnd_confirm_dialogs", False),
         "delete_to_trash": bool(getattr(app, "delete_to_trash", True)),
-        "auto_refresh_folder": bool(getattr(app, "auto_refresh_folder", True)),
+        "auto_refresh_folder": bool(getattr(app, "auto_refresh_folder", False)),
+        "sort_option": (
+            app.sort_option.get()
+            if getattr(app, "sort_option", None) is not None
+            else getattr(app, "_pending_sort_option", "Filename")
+        ),
         "image_viewer_use_pyglet": bool(getattr(app, "image_viewer_use_pyglet", False)),
     }
     # Save splitter positions (fractions 0-1) when panes are visible
@@ -2150,7 +2192,7 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
 
     app.dnd_confirm_dialogs = bool(preferences.get("dnd_confirm_dialogs", False))
     app.delete_to_trash = bool(preferences.get("delete_to_trash", True))
-    app.auto_refresh_folder = bool(preferences.get("auto_refresh_folder", True))
+    app.auto_refresh_folder = bool(preferences.get("auto_refresh_folder", False))
     if app.auto_refresh_folder:
         cd = getattr(app, "current_directory", None)
         if cd and hasattr(app, "start_directory_watcher"):

@@ -76,6 +76,12 @@ from tkinter import filedialog, ttk, messagebox
 from file_operations import *
 from gui_elements import *
 from playlist import PlaylistManager
+from folder_favorites import (
+    FAVORITES_FILE,
+    FolderFavoritesManager,
+    load_folder_favorites,
+    save_folder_favorites,
+)
 
 from statusbar import StatusBar
 from database import Database
@@ -321,7 +327,8 @@ class VideoThumbnailPlayer(
         self._watchdog_debounce_ms = 15000  # 15s — less disruptive during normal work
         self._watchdog_load_retries = 0
         self._watched_directory = None
-        self.auto_refresh_folder = True  # soft-reload grid when current folder changes on disk
+        # Off by default: full-grid reload flickers/freezes; use toolbar Refresh / F5 instead.
+        self.auto_refresh_folder = False
         self.thumbnail_widgets = []  # Keep track of thumbnail widgets  
         
         
@@ -571,6 +578,8 @@ class VideoThumbnailPlayer(
         self.recent_directories = []
         self.recent_directories = load_recent_directories(self.settings_file)
         logging.info(f"Loading recent directories from: {os.path.abspath(self.settings_file)}")
+        self.folder_favorites = load_folder_favorites(FAVORITES_FILE)
+        self.folder_favorites_manager = FolderFavoritesManager(self)
         self.is_fullscreen = False
         self.processed_directories = set()
 
@@ -3655,6 +3664,7 @@ class VideoThumbnailPlayer(
         except Exception:
             pass
         save_recent_directories(self.settings_file,self.recent_directories)
+        save_folder_favorites(getattr(self, "folder_favorites", []), FAVORITES_FILE)
         self.save_preferences()  # unified save
 
         self.destroy()
@@ -3967,9 +3977,9 @@ class VideoThumbnailPlayer(
 
         # Branch by file type
         ext = os.path.splitext(file_path)[1].lower()
-        if ext in (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff"):
+        if ext in IMAGE_FORMATS or file_path.lower().endswith(IMAGE_FORMATS):
             self.open_image_viewer(file_path, os.path.basename(file_path))
-        elif ext in VIDEO_FORMATS:
+        elif ext in VIDEO_FORMATS or file_path.lower().endswith(VIDEO_FORMATS):
             self.open_video_player(file_path, os.path.basename(file_path))
         else:
             logging.info("[DEBUG] Unsupported file type for ENTER.")
@@ -4230,7 +4240,7 @@ class VideoThumbnailPlayer(
                     return
 
                 is_video = file_path.lower().endswith(VIDEO_FORMATS)
-                is_image = file_path.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.gif'))
+                is_image = file_path.lower().endswith(IMAGE_FORMATS)
 
                 if is_video:
                     can_preview, preview_reason = self._can_attempt_video_playback(
@@ -4311,7 +4321,7 @@ class VideoThumbnailPlayer(
         Note: Handles the logic for a double-click event: opening the file.
         """
         is_video = file_path.lower().endswith(VIDEO_FORMATS)
-        is_image = file_path.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.gif'))
+        is_image = file_path.lower().endswith(IMAGE_FORMATS)
 
         # Safely stop any running preview before opening the main player.
         if hasattr(self, "info_panel") and self.info_panel is not None:
@@ -5087,7 +5097,14 @@ class VideoThumbnailPlayer(
 
  
     def get_video_dimensions(self, file_path):
-        if file_path.lower().endswith((
+        lower = file_path.lower()
+        if lower.endswith(IMAGE_FORMATS):
+            try:
+                with Image.open(file_path) as img:
+                    return img.size  # (width, height)
+            except Exception:
+                return 0, 0
+        if lower.endswith((
             ".wmv", ".avi", ".mpg", ".mpeg", ".vob", ".m2v", ".m1v", ".ts", ".mts", ".m2ts"
         )):
             return 0, 0

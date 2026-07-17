@@ -650,8 +650,18 @@ class VtpWindowLayoutMixin:
             return
         if getattr(self, "_watchdog_suspended", False):
             return
-        if not getattr(self, "auto_refresh_folder", True):
+        if not getattr(self, "auto_refresh_folder", False):
             return
+        watched = getattr(self, "_watched_directory", None)
+        if watched and path:
+            try:
+                abs_path = os.path.normcase(os.path.abspath(path))
+                abs_watched = os.path.normcase(watched)
+                parent = os.path.normcase(os.path.dirname(abs_path))
+                if abs_path != abs_watched and parent != abs_watched:
+                    return
+            except (OSError, TypeError, ValueError):
+                return
         try:
             self.after(0, lambda p=path: self._on_directory_change_main(p))
         except Exception:
@@ -663,7 +673,7 @@ class VtpWindowLayoutMixin:
             return
         if getattr(self, "_watchdog_suspended", False):
             return
-        if not getattr(self, "auto_refresh_folder", True):
+        if not getattr(self, "auto_refresh_folder", False):
             return
         if getattr(self, "search_results_active", False):
             return
@@ -719,7 +729,7 @@ class VtpWindowLayoutMixin:
             return
         if getattr(self, "_watchdog_suspended", False):
             return
-        if not getattr(self, "auto_refresh_folder", True):
+        if not getattr(self, "auto_refresh_folder", False):
             return
         if getattr(self, "search_results_active", False):
             return
@@ -751,7 +761,7 @@ class VtpWindowLayoutMixin:
         return (
             not getattr(self, "_watchdog_stopping", False)
             and not getattr(self, "_watchdog_suspended", False)
-            and bool(getattr(self, "auto_refresh_folder", True))
+            and bool(getattr(self, "auto_refresh_folder", False))
         )
 
     def _is_watch_forbidden_directory(self, abs_dir: str) -> bool:
@@ -827,7 +837,7 @@ class VtpWindowLayoutMixin:
 
     def start_directory_watcher(self, dir_path):
         """Watch ``dir_path`` for creates/deletes/moves; soft-refresh the grid (debounced)."""
-        if not getattr(self, "auto_refresh_folder", True):
+        if not getattr(self, "auto_refresh_folder", False):
             self.stop_directory_watcher()
             return
         if not dir_path or not isinstance(dir_path, str):
