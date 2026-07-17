@@ -10,6 +10,49 @@ import time
 import tkinter as tk
 
 import customtkinter as ctk
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+
+
+class DirectoryChangeHandler(FileSystemEventHandler):
+    """Forward filesystem events to the UI (callback must marshal to the Tk thread)."""
+
+    _IGNORE_EVENT_TYPES = frozenset({"opened", "closed"})
+    _IGNORE_SUFFIXES = (
+        ".tmp",
+        ".temp",
+        ".crdownload",
+        ".part",
+        ".partial",
+        ".log",
+        ".log.1",
+        "~",
+    )
+
+    def __init__(self, on_change_callback, is_active_callback=None):
+        self.on_change_callback = on_change_callback
+        self.is_active_callback = is_active_callback
+
+    def on_any_event(self, event):
+        if self.is_active_callback is not None and not self.is_active_callback():
+            return
+        event_type = getattr(event, "event_type", None)
+        if event_type in self._IGNORE_EVENT_TYPES:
+            return
+
+        paths = [event.src_path]
+        dest = getattr(event, "dest_path", None)
+        if dest:
+            paths.append(dest)
+
+        for path in paths:
+            if not path:
+                continue
+            lower = path.lower()
+            if lower.endswith(self._IGNORE_SUFFIXES):
+                continue
+            logging.debug("Watchdog %s: %s", event_type or "event", path)
+            self.on_change_callback(path)
 
 
 class VtpWindowLayoutMixin:
@@ -600,21 +643,253 @@ class VtpWindowLayoutMixin:
        
     
     def on_directory_change(self, path):
-        """Callback triggered when a directory change is detected."""
-        if not os.path.exists(self.current_directory):
-            logging.info(f"WARNING: Current directory no longer exists: {self.current_directory}")
+        """Watchdog thread callback — marshal to the Tk main thread and debounce."""
+        # Never touch Tk / after() while stopping: that deadlocks with observer.join()
+        # on the UI thread (emitter waits for Tcl, UI waits for emitter).
+        if getattr(self, "_watchdog_stopping", False):
+            return
+        if getattr(self, "_watchdog_suspended", False):
+            return
+        if not getattr(self, "auto_refresh_folder", True):
+            return
+        try:
+            self.after(0, lambda p=path: self._on_directory_change_main(p))
+        except Exception:
+            logging.debug("Watchdog: failed to schedule UI callback", exc_info=True)
+
+    def _on_directory_change_main(self, path):
+        """Main-thread handler: coalesce bursts of FS events into one soft refresh."""
+        if getattr(self, "_watchdog_stopping", False):
+            return
+        if getattr(self, "_watchdog_suspended", False):
+            return
+        if not getattr(self, "auto_refresh_folder", True):
+            return
+        if getattr(self, "search_results_active", False):
             return
 
-        if os.path.commonpath([path, self.current_directory]) == self.current_directory:
-            logging.info(f"Directory change detected for: {path}  current dir: {self.current_directory}")
-            self.display_thumbnails(
-                self.current_directory, preserve_scroll=True
-            )  # Refresh thumbnails for the current directory
+        cd = getattr(self, "current_directory", None)
+        if not cd or not isinstance(cd, str) or cd.startswith("virtual_library://"):
+            return
+
+        cache_root = getattr(self, "thumbnail_cache_path", None)
+        app_dir = getattr(self, "default_directory", None)
+        try:
+            abs_path = os.path.abspath(path)
+            abs_cd = os.path.abspath(cd)
+            if app_dir:
+                abs_app = os.path.abspath(app_dir)
+                if os.path.normcase(abs_cd) == os.path.normcase(abs_app):
+                    return
+            if cache_root:
+                abs_cache = os.path.abspath(cache_root)
+                if os.path.normcase(abs_path).startswith(os.path.normcase(abs_cache) + os.sep):
+                    return
+                if os.path.normcase(abs_path) == os.path.normcase(abs_cache):
+                    return
+            common = os.path.commonpath([abs_path, abs_cd])
+        except (ValueError, OSError, TypeError):
+            return
+
+        if os.path.normcase(common) != os.path.normcase(abs_cd):
+            return
+
+        logging.debug(
+            "Watchdog change in current folder: %s (cd=%s)", path, cd
+        )
+        self._schedule_watchdog_refresh()
+
+    def _cancel_watchdog_debounce(self):
+        job = getattr(self, "_watchdog_debounce_id", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+            self._watchdog_debounce_id = None
+
+    def _schedule_watchdog_refresh(self):
+        self._cancel_watchdog_debounce()
+        delay = int(getattr(self, "_watchdog_debounce_ms", 15000) or 15000)
+        self._watchdog_debounce_id = self.after(delay, self._apply_watchdog_refresh)
+
+    def _apply_watchdog_refresh(self):
+        self._watchdog_debounce_id = None
+        if getattr(self, "_watchdog_stopping", False):
+            return
+        if getattr(self, "_watchdog_suspended", False):
+            return
+        if not getattr(self, "auto_refresh_folder", True):
+            return
+        if getattr(self, "search_results_active", False):
+            return
+        if getattr(self, "_is_loading", False):
+            # Folder load in progress — retry a few times, then drop.
+            retries = int(getattr(self, "_watchdog_load_retries", 0))
+            if retries >= 25:
+                self._watchdog_load_retries = 0
+                return
+            self._watchdog_load_retries = retries + 1
+            self._watchdog_debounce_id = self.after(200, self._apply_watchdog_refresh)
+            return
+        self._watchdog_load_retries = 0
+
+        cd = getattr(self, "current_directory", None)
+        if not cd or not isinstance(cd, str) or cd.startswith("virtual_library://"):
+            return
+        if not os.path.isdir(cd):
+            logging.info("Watchdog: current directory no longer exists: %s", cd)
+            return
+
+        logging.info("Watchdog auto-refresh: %s", cd)
+        if hasattr(self, "refresh_current_directory"):
+            self.refresh_current_directory()
         else:
-            logging.info(f"Change detected outside current directory: {path}  current dir: {self.current_directory} (No action taken)")
+            self.display_thumbnails(cd, preserve_scroll=True)
+
+    def _watchdog_is_active(self) -> bool:
+        return (
+            not getattr(self, "_watchdog_stopping", False)
+            and not getattr(self, "_watchdog_suspended", False)
+            and bool(getattr(self, "auto_refresh_folder", True))
+        )
+
+    def _is_watch_forbidden_directory(self, abs_dir: str) -> bool:
+        """Do not watch the app install dir (app.log feedback loop) or thumbnail cache."""
+        abs_dir_n = os.path.normcase(abs_dir)
+        app_dir = getattr(self, "default_directory", None)
+        if app_dir:
+            try:
+                if abs_dir_n == os.path.normcase(os.path.normpath(os.path.abspath(app_dir))):
+                    return True
+            except (OSError, TypeError, ValueError):
+                pass
+        cache_root = getattr(self, "thumbnail_cache_path", None)
+        if cache_root:
+            try:
+                abs_cache = os.path.normcase(os.path.normpath(os.path.abspath(cache_root)))
+                if abs_dir_n == abs_cache or abs_dir_n.startswith(abs_cache + os.sep):
+                    return True
+            except (OSError, TypeError, ValueError):
+                pass
+        return False
+
+    def suspend_directory_watcher(self):
+        """Ignore FS events during our own file ops (DnD / paste / delete)."""
+        self._watchdog_suspended = True
+        try:
+            if threading.current_thread() is threading.main_thread():
+                self._cancel_watchdog_debounce()
+            else:
+                self.after(0, self._cancel_watchdog_debounce)
+        except Exception:
+            pass
+
+    def resume_directory_watcher(self, restart=True):
+        """Re-enable FS events; optionally (re)start watch on current folder."""
+        self._watchdog_suspended = False
+        if not restart:
+            return
+        cd = getattr(self, "current_directory", None)
+        if cd:
+            try:
+                if threading.current_thread() is threading.main_thread():
+                    self.start_directory_watcher(cd)
+                else:
+                    self.after(0, lambda p=cd: self.start_directory_watcher(p))
+            except Exception:
+                logging.debug("resume_directory_watcher schedule failed", exc_info=True)
+
+    def stop_directory_watcher(self):
+        """Stop and discard the Observer without blocking the UI thread."""
+        self._watchdog_stopping = True
+        self._cancel_watchdog_debounce()
+        observer = getattr(self, "watchdog_observer", None)
+        # Detach first so handlers / join cannot race with a new start.
+        self.watchdog_observer = None
+        self.watchdog_handler = None
+        self._watched_directory = None
+        if observer is not None:
+            try:
+                observer.stop()
+            except Exception as e:
+                logging.debug("Watchdog stop signal error: %s", e)
+
+            def _join_observer():
+                try:
+                    observer.join(timeout=2.0)
+                except Exception:
+                    pass
+
+            # Never join on the Tk thread: emitter may be blocked in after()/Tcl.
+            threading.Thread(target=_join_observer, daemon=True).start()
+        self._watchdog_stopping = False
 
     def start_directory_watcher(self, dir_path):
-        pass
+        """Watch ``dir_path`` for creates/deletes/moves; soft-refresh the grid (debounced)."""
+        if not getattr(self, "auto_refresh_folder", True):
+            self.stop_directory_watcher()
+            return
+        if not dir_path or not isinstance(dir_path, str):
+            self.stop_directory_watcher()
+            return
+        if dir_path.startswith("virtual_library://"):
+            self.stop_directory_watcher()
+            return
+        if getattr(self, "search_results_active", False):
+            self.stop_directory_watcher()
+            return
+        try:
+            if not os.path.isdir(dir_path):
+                self.stop_directory_watcher()
+                return
+            abs_dir = os.path.normpath(os.path.abspath(dir_path))
+        except (OSError, TypeError, ValueError):
+            self.stop_directory_watcher()
+            return
 
+        if self._is_watch_forbidden_directory(abs_dir):
+            logging.info("Directory watcher skipped (app/cache path): %s", abs_dir)
+            self.stop_directory_watcher()
+            return
+
+        # Already watching this folder with a live observer — keep it.
+        if (
+            self.watchdog_observer is not None
+            and self.watchdog_observer.is_alive()
+            and self._watched_directory is not None
+            and os.path.normcase(self._watched_directory) == os.path.normcase(abs_dir)
+        ):
+            return
+
+        self.stop_directory_watcher()
+        try:
+            handler = DirectoryChangeHandler(
+                self.on_directory_change,
+                is_active_callback=self._watchdog_is_active,
+            )
+            observer = Observer()
+            observer.schedule(handler, abs_dir, recursive=False)
+            observer.daemon = True
+            observer.start()
+            self.watchdog_handler = handler
+            self.watchdog_observer = observer
+            self._watched_directory = abs_dir
+            logging.info("Directory watcher started: %s", abs_dir)
+        except Exception as e:
+            logging.warning("Failed to start directory watcher for %s: %s", abs_dir, e)
+            self.watchdog_observer = None
+            self.watchdog_handler = None
+            self._watched_directory = None
+
+    def _schedule_directory_watcher(self, dir_path):
+        """Start watcher after the current UI turn (never inline during folder init)."""
+        try:
+            self.after_idle(lambda p=dir_path: self.start_directory_watcher(p))
+        except Exception:
+            try:
+                self.after(0, lambda p=dir_path: self.start_directory_watcher(p))
+            except Exception:
+                logging.debug("Failed to schedule directory watcher", exc_info=True)
 
 

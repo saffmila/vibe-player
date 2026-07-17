@@ -1150,6 +1150,26 @@ def setup_gui(app):
         app.parent_dir_button = ctk.CTkButton(app.toolbar_frame, text="Up", command=app.go_to_parent_directory, width=35)
         app.parent_dir_button.pack(side=ctk.LEFT, padx=4, pady=5)
 
+    # --- Refresh current directory (soft reload of folder listing) ---
+    try:
+        refresh_image = Image.open(os.path.join(icons_dir, "refresh.png"))
+        app.refresh_icon = ctk.CTkImage(light_image=refresh_image, size=(18, 18))
+        app.refresh_dir_button = ctk.CTkButton(
+            app.toolbar_frame,
+            image=app.refresh_icon,
+            command=app.refresh_current_directory,
+            width=26, height=26, text="",
+            fg_color=ctkbuttons_color,
+            hover_color=ctkbuttons_hover_color
+        )
+        app.refresh_dir_button.pack(side=ctk.LEFT, padx=4, pady=5)
+    except Exception as e:
+        logging.error(f"[GUI-ERROR] Failed to load 'refresh.png': {e}")
+        app.refresh_dir_button = ctk.CTkButton(
+            app.toolbar_frame, text="↻", command=app.refresh_current_directory, width=35
+        )
+        app.refresh_dir_button.pack(side=ctk.LEFT, padx=4, pady=5)
+
     # --- Sort Dropdown ---
     app.sort_option = ctk.StringVar(value="Filename")
     sort_dropdown = ctk.CTkComboBox(
@@ -1900,9 +1920,38 @@ def create_preferences_window(app):
         anchor="w",
     ).pack(anchor="w", padx=12, pady=(0, 8))
 
+    ctk.CTkLabel(
+        adv_body,
+        text="Folder browser",
+        font=("Helvetica", 14),
+    ).pack(anchor="w", padx=8, pady=(4, 2))
+    auto_refresh_folder_var = ctk.BooleanVar(
+        value=bool(getattr(app, "auto_refresh_folder", True))
+    )
+    ctk.CTkCheckBox(
+        adv_body,
+        text="Auto-refresh when files change in the current folder",
+        variable=auto_refresh_folder_var,
+    ).pack(anchor="w", padx=12, pady=4)
+    ctk.CTkLabel(
+        adv_body,
+        text="Uses a short debounce. Toolbar Refresh / F5 still works anytime.",
+        font=("Helvetica", 12),
+        text_color=("gray30", "gray70"),
+        justify="left",
+        anchor="w",
+    ).pack(anchor="w", padx=12, pady=(0, 8))
+
     def save_and_close_action():
         app.dnd_confirm_dialogs = dnd_confirm_var.get()
         app.delete_to_trash = bool(delete_to_trash_var.get())
+        app.auto_refresh_folder = bool(auto_refresh_folder_var.get())
+        if app.auto_refresh_folder:
+            cd = getattr(app, "current_directory", None)
+            if cd and hasattr(app, "start_directory_watcher"):
+                app.start_directory_watcher(cd)
+        elif hasattr(app, "stop_directory_watcher"):
+            app.stop_directory_watcher()
         app.play_broken_videos = bool(play_broken_videos_var.get())
         app.preview_window_strip_limit = bool(preview_window_strip_limit_var.get())
         if getattr(app, "info_panel", None) and hasattr(app.info_panel, "multiTimeline_limit_var"):
@@ -2020,6 +2069,7 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
         "search_results_page_size": int(getattr(app, "search_results_page_size", 250)),
         "dnd_confirm_dialogs": getattr(app, "dnd_confirm_dialogs", False),
         "delete_to_trash": bool(getattr(app, "delete_to_trash", True)),
+        "auto_refresh_folder": bool(getattr(app, "auto_refresh_folder", True)),
         "image_viewer_use_pyglet": bool(getattr(app, "image_viewer_use_pyglet", False)),
     }
     # Save splitter positions (fractions 0-1) when panes are visible
@@ -2100,6 +2150,13 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
 
     app.dnd_confirm_dialogs = bool(preferences.get("dnd_confirm_dialogs", False))
     app.delete_to_trash = bool(preferences.get("delete_to_trash", True))
+    app.auto_refresh_folder = bool(preferences.get("auto_refresh_folder", True))
+    if app.auto_refresh_folder:
+        cd = getattr(app, "current_directory", None)
+        if cd and hasattr(app, "start_directory_watcher"):
+            app.start_directory_watcher(cd)
+    elif hasattr(app, "stop_directory_watcher"):
+        app.stop_directory_watcher()
     app.image_viewer_use_pyglet = bool(
         preferences.get("image_viewer_use_pyglet", False)
     )

@@ -642,6 +642,9 @@ class VtpDndMixin:
         rename_all = False
         skip_all = False
 
+        if hasattr(self, "suspend_directory_watcher"):
+            self.suspend_directory_watcher()
+
         # Pre-flight validation: reject the WHOLE batch before touching the filesystem if the
         # destination lives inside (or equals) any source folder. Doing this check per-item
         # inside the loop below would first move the "innocent" siblings (e.g. images selected
@@ -655,6 +658,8 @@ class VtpDndMixin:
                 logging.warning(
                     f"[DnD] BLOCKED (pre-flight) - destination is inside source: {src} -> {dest}"
                 )
+                if hasattr(self, "resume_directory_watcher"):
+                    self.after(0, lambda: self.resume_directory_watcher(restart=True))
                 self.after(0, lambda s=src, d=dest: self.universal_dialog(
                     title="DnD warning",
                     message=(
@@ -731,6 +736,8 @@ class VtpDndMixin:
                 logging.error(f"[DnD] error during {action}: {src} -> {dst}: {e}")
 
         def _finish():
+            if hasattr(self, "resume_directory_watcher"):
+                self.resume_directory_watcher(restart=True)
             if ok:
                 self.status_bar.set_action_message(
                     f"DnD: {action_past} {len(ok)} item(s) -> {dest_name}"

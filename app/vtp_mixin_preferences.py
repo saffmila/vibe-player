@@ -280,6 +280,7 @@ class VtpPreferencesMixin:
                     )
                 self.dnd_confirm_dialogs = bool(settings.get("dnd_confirm_dialogs", False))
                 self.delete_to_trash = bool(settings.get("delete_to_trash", True))
+                self.auto_refresh_folder = bool(settings.get("auto_refresh_folder", True))
                 self.image_viewer_use_pyglet = bool(
                     settings.get("image_viewer_use_pyglet", False)
                 )
@@ -345,6 +346,7 @@ class VtpPreferencesMixin:
             self.memory_cache = True  # Default if no settings file exists
             self.dnd_confirm_dialogs = False
             self.delete_to_trash = True
+            self.auto_refresh_folder = True
             self.image_viewer_use_pyglet = False
             #load audio device only it wasnt loaded before
             if "audio_device" in settings:

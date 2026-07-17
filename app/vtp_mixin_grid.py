@@ -327,6 +327,15 @@ class VtpGridMixin:
         if callable(_nav_clear):
             _nav_clear(prev_cd, dir_path)
 
+        # Defer watcher start — never stop/join Observer inline during folder init
+        # (that deadlocks with Tk when the previous watch was on the app/log folder).
+        schedule_watch = getattr(self, "_schedule_directory_watcher", None)
+        if callable(schedule_watch):
+            try:
+                schedule_watch(dir_path)
+            except Exception:
+                logging.debug("schedule directory watcher failed", exc_info=True)
+
         return True # Indicate successful initialization
 
     def _process_single_entry_for_list(self, entry_or_path):
@@ -3143,6 +3152,10 @@ class VtpGridMixin:
         if _cp:
             _copy_opts["accelerator"] = _cp
         menu.add_command(**_copy_opts)
+        menu.add_command(
+            label="Copy full file path",
+            command=lambda fp=file_path: self.copy_full_file_path_as_text(fp),
+        )
         _cut_opts = {"label": "Cut", "command": lambda fp=file_path: self.copy_thumb_paths_to_clipboard(fp, cut=True)}
         if _ct:
             _cut_opts["accelerator"] = _ct

@@ -313,10 +313,7 @@ class VtpLegacyDragMixin:
             return
 
         # Suspend the watcher
-        if self.watchdog_observer and self.watchdog_observer.is_alive():
-            logging.info("Suspending directory watcher...")
-            self.watchdog_observer.stop()
-            time.sleep(0.2)  # Introduce a small delay to stabilize
+        self.suspend_directory_watcher()
 
         # Run file operations in a separate thread
         def process_drop():
@@ -343,13 +340,7 @@ class VtpLegacyDragMixin:
             # Finalize drop on the main thread
             def finalize():
                 self.finalize_drop(target_path, moved_items, copy_mode=copy_mode)
-                # Restart the watcher
-                try:
-                    logging.info("Resuming directory watcher...")
-                    time.sleep(0.2)  # Ensure the system stabilizes before resuming the watcher
-                    self.watchdog_observer.start()
-                except Exception as e:
-                    logging.info(f"Error restarting directory watcher: {e}")
+                self.resume_directory_watcher(restart=True)
 
             self.after(0, finalize)
 
@@ -884,6 +875,28 @@ class VtpLegacyDragMixin:
             else:
                 self._clipboard_status_flash(f"{verb} to clipboard ({n} items).")
 
+    def copy_full_file_path_as_text(self, primary_path: str, *, from_tree: bool = False) -> None:
+        """Copy absolute path(s) as plain text (scripts, ComfyUI, chat, etc.)."""
+        if from_tree:
+            paths = self.paths_for_file_action_context(primary_path)
+        else:
+            paths = self.paths_for_clipboard_from_thumb_context(primary_path)
+        paths = [os.path.normpath(p) for p in paths if p]
+        if not paths:
+            return
+        text = "\n".join(paths) if len(paths) > 1 else paths[0]
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self.update_idletasks()
+            logging.info("[clipboard] Copied full path text (%d)", len(paths))
+            if len(paths) == 1:
+                self._clipboard_status_flash(f"Copied path: {paths[0]}")
+            else:
+                self._clipboard_status_flash(f"Copied {len(paths)} paths as text.")
+        except Exception as e:
+            logging.warning("[clipboard] Copy full path as text failed: %s", e)
+
     def copy_tree_folder_path_to_clipboard(self, folder_path: str, *, cut: bool = False) -> None:
         paths = self.paths_for_file_action_context(folder_path)
         if not paths:
@@ -1000,10 +1013,7 @@ class VtpLegacyDragMixin:
             return
 
         def process_paste_main():
-            if self.watchdog_observer and self.watchdog_observer.is_alive():
-                logging.info("Suspending directory watcher for paste...")
-                self.watchdog_observer.stop()
-                time.sleep(0.2)
+            self.suspend_directory_watcher()
 
             moved_sources: list = []
             replace_all = False
@@ -1068,13 +1078,7 @@ class VtpLegacyDragMixin:
             self._finalize_paste_operations(
                 dest_dir, [] if copy_mode else moved_sources, copy_mode
             )
-            try:
-                logging.info("Resuming directory watcher after paste...")
-                time.sleep(0.2)
-                if self.watchdog_observer:
-                    self.watchdog_observer.start()
-            except Exception as e:
-                logging.info("Error restarting directory watcher: %s", e)
+            self.resume_directory_watcher(restart=True)
 
         self.after(1, process_paste_main)
 

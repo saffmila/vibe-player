@@ -100,8 +100,6 @@ from utils import ThumbnailCache
 from utils import get_video_size
 import tkinter.font as tkFont
 from debug_overlay import DebugOverlay
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
 import signal
 import traceback
 import functools
@@ -202,19 +200,6 @@ def _resolve_paths():
 
 
 # logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-
-
-class DirectoryChangeHandler(FileSystemEventHandler):
-    def __init__(self, on_change_callback):
-        self.on_change_callback = on_change_callback
-
-    def on_any_event(self, event):
-        if event.is_directory:
-            logging.debug("Watchdog directory event: %s", event.src_path)
-        else:
-            logging.debug("Watchdog file event: %s", event.src_path)
-
-        self.on_change_callback(event.src_path)
 
 
 class VideoThumbnailPlayer(
@@ -330,6 +315,13 @@ class VideoThumbnailPlayer(
         self.log_window = None
         self.watchdog_observer = None
         self.watchdog_handler = None
+        self._watchdog_suspended = False
+        self._watchdog_stopping = False
+        self._watchdog_debounce_id = None
+        self._watchdog_debounce_ms = 15000  # 15s — less disruptive during normal work
+        self._watchdog_load_retries = 0
+        self._watched_directory = None
+        self.auto_refresh_folder = True  # soft-reload grid when current folder changes on disk
         self.thumbnail_widgets = []  # Keep track of thumbnail widgets  
         
         
@@ -1649,12 +1641,7 @@ class VideoThumbnailPlayer(
                 logging.warning(f"[Delete] Cache purge failed for {path}: {e}")
 
         def delete_items():
-            if self.watchdog_observer and self.watchdog_observer.is_alive():
-                try:
-                    self.watchdog_observer.stop()
-                    self.watchdog_observer.join(timeout=1)
-                except RuntimeError as e:
-                    logging.warning(f"Watcher join error: {e}")
+            self.suspend_directory_watcher()
             delay_ms = 100
             if any(
                 isinstance(p, str) and p.lower().endswith(VIDEO_FORMATS)
@@ -1817,7 +1804,10 @@ class VideoThumbnailPlayer(
                     self.after_idle(self.select_current_folder_in_tree)
 
             if self.current_directory and os.path.isdir(self.current_directory):
-                self.start_directory_watcher(self.current_directory)
+                self.resume_directory_watcher(restart=True)
+            else:
+                self._watchdog_suspended = False
+                self.stop_directory_watcher()
 
             if errors:
                 names = "\n".join(os.path.basename(p) for p in errors[:5])
@@ -2112,6 +2102,10 @@ class VideoThumbnailPlayer(
         if _cp:
             _copy_opts["accelerator"] = _cp
         menu.add_command(**_copy_opts)
+        menu.add_command(
+            label="Copy full file path",
+            command=lambda fp=file_path: self.copy_full_file_path_as_text(fp, from_tree=True),
+        )
         _cut_opts = {
             "label": "Cut",
             "command": lambda fp=file_path: self.copy_tree_folder_path_to_clipboard(fp, cut=True),
@@ -3299,7 +3293,8 @@ class VideoThumbnailPlayer(
         self.bind_all(self.hotkeys_map['keywords'], g(self._hotkey_keywords))
 
         # --- Essentials (Refresh, Rename, Up) ---
-        self.bind_all(self.hotkeys_map['refresh'], g(lambda e: self.refresh_thumbnails_in_subtree(self.current_directory)))
+        # F5 = soft folder reload (listing). Hard thumbnail rebuild stays in context menus.
+        self.bind_all(self.hotkeys_map['refresh'], g(lambda e: self.refresh_current_directory()))
         self.bind_all(self.hotkeys_map['parent_dir'], g(lambda e: self.go_to_parent_directory()))
         self.bind_all(self.hotkeys_map['rename'], g(self._hotkey_rename))
         self.bind_all(self.hotkeys_map['rename_secondary'], g(self._hotkey_rename))
@@ -3655,6 +3650,10 @@ class VideoThumbnailPlayer(
         self.on_closing()  # Perform any cleanup tasks before exiting    
 
     def on_closing(self):
+        try:
+            self.stop_directory_watcher()
+        except Exception:
+            pass
         save_recent_directories(self.settings_file,self.recent_directories)
         self.save_preferences()  # unified save
 
@@ -4788,7 +4787,17 @@ class VideoThumbnailPlayer(
         if parent_dir != self.current_directory:  # Check if not already at the root
             self.current_directory = parent_dir
             self.display_thumbnails(self.current_directory)
-            
+
+    def refresh_current_directory(self, event=None):
+        """Soft reload of the current folder listing (toolbar / F5). Preserves scroll."""
+        dir_path = getattr(self, "current_directory", None)
+        if not dir_path:
+            return "break"
+        self._thumb_grid_suppress_decode_until_nav = False
+        logging.info("Soft refresh of current directory: %s", dir_path)
+        self.display_thumbnails(dir_path, preserve_scroll=True)
+        return "break"
+
     
     def update_panel_info(self, path):
         """Update info panel asynchronously (non-blocking)."""
