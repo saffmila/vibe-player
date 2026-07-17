@@ -24,6 +24,7 @@ from file_operations import *
 from gui_elements import create_search_window
 from image_operations import create_image_viewer
 from video_operations import VideoPlayer
+from video_merge import open_merge_videos_dialog
 from utils import get_video_size
 from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS, preview_skip_subdir
 from virtual_folders import load_virtual_folders
@@ -3087,8 +3088,14 @@ class VtpGridMixin:
 
         else:
             menu.add_command(label="Open", command=lambda: os.startfile(file_path))  # fallback
-            
-                
+
+        merge_paths = self.selected_video_paths_for_merge(file_path)
+        if len(merge_paths) >= 2:
+            menu.add_command(
+                label="Merge Videos…",
+                command=lambda paths=merge_paths: self.open_merge_videos_dialog(paths),
+            )
+
         menu.add_command(label="Refresh Thumbnail", command=self.refresh_selected_thumbnails)
         
         # menu.add_command(   label="Refresh Thumbnail",command=lambda: self.refresh_single_thumbnail(file_path,True))
@@ -3168,6 +3175,147 @@ class VtpGridMixin:
 
         menu.tk_popup(event.x_root, event.y_root)
 
+
+    def selected_video_paths_for_merge(self, primary_path):
+        """Video paths from multi-select (selection order) when RMB target is part of it."""
+        primary = os.path.normpath(primary_path) if primary_path else None
+        raw = list(getattr(self, "selected_thumbnails", []) or [])
+        paths = []
+        seen = set()
+        for item in raw:
+            p = item[0] if isinstance(item, tuple) and item else item
+            if not p:
+                continue
+            p = os.path.normpath(str(p))
+            key = os.path.normcase(p)
+            if key in seen:
+                continue
+            if not os.path.isfile(p) or not p.lower().endswith(VIDEO_FORMATS):
+                continue
+            seen.add(key)
+            paths.append(p)
+        if primary and len(paths) > 1 and os.path.normcase(primary) in {
+            os.path.normcase(p) for p in paths
+        }:
+            return paths
+        return []
+
+    def open_merge_videos_dialog(self, video_paths):
+        open_merge_videos_dialog(self, video_paths, controller=self)
+
+    def reveal_merged_file(self, file_path):
+        """Refresh current folder (if output is there) and select the merged file."""
+        if not file_path or not os.path.isfile(file_path):
+            return
+        file_path = os.path.normpath(file_path)
+        out_dir = os.path.dirname(file_path)
+        cur = getattr(self, "current_directory", None)
+        if not cur or not os.path.isdir(cur):
+            return
+        if os.path.normcase(os.path.normpath(cur)) != os.path.normcase(out_dir):
+            logging.info(
+                "[Merge] Output is outside current folder (%s); skip grid reveal",
+                out_dir,
+            )
+            return
+
+        self._pending_select_path = file_path
+        try:
+            self.display_thumbnails(cur, force_refresh=False, preserve_scroll=False)
+        except Exception:
+            logging.exception("[Merge] display_thumbnails after merge failed")
+            self._pending_select_path = None
+            return
+        self.after(200, lambda: self._try_select_pending_path(retries=20))
+
+    def _index_for_grid_path(self, file_path):
+        if not file_path:
+            return None
+        if getattr(self, "_vg_active", False) and getattr(self, "_vg_data_index_by_path", None):
+            try:
+                idx = self._vg_data_index_by_path.get(self._vg_norm_path(file_path), -1)
+            except Exception:
+                idx = -1
+            if idx is not None and idx >= 0:
+                return int(idx)
+        want = os.path.normcase(os.path.normpath(file_path))
+        for i, vf in enumerate(getattr(self, "video_files", []) or []):
+            try:
+                if os.path.normcase(os.path.normpath(vf.get("path", ""))) == want:
+                    return i
+            except Exception:
+                continue
+        return None
+
+    def _scroll_grid_to_index(self, idx):
+        if idx is None or idx < 0:
+            return
+        if not getattr(self, "_vg_active", False):
+            return
+        try:
+            cols = max(1, int(getattr(self, "_vg_cols", 1) or 1))
+            rh = float(getattr(self, "_vg_row_height", 1) or 1)
+            if getattr(self, "_vg_is_wide", False):
+                fc = int(getattr(self, "_vg_folder_count", 0) or 0)
+                wrh = float(getattr(self, "_vg_wide_row_height", 1) or 1)
+                wide_cols = max(1, int(getattr(self, "_vg_wide_cols", 1) or 1))
+                wide_rows = int(getattr(self, "_vg_wide_rows", 0) or 0)
+                if idx < fc:
+                    y = (idx // wide_cols) * wrh
+                else:
+                    y = wide_rows * wrh + ((idx - fc) // cols) * rh
+            else:
+                y = (idx // cols) * rh
+            canvas_h = float(getattr(self, "_vg_canvas_h", 1) or 1)
+            sr = float(getattr(self, "_vg_scrollregion_h", 1) or 1)
+            y = max(0.0, y - canvas_h * 0.2)
+            max_scroll = max(1.0, sr - canvas_h)
+            frac = min(1.0, y / max_scroll) if sr > canvas_h else 0.0
+            self.canvas.yview_moveto(frac)
+            self._vg_layout_slots(frac * sr)
+        except Exception:
+            logging.debug("[Merge] scroll_grid_to_index failed", exc_info=True)
+
+    def _try_select_pending_path(self, retries=20):
+        path = getattr(self, "_pending_select_path", None)
+        if not path:
+            return
+        if getattr(self, "_is_loading", False):
+            if retries > 0:
+                self.after(150, lambda: self._try_select_pending_path(retries - 1))
+            return
+
+        idx = self._index_for_grid_path(path)
+        if idx is None:
+            if retries > 0:
+                self.after(150, lambda: self._try_select_pending_path(retries - 1))
+            else:
+                logging.warning("[Merge] Could not find merged file in grid: %s", path)
+                self._pending_select_path = None
+            return
+
+        self._scroll_grid_to_index(idx)
+        self.after(60, lambda p=path, i=idx: self._finish_select_pending_path(p, i))
+
+    def _finish_select_pending_path(self, path, idx):
+        if getattr(self, "_pending_select_path", None) is None:
+            return
+        label_info = self._thumbnail_label_info_for_path(path, idx)
+        if not label_info:
+            label_info = {"index": idx, "canvas": None, "path": path}
+        self.selected_thumbnails = [(path, label_info, idx)]
+        self.selected_thumbnail_index = idx
+        self.selected_file_path = path
+        try:
+            self.update_thumbnail_selection()
+        except Exception:
+            logging.debug("[Merge] update_thumbnail_selection failed", exc_info=True)
+        try:
+            self.update_panel_info(path)
+        except Exception:
+            pass
+        self._pending_select_path = None
+        logging.info("[Merge] Selected merged file in grid: %s", path)
 
     def play_video_selection(self, file_path):
             """
