@@ -74,6 +74,7 @@ import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
 
 from file_operations import *
+from image_loader import load_pil_image, get_pil_image_size
 from gui_elements import *
 from playlist import PlaylistManager
 from folder_favorites import (
@@ -81,6 +82,12 @@ from folder_favorites import (
     FolderFavoritesManager,
     load_folder_favorites,
     save_folder_favorites,
+)
+from folder_scroll_state import (
+    SCROLL_STATE_FILE,
+    load_folder_scroll_state,
+    remember_folder_scroll,
+    save_folder_scroll_state,
 )
 
 from statusbar import StatusBar
@@ -580,6 +587,7 @@ class VideoThumbnailPlayer(
         logging.info(f"Loading recent directories from: {os.path.abspath(self.settings_file)}")
         self.folder_favorites = load_folder_favorites(FAVORITES_FILE)
         self.folder_favorites_manager = FolderFavoritesManager(self)
+        self.folder_scroll_positions = load_folder_scroll_state(SCROLL_STATE_FILE)
         self.is_fullscreen = False
         self.processed_directories = set()
 
@@ -1612,15 +1620,20 @@ class VideoThumbnailPlayer(
         if warnings:
             message += "\n\n" + "\n\n".join(warnings)
 
-        def purge_cache_for_deleted_path(path: str):
-            """Best-effort: remove disk and memory cache for a deleted path."""
+        def purge_cache_for_deleted_path(path: str, was_dir: bool | None = None):
+            """Best-effort: remove disk and memory cache for a deleted path.
+
+            ``was_dir`` should be captured before the source is removed. If omitted,
+            fall back to the mirrored cache tree (``cache_path``).
+            """
             try:
                 cache_root = self.thumbnail_cache_path
                 abs_path = os.path.abspath(path)
                 rel = abs_path.replace(":", "")
                 cache_path = os.path.join(cache_root, rel)
 
-                if os.path.isdir(path):
+                treat_as_dir = was_dir if was_dir is not None else os.path.isdir(cache_path)
+                if treat_as_dir:
                     if os.path.isdir(cache_path):
                         shutil.rmtree(cache_path, ignore_errors=True)
                 else:
@@ -1638,6 +1651,10 @@ class VideoThumbnailPlayer(
                     if hasattr(self, "thumbnail_cache") and hasattr(self.thumbnail_cache, "cache"):
                         self.thumbnail_cache.cache.pop(path, None)
                         self.thumbnail_cache.cache.pop(os.path.normcase(os.path.normpath(path)), None)
+                        fps = getattr(self.thumbnail_cache, "fingerprints", None)
+                        if isinstance(fps, dict):
+                            fps.pop(path, None)
+                            fps.pop(os.path.normcase(os.path.normpath(path)), None)
                 except Exception:
                     pass
 
@@ -1764,16 +1781,17 @@ class VideoThumbnailPlayer(
                             current_dir_deleted = True
                             parent_of_deleted = str(Path(path).parent.resolve())
 
+                        was_dir = os.path.isdir(path)
                         how = _delete_path(path)
                         if how == "reboot":
                             reboot_queued.append(path)
                             logging.info("[Delete] Removal deferred until restart: %s", path)
                         else:
                             logging.info("[Delete] Deleted: %s", path)
-                        if os.path.isdir(path):
+                        if was_dir:
                             _prune_selection_after_dir_removed(path)
 
-                        purge_cache_for_deleted_path(path)
+                        purge_cache_for_deleted_path(path, was_dir=was_dir)
                         self._invalidate_folder_preview_caches(path)
 
                         node_id = self.find_node_by_path(path)
@@ -1980,10 +1998,26 @@ class VideoThumbnailPlayer(
                 # 3. Get the exact cache directory path
                 cache_dir_path, full_path = get_cache_dir_path(path, self.thumbnail_cache_path)
 
-                if os.path.exists(full_path):
+                if os.path.isdir(full_path):
                     # Using onerror handler to deal with Windows file locks/permissions
                     shutil.rmtree(full_path, onerror=on_rm_error)
                     logging.info(f"Deleted cache directory: {full_path}")
+                elif os.path.isfile(path) or not os.path.exists(path):
+                    # Single file: thumbs live as basename_WxH.jpg (+ .src) beside full_path
+                    cache_base = os.path.basename(full_path)
+                    removed_any = False
+                    if os.path.isdir(cache_dir_path):
+                        for fn in os.listdir(cache_dir_path):
+                            if fn.startswith(cache_base):
+                                try:
+                                    os.remove(os.path.join(cache_dir_path, fn))
+                                    removed_any = True
+                                except Exception as e:
+                                    logging.error(f"[Cache] Could not delete {fn}: {e}")
+                    if removed_any:
+                        logging.info(f"Deleted cache files for: {path}")
+                    else:
+                        logging.info(f"Cache files do not exist for: {path}")
                 else:
                     logging.info(f"Cache directory does not exist: {full_path}")
 
@@ -3154,8 +3188,7 @@ class VideoThumbnailPlayer(
 
     def get_image_size(self, image_path):
         try:
-            with Image.open(image_path) as img:
-                return img.width, img.height
+            return get_pil_image_size(image_path)
         except FileNotFoundError:
             logging.info(f"Image file not found: {image_path}")
             return None, None
@@ -3353,7 +3386,7 @@ class VideoThumbnailPlayer(
     
     def show_metadata_popup(self, file_path):
         try:
-            image = Image.open(file_path)
+            image = load_pil_image(file_path)
             exif_data = image.getexif()
             description = exif_data.get(270, "No ImageDescription found.")
         except Exception as e:
@@ -3663,6 +3696,15 @@ class VideoThumbnailPlayer(
             self.stop_directory_watcher()
         except Exception:
             pass
+        try:
+            if hasattr(self, "capture_current_folder_scroll"):
+                self.capture_current_folder_scroll()
+            save_folder_scroll_state(
+                getattr(self, "folder_scroll_positions", {}),
+                SCROLL_STATE_FILE,
+            )
+        except Exception:
+            logging.debug("[ScrollState] save on close failed", exc_info=True)
         save_recent_directories(self.settings_file,self.recent_directories)
         save_folder_favorites(getattr(self, "folder_favorites", []), FAVORITES_FILE)
         self.save_preferences()  # unified save
@@ -3672,8 +3714,8 @@ class VideoThumbnailPlayer(
     def catalog_file_info(self, file_path):
         filename = os.path.basename(file_path)
         try:
-            with Image.open(file_path) as img:
-                resolution = f"{img.width}x{img.height}"
+            w, h = get_pil_image_size(file_path)
+            resolution = f"{w}x{h}"
         except:
             resolution = "N/A"
         self.db.insert_file(filename, resolution)
@@ -3696,9 +3738,10 @@ class VideoThumbnailPlayer(
         user_profile = os.path.expanduser("~")
         special_folders = {
             "Desktop": os.path.join(user_profile, "Desktop"),
+            "Downloads": os.path.join(user_profile, "Downloads"),
             "Documents": os.path.join(user_profile, "Documents"),
             "Pictures": os.path.join(user_profile, "Pictures"),
-            "Videos": os.path.join(user_profile, "Videos")
+            "Videos": os.path.join(user_profile, "Videos"),
         }
 
         # Try to locate Google Drive and add it to the list
@@ -3716,6 +3759,8 @@ class VideoThumbnailPlayer(
                     icon = self.google_icon
                 elif name == "Desktop":
                     icon = self.desktop_icon
+                elif name == "Downloads":
+                    icon = self.downloads_icon
                 elif name == "Documents":
                     icon = self.documents_icon
                 elif name == "Pictures":
@@ -3775,13 +3820,12 @@ class VideoThumbnailPlayer(
     def process_directory(self, parent, path):
         """
         Populates the given parent node with its subdirectories.
-        Fetches directory contents and sorts them case-insensitively 
+        Fetches directory contents and sorts them case-insensitively
         to ensure consistency with the grid view sorting.
         """
         started = time.perf_counter()
         # Normalize path and ensure it's a directory
         path = os.path.normcase(os.path.normpath(path))
-        # logging.info(f"[PROCESS] Attempting to list: {path}")
 
         if not os.path.isdir(path):
             logging.info(f"[SKIP] {path} is not a directory.")
@@ -3792,14 +3836,16 @@ class VideoThumbnailPlayer(
             return
 
         try:
-            logging.debug("[TreeProcess] START listdir path=%s parent=%s", path, parent)
-            entries = os.listdir(path)
-            # Case-insensitive sort (match grid view)
-            entries.sort(key=lambda x: x.lower())
+            logging.debug("[TreeProcess] START scandir path=%s parent=%s", path, parent)
+            # scandir + DirEntry.is_dir(): do not os.path.isdir() every PNG in huge
+            # ComfyUI folders (that froze the UI thread on folder open/tree sync).
+            with os.scandir(path) as scan:
+                dir_entries = [e for e in scan if e.is_dir(follow_symlinks=False)]
+            dir_entries.sort(key=lambda e: e.name.lower())
             logging.debug(
-                "[TreeProcess] DONE listdir path=%s entries=%d elapsed=%.3fs",
+                "[TreeProcess] DONE scandir path=%s subdirs=%d elapsed=%.3fs",
                 path,
-                len(entries),
+                len(dir_entries),
                 time.perf_counter() - started,
             )
         except Exception as e:
@@ -3807,11 +3853,9 @@ class VideoThumbnailPlayer(
             return
 
         try:
-            valid_subdirs = set()
-            for p in entries:
-                full_path = os.path.normcase(os.path.normpath(os.path.join(path, p)))
-                if os.path.isdir(full_path):
-                    valid_subdirs.add(full_path)
+            valid_subdirs = {
+                os.path.normcase(os.path.normpath(e.path)): e.name for e in dir_entries
+            }
 
             # Remove stale dummy placeholder rows under the currently opened parent.
             for child in self.tree.get_children(parent):
@@ -3819,7 +3863,7 @@ class VideoThumbnailPlayer(
                 if vals and vals[0] == 'dummy':
                     self.tree.delete(child)
 
-            # Drop tree nodes for subfolders removed/renamed outside the app (still O(children)).
+            # Drop tree nodes for subfolders removed/renamed outside the app.
             for child in list(self.tree.get_children(parent)):
                 vals = self.tree.item(child, 'values')
                 if not vals or not vals[0]:
@@ -3839,34 +3883,39 @@ class VideoThumbnailPlayer(
                 if self.tree.item(child, 'values')
             }
 
-            for p in entries:
-                full_path = os.path.normcase(os.path.normpath(os.path.join(path, p)))
-                if os.path.isdir(full_path):
-                    if full_path not in existing_paths:
-                        is_cached = self.database.is_folder_cached(full_path)
-                        icon = self.folder_treeicon_green if is_cached else self.folder_treeicon
-                        path_hash = self.get_path_hash(full_path)
+            for full_path, name in valid_subdirs.items():
+                if full_path in existing_paths:
+                    continue
+                is_cached = self.database.is_folder_cached(full_path)
+                icon = self.folder_treeicon_green if is_cached else self.folder_treeicon
+                path_hash = self.get_path_hash(full_path)
 
-                        node = self._tree_insert(parent, 'end', text=self.pad_label(p), image=icon, open=False, values=(full_path, path_hash))
+                node = self._tree_insert(
+                    parent,
+                    'end',
+                    text=self.pad_label(name),
+                    image=icon,
+                    open=False,
+                    values=(full_path, path_hash),
+                )
 
-                        # Add dummy child only when REAL subfolders exist.
-                        try:
-                            child_entries = os.listdir(full_path)
-                            has_subdirs = any(
-                                os.path.isdir(os.path.join(full_path, child_name))
-                                for child_name in child_entries
-                            )
-                            if has_subdirs and not self.tree.get_children(node):
-                                self.tree.insert(node, 'end', text='', values=('dummy',))
-                        except Exception as e:
-                            logging.warning(f"Could not check children for: {full_path} → {e}")
+                # Add dummy child only when REAL subfolders exist.
+                try:
+                    with os.scandir(full_path) as child_scan:
+                        has_subdirs = any(
+                            c.is_dir(follow_symlinks=False) for c in child_scan
+                        )
+                    if has_subdirs and not self.tree.get_children(node):
+                        self.tree.insert(node, 'end', text='', values=('dummy',))
+                except Exception as e:
+                    logging.warning(f"Could not check children for: {full_path} → {e}")
 
             elapsed = time.perf_counter() - started
             if elapsed >= 0.20:
                 logging.info(
-                    "[TreeProcess] SLOW path=%s entries=%d children=%d elapsed=%.3fs",
+                    "[TreeProcess] SLOW path=%s subdirs=%d children=%d elapsed=%.3fs",
                     path,
-                    len(entries),
+                    len(dir_entries),
                     len(self.tree.get_children(parent)),
                     elapsed,
                 )
@@ -4020,6 +4069,12 @@ class VideoThumbnailPlayer(
         if not hasattr(self, "info_panel") or self.info_panel is None:
             return  # Exit the function if there is no info_panel to work with.
 
+        if hasattr(self.info_panel, "cancel_pending_preview"):
+            try:
+                self.info_panel.cancel_pending_preview()
+            except Exception:
+                pass
+
         # --- Safely handle the VIDEO preview ---
         # We check if the 'preview_player' attribute exists AND its value is not None.
         if hasattr(self.info_panel, "preview_player") and self.info_panel.preview_player is not None:
@@ -4151,9 +4206,20 @@ class VideoThumbnailPlayer(
                                 trigger_preview=False,
                             )
         
-        if os.path.isdir(file_path):
-            self.current_directory = file_path
-            self._schedule_tree_sync_for_current_dir()
+        # Folder navigation is Double-click → display_thumbnails. Do not change
+        # current_directory or expand the tree on single-click (freezes on huge dirs).
+        is_folder = False
+        if file_path:
+            try:
+                nfp = os.path.normcase(os.path.normpath(file_path))
+                is_folder = any(
+                    vf.get("is_folder")
+                    and os.path.normcase(os.path.normpath(vf.get("path", ""))) == nfp
+                    for vf in (self.video_files or [])
+                )
+            except Exception:
+                is_folder = False
+        if is_folder:
             return
 
         now = int(time.time() * 1000)
@@ -4237,6 +4303,16 @@ class VideoThumbnailPlayer(
                 if getattr(self, "current_video_window", None) is not None or getattr(
                     self, "_preview_blocked", False
                 ):
+                    return
+
+                # Stale timer after folder change / deleted ComfyUI output
+                try:
+                    if not os.path.isfile(file_path):
+                        logging.info(
+                            "[Preview] Skip missing file: %s", os.path.basename(file_path)
+                        )
+                        return
+                except OSError:
                     return
 
                 is_video = file_path.lower().endswith(VIDEO_FORMATS)
@@ -5055,6 +5131,25 @@ class VideoThumbnailPlayer(
         if filter_option is None:
             filter_option = self.filter_option.get()
 
+        def _dimensions_area(path: str) -> int:
+            # Prefer DB (instant) — opening every Flux PNG during sort freezes folder loads.
+            try:
+                rec = self.database.get_entry(path)
+                if rec:
+                    w = int(rec.get("width") or 0)
+                    h = int(rec.get("height") or 0)
+                    if w > 0 and h > 0:
+                        return w * h
+            except Exception:
+                pass
+            try:
+                dims = self.get_video_dimensions(path)
+                if isinstance(dims, tuple) and len(dims) >= 2:
+                    return int(dims[0] or 0) * int(dims[1] or 0)
+            except Exception:
+                pass
+            return 0
+
         def sort_key(f):
             if f['is_folder']:
                 return (0, f['name'].lower())  # Folders come first
@@ -5064,21 +5159,24 @@ class VideoThumbnailPlayer(
                     if sort_option == "Filename":
                         return (1, f['name'].lower())
                     elif sort_option == "Size":
-                        return (1, os.path.getsize(path))
+                        size = f.get("_size")
+                        if size is None:
+                            size = os.path.getsize(path)
+                        return (1, size)
                     elif sort_option == "Date":
-                        return (1, os.path.getmtime(path))
+                        mtime = f.get("_mtime")
+                        if mtime is None:
+                            mtime = os.path.getmtime(path)
+                        return (1, mtime)
                     elif sort_option == "Dimensions":
-                        dimensions = self.get_video_dimensions(path)
-                        if isinstance(dimensions, tuple):
-                            return (1, dimensions[0] * dimensions[1])  # Example: sort by area
-                        return (1, dimensions)
+                        return (1, _dimensions_area(path))
                     elif sort_option == "File Type":
-                        return (1, os.path.splitext(path)[-1].lower())  # Sort by file extension
+                        return (1, os.path.splitext(path)[-1].lower())
                     else:
-                        return (1, f['name'].lower())  # Default to filename if no valid option is found
+                        return (1, f['name'].lower())
                 except Exception as e:
                     logging.info(f"Error sorting {f['name']} by {sort_option}: {e}")
-                    return (1, f['name'].lower())  # Fallback to sorting by filename in case of an error
+                    return (1, f['name'].lower())
 
         # Filter files based on the filter option
         if filter_option == "Images":
@@ -5086,7 +5184,7 @@ class VideoThumbnailPlayer(
         elif filter_option == "Videos":
             files_list = [f for f in files_list if f['path'].lower().endswith(VIDEO_FORMATS)]
 
-     # Filter files based on the selected rating
+        # Filter files based on the selected rating
         if hasattr(self, 'selected_rating') and self.selected_rating > 0:
             files_list = [
                 f for f in files_list 
@@ -5100,8 +5198,7 @@ class VideoThumbnailPlayer(
         lower = file_path.lower()
         if lower.endswith(IMAGE_FORMATS):
             try:
-                with Image.open(file_path) as img:
-                    return img.size  # (width, height)
+                return get_pil_image_size(file_path)
             except Exception:
                 return 0, 0
         if lower.endswith((
@@ -5146,7 +5243,10 @@ class VideoThumbnailPlayer(
                     self.tree.selection_set(item)
                     self.tree.focus(item)
                     self.tree.see(item)
-                    self.tree.item(item, open=True)
+                    # Only expand when collapsed — re-open fires <<TreeviewOpen>> and
+                    # process_directory, which is expensive on folders full of media.
+                    if not self.tree.item(item, "open"):
+                        self.tree.item(item, open=True)
                 else:
                     logging.info(f"Node for {self.current_directory} not found in tree.")  # Debug
                     self.expand_tree_to_path(self.current_directory, select_final_node=True)

@@ -25,6 +25,7 @@ from PIL import Image
 from tqdm import tqdm
 
 from app_settings import AppSettings, TaggingSettings
+from image_loader import load_pil_image
 
 yolo_model = None
 
@@ -575,7 +576,7 @@ def infer_human(tags: list[str], human_tags: list[str], _global_tags: list[str])
 
 def load_image(path: str | Path) -> Image.Image | None:
     try:
-        return Image.open(path).convert("RGB")
+        return load_pil_image(path).convert("RGB")
     except Exception as e:
         logging.warning("Failed to load image %s: %s", path, e)
         return None

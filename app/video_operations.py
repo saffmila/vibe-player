@@ -30,6 +30,7 @@ import sys
 import ctypes
 # from gui_elements import create_menu
 from utils import create_menu
+from hotkeys import DEFAULT_HOTKEYS, DOCUMENTED_EXTRA_HOTKEYS, menu_accel
 import logging
 
 import tkinterdnd2 as dnd
@@ -496,8 +497,7 @@ class VideoPlayer:
         # Bind Shift+T to generate a thumbnail
         self.video_window.bind('<Shift-T>', self.generate_thumbnail)
         # Bind Shift+C to save the current frame as an image
-        # Bind Shift+C to save the current frame as an image
-        self.video_window.bind('<Shift-C>', lambda e: save_capture_image(self.controller, self.video_path, self.player, method="ffmpeg"))
+        self.video_window.bind('<Shift-C>', lambda e: self.save_frame_as_image())
         def hk(action_name, default):
             hmap = getattr(self.controller, "hotkeys_map", None) or {}
             return hmap.get(action_name, default)
@@ -2252,6 +2252,12 @@ class VideoPlayer:
             )
             cache_path = os.path.join(cache_dir_path, cache_key)
             bg.save(cache_path, format="JPEG")
+            try:
+                from file_operations import _write_thumb_src_meta
+                from utils import file_fingerprint
+                _write_thumb_src_meta(cache_path, file_fingerprint(current_video))
+            except Exception:
+                pass
 
             thumbnail = ctk.CTkImage(light_image=bg, dark_image=bg)
             thumbnail_cache.set(
@@ -3400,40 +3406,61 @@ class VideoPlayer:
     def show_video_menu(self, event=None, *, x_root=None, y_root=None):
         menu = create_menu(self.controller, self.video_window)
         self._guard_menu_commands(menu)
+        hmap = getattr(self.controller, "hotkeys_map", None) or DEFAULT_HOTKEYS
+        _hk = {**DOCUMENTED_EXTRA_HOTKEYS, **hmap}
+
+        def _cmd(label, command, action=None, accelerator=None, **kwargs):
+            opts = {"label": label, "command": command, **kwargs}
+            acc = accelerator
+            if acc is None and action:
+                acc = menu_accel(_hk, action)
+            if acc:
+                opts["accelerator"] = acc
+            menu.add_command(**opts)
 
         if callable(getattr(self.controller, "open_library", None)):
-            menu.add_command(label="Open full app", command=self.controller.open_library)
+            # Hardcoded bind in player init (not in hotkeys_map)
+            _cmd("Open full app", self.controller.open_library, accelerator="Ctrl+L")
             menu.add_separator()
 
-        menu.add_command(label="Toggle Subtitles", command=self.toggle_subtitles)
-        menu.add_command(label="Create Thumbnail", command=self.generate_thumbnail)
-        
-        menu.add_command(label="Add Bookmark", command=self.add_bookmark)
-        menu.add_command(label="Previous Bookmark", command=self.skip_to_previous_bookmark)
-        menu.add_command(label="Next Bookmark", command=self.skip_to_next_bookmark)
+        _cmd("Toggle Subtitles", self.toggle_subtitles)
+        _cmd("Create Thumbnail", self.generate_thumbnail, "video_generate_thumbnail")
+
+        _cmd("Add Bookmark", self.add_bookmark, "video_add_bookmark")
+        _cmd("Previous Bookmark", self.skip_to_previous_bookmark, "bookmark_prev")
+        _cmd("Next Bookmark", self.skip_to_next_bookmark, "bookmark_next")
 
         can_bookmark_manager = bool(
             self.video_path
             and os.path.isfile(self.video_path)
             and hasattr(self.controller, "show_bookmark_manager")
         )
-        menu.add_command(
-            label="Show Bookmark Manager",
-            command=lambda: self.controller.show_bookmark_manager(self.video_path),
+        _cmd(
+            "Show Bookmark Manager",
+            lambda: self.controller.show_bookmark_manager(self.video_path),
             state="normal" if can_bookmark_manager else "disabled",
         )
 
         if getattr(self, "use_gpu_upscale", False):
             menu.add_separator()
-            menu.add_command(label="GPU Upscale Diagnostics...", command=self.show_gpu_upscale_diagnostics)
+            _cmd("GPU Upscale Diagnostics...", self.show_gpu_upscale_diagnostics)
 
-        menu.add_command(
-            label="Save Frame as Image",
-            command=lambda: save_capture_image(self.controller, self.video_path, self.player, method="ffmpeg")
+        _cmd(
+            "Save Frame as Image",
+            self.save_frame_as_image,
+            "video_capture_frame",
         )
-        menu.add_command(label="Show Playlist", command=self.controller.Open_playlist)
-        menu.add_command(label="Add to Existing Playlist", command=self.controller.add_selected_to_playlist)
-        menu.add_command(label="Add to New Playlist", command=lambda: self.controller.add_selected_to_playlist(new_playlist=True))
+        _cmd("Show Playlist", self.controller.Open_playlist)
+        _cmd(
+            "Add to Existing Playlist",
+            self.controller.add_selected_to_playlist,
+            "add_to_playlist",
+        )
+        _cmd(
+            "Add to New Playlist",
+            lambda: self.controller.add_selected_to_playlist(new_playlist=True),
+            "new_playlist",
+        )
 
         menu.add_separator()
 
@@ -3446,7 +3473,17 @@ class VideoPlayer:
                 label=label,
                 command=lambda s=spd: self.set_playback_speed(s)
             )
-        menu.add_cascade(label=f"Speed  [{self.current_speed:.1f}x]", menu=speed_menu)
+        _speed_up = menu_accel(_hk, "video_speed_up")
+        _speed_down = menu_accel(_hk, "video_speed_down")
+        _speed_acc = None
+        if _speed_down and _speed_up:
+            _speed_acc = f"{_speed_down} / {_speed_up}"
+        elif _speed_up or _speed_down:
+            _speed_acc = _speed_up or _speed_down
+        _speed_opts = {"label": f"Speed  [{self.current_speed:.1f}x]", "menu": speed_menu}
+        if _speed_acc:
+            _speed_opts["accelerator"] = _speed_acc
+        menu.add_cascade(**_speed_opts)
 
 
         # Budoucí rozšíření
@@ -3481,12 +3518,22 @@ class VideoPlayer:
         # Create the menu using the helper function, parented to the controller
         menu = create_menu(self.controller, self.controls_frame)
         self._guard_menu_commands(menu)
+        hmap = getattr(self.controller, "hotkeys_map", None) or DEFAULT_HOTKEYS
+        _hk = {**DOCUMENTED_EXTRA_HOTKEYS, **hmap}
+
+        def _cmd(label, command, action=None):
+            opts = {"label": label, "command": command}
+            if action:
+                acc = menu_accel(_hk, action)
+                if acc:
+                    opts["accelerator"] = acc
+            menu.add_command(**opts)
 
         # Add commands that call existing methods within this VideoPlayer instance
-        menu.add_command(label="Set Loop Start", command=self.set_loop_start)
-        menu.add_command(label="Set Loop End", command=self.set_loop_end)
+        _cmd("Set Loop Start", self.set_loop_start, "loop_start")
+        _cmd("Set Loop End", self.set_loop_end, "loop_end")
         menu.add_separator()
-        menu.add_command(label="Toggle Loop ON/OFF", command=self.toggle_loop)
+        _cmd("Toggle Loop ON/OFF", self.toggle_loop, "loop_toggle")
 
         # Get the screen coordinates of the loop menu button
         x = self.loop_menu_button.winfo_rootx()
@@ -3560,6 +3607,51 @@ class VideoPlayer:
             self.player.video_set_marquee_int(_Position, 8)       # Střed dole
         except Exception as e:
             logging.info(f"[SpeedHUD] Chyba při zobrazování OSD: {e}")
+
+    def save_frame_as_image(self, event=None):
+        """Capture current frame to Pictures/vibe_player and confirm via player HUD."""
+        out_path = save_capture_image(
+            self.controller, self.video_path, self.player, method="ffmpeg"
+        )
+        if out_path:
+            self.show_capture_saved_hud(os.path.basename(out_path))
+        else:
+            self.show_capture_saved_hud(None, failed=True)
+
+    def show_capture_saved_hud(self, filename, *, failed: bool = False):
+        """Brief OSD confirmation after Save Frame (VLC marquee)."""
+        if not self.player:
+            return
+        try:
+            _Enable = 0
+            _Text = 1
+            _Color = 2
+            _Opacity = 3
+            _Position = 4
+            _Size = 30
+            _Timeout = 7
+
+            if failed:
+                text = "Frame save failed"
+                color = 0xFF5555
+            else:
+                name = filename or "image.png"
+                # Keep OSD readable on long filenames
+                if len(name) > 64:
+                    stem, ext = os.path.splitext(name)
+                    name = stem[:60] + "…" + ext
+                text = f"Frame saved: {name}"
+                color = 0x7CFF7C
+
+            self.player.video_set_marquee_int(_Enable, 1)
+            self.player.video_set_marquee_string(_Text, text)
+            self.player.video_set_marquee_int(_Color, color)
+            self.player.video_set_marquee_int(_Opacity, 230)
+            self.player.video_set_marquee_int(_Size, 26)
+            self.player.video_set_marquee_int(_Timeout, 2500)
+            self.player.video_set_marquee_int(_Position, 8)  # bottom center
+        except Exception as e:
+            logging.info(f"[CaptureHUD] Failed to show OSD: {e}")
 
     def speed_step(self, direction: int):
         """Change speed by one step. direction: +1 = faster, -1 = slower."""

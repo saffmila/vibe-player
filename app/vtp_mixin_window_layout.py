@@ -76,10 +76,13 @@ class VtpWindowLayoutMixin:
                 start_path = os.path.dirname(os.path.abspath(start_path))
             if start_path and os.path.isdir(start_path):
                 logging.info(f"[STARTUP] Opening requested folder: {start_path}")
-                self.expand_tree_to_path(start_path)
-                self.current_directory = start_path
+                self.expand_tree_to_path(start_path, select_final_node=False)
                 self.display_thumbnails(start_path)
                 self.update_quick_access_combo(start_path)
+                try:
+                    self.select_current_folder_in_tree()
+                except Exception:
+                    pass
                 try:
                     self.add_to_recent_directories(start_path)
                 except Exception:
@@ -90,10 +93,15 @@ class VtpWindowLayoutMixin:
 
             if last_path and os.path.exists(last_path):
                 logging.info(f"[STARTUP] Restoring last folder: {last_path}")
-                self.expand_tree_to_path(last_path)
-                self.current_directory = last_path
+                # Do not pre-assign current_directory — display_thumbnails would treat
+                # it as same-folder and skip restoring the saved scroll position.
+                self.expand_tree_to_path(last_path, select_final_node=False)
                 self.display_thumbnails(last_path)
                 self.update_quick_access_combo(last_path)
+                try:
+                    self.select_current_folder_in_tree()
+                except Exception:
+                    pass
             else:
                 logging.info(f"[STARTUP] No history, loading default: {self.current_directory}")
                 self.display_thumbnails(self.current_directory)

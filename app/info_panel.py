@@ -9,6 +9,7 @@ import tkinter as tk
 from database import Database
 from video_operations import VideoPlayer
 from PIL import Image, ImageTk
+from image_loader import load_pil_image
 import os
 import queue
 import threading
@@ -496,10 +497,14 @@ class InfoPanelFrame(ctk.CTkFrame):
             menu.grab_release()
 
     def show_image_preview(self, image_path):
+        """Show a still-image preview. Decode/resize off the UI thread so large PNGs don't freeze."""
         # Stop video preview
         if self.preview_player is not None:
-            self.preview_player.stop_video()
-            self.preview_player.video_window.pack_forget()
+            try:
+                self.preview_player.stop_video()
+                self.preview_player.video_window.pack_forget()
+            except Exception:
+                pass
 
         if hasattr(self, "preview_canvas") and self.preview_canvas is not None:
             try:
@@ -509,31 +514,85 @@ class InfoPanelFrame(ctk.CTkFrame):
                 logging.warning(f"InfoPanel: Error destroying previous canvas: {e}")
         self.preview_canvas = None
 
-        image = Image.open(image_path)
+        if not image_path:
+            return
 
         self.tab_preview.update_idletasks()
         target_width = self.tab_preview.winfo_width() - 20
         target_height = self.tab_preview.winfo_height() - 20
+        if target_width <= 0:
+            target_width = 400
+        if target_height <= 0:
+            target_height = 300
 
-        if target_width <= 0: target_width = 400
-        if target_height <= 0: target_height = 300
+        self._pending_preview_path = image_path
+        self._preview_ticket += 1
+        ticket = self._preview_ticket
+        path = image_path
 
-        img_w, img_h = image.size
-        img_ratio = img_w / img_h if img_h != 0 else 1
-        panel_ratio = target_width / target_height
+        def worker():
+            err = None
+            pil_image = None
+            try:
+                if not os.path.isfile(path):
+                    err = "File not found."
+                else:
+                    image = load_pil_image(path)
+                    try:
+                        from PIL import ImageOps
+                        image = ImageOps.exif_transpose(image) or image
+                    except Exception:
+                        pass
+                    img_w, img_h = image.size
+                    img_ratio = (img_w / img_h) if img_h else 1.0
+                    panel_ratio = target_width / target_height if target_height else 1.0
+                    if panel_ratio > img_ratio:
+                        new_height = target_height
+                        new_width = max(1, int(new_height * img_ratio))
+                    else:
+                        new_width = target_width
+                        new_height = max(1, int(new_width / img_ratio))
+                    # Faster than full-res resize for huge Flux / ComfyUI PNGs
+                    image.thumbnail((new_width, new_height), Image.LANCZOS)
+                    pil_image = image
+            except Exception as exc:
+                logging.info("[Preview] Image load failed for %s: %s", path, exc)
+                err = "Failed to load image."
 
-        if panel_ratio > img_ratio:
-            new_height = target_height
-            new_width = int(new_height * img_ratio)
-        else:
-            new_width = target_width
-            new_height = int(new_width / img_ratio)
+            def apply():
+                if ticket != getattr(self, "_preview_ticket", ticket):
+                    return
+                if getattr(self, "_pending_preview_path", None) != path:
+                    return
+                if err or pil_image is None:
+                    try:
+                        self.show_preview_placeholder(err or "Failed to load image.")
+                    except Exception:
+                        pass
+                    return
+                try:
+                    if getattr(self, "preview_canvas", None) is not None:
+                        try:
+                            if self.preview_canvas.winfo_exists():
+                                self.preview_canvas.destroy()
+                        except Exception:
+                            pass
+                        self.preview_canvas = None
+                    # PhotoImage must be created on the Tk main thread
+                    self.preview_image_tk = ImageTk.PhotoImage(pil_image)
+                    self.preview_canvas = tk.Label(
+                        self.tab_preview, image=self.preview_image_tk, bg="black"
+                    )
+                    self.preview_canvas.pack(padx=10, pady=10, anchor="center")
+                except Exception as apply_exc:
+                    logging.info("[Preview] Failed to show image: %s", apply_exc)
 
-        image = image.resize((new_width, new_height), Image.LANCZOS)
+            try:
+                self.after(0, apply)
+            except Exception:
+                pass
 
-        self.preview_image_tk = ImageTk.PhotoImage(image)
-        self.preview_canvas = tk.Label(self.tab_preview, image=self.preview_image_tk, bg="black")
-        self.preview_canvas.pack(padx=10, pady=10, anchor="center")
+        threading.Thread(target=worker, daemon=True).start()
 
 
                     

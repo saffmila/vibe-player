@@ -194,6 +194,16 @@ def _get_local_ffprobe_path() -> str:
     return "ffprobe"
 
 
+def file_fingerprint(path: str) -> tuple[int, int] | None:
+    """Return (mtime_ns, size) for cache invalidation, or None if unreadable."""
+    try:
+        st = os.stat(path)
+        mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+        return (mtime_ns, int(st.st_size))
+    except OSError:
+        return None
+
+
 class ThumbnailCache:
     """Singleton in-memory cache for video/image thumbnails with hit/miss statistics."""
 
@@ -203,27 +213,51 @@ class ThumbnailCache:
         if not cls._instance:
             cls._instance = super(ThumbnailCache, cls).__new__(cls, *args, **kwargs)
             cls._instance.cache = {}
+            cls._instance.fingerprints: dict[str, tuple[int, int]] = {}
             cls._instance.stats = {"hits": 0, "misses": 0}
             cls._instance.cache_read_times: list[float] = []
         return cls._instance
 
     def get(self, path: str, memory_cache: bool = True) -> Any:
-        """Return cached thumbnail if present, else None."""
+        """Return cached thumbnail if present and still matching source fingerprint."""
         if memory_cache:
             if path in self.cache:
+                stored_fp = self.fingerprints.get(path)
+                if stored_fp is not None:
+                    base_path = str(path).split("\x00", 1)[0]
+                    current_fp = file_fingerprint(base_path)
+                    if current_fp is None or current_fp != stored_fp:
+                        self.cache.pop(path, None)
+                        self.fingerprints.pop(path, None)
+                        self.stats["misses"] += 1
+                        return None
                 self.stats["hits"] += 1
                 return self.cache[path]
             self.stats["misses"] += 1
         return None
 
-    def set(self, path: str, thumbnail: Any, memory_cache: bool = True) -> None:
-        """Store a thumbnail in the memory cache."""
+    def set(
+        self,
+        path: str,
+        thumbnail: Any,
+        memory_cache: bool = True,
+        fingerprint: tuple[int, int] | None = None,
+    ) -> None:
+        """Store a thumbnail; attach source fingerprint when available for stale detection."""
         if memory_cache:
             self.cache[path] = thumbnail
+            if fingerprint is None:
+                base_path = str(path).split("\x00", 1)[0]
+                fingerprint = file_fingerprint(base_path)
+            if fingerprint is not None:
+                self.fingerprints[path] = fingerprint
+            else:
+                self.fingerprints.pop(path, None)
 
     def clear(self) -> None:
         """Clear the memory cache and reset statistics."""
         self.cache.clear()
+        self.fingerprints.clear()
         self.reset_stats()
         logging.info("ThumbnailCache memory cache cleared.")
 
@@ -248,6 +282,7 @@ class ThumbnailCache:
                 nk = os.path.normcase(os.path.normpath(base_path))
             if nk == norm_root or nk.startswith(prefix):
                 self.cache.pop(key, None)
+                self.fingerprints.pop(key, None)
                 removed += 1
         if removed:
             logging.info(

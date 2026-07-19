@@ -21,6 +21,7 @@ from screeninfo import get_monitors
 import tkinter as tk
 
 from gui_elements import CTkFlatContextMenu
+from image_loader import load_pil_image
 from vtp_constants import IMAGE_FORMATS
 
 
@@ -62,7 +63,7 @@ class ImageViewerLegacy:
         self.image_window.grid_rowconfigure(0, weight=1)
         self.image_window.grid_columnconfigure(0, weight=1)
 
-        self.image = PILImage.open(self.image_path)
+        self.image = load_pil_image(self.image_path)
         self.original_image = self.image.copy()
         self.photo = ImageTk.PhotoImage(self.image)
 
@@ -237,7 +238,7 @@ class ImageViewerLegacy:
         self.image_name = name
 
         try:
-            self.image = PILImage.open(path)
+            self.image = load_pil_image(path)
             self.original_image = self.image.copy()
             self.image_window.title(name)
 
@@ -1046,7 +1047,7 @@ class ImageViewerGPU:
         self.is_fullscreen = False
 
         # Load PIL image (no GL, safe in any thread)
-        raw = PILImage.open(image_path)
+        raw = load_pil_image(image_path)
         if raw.mode not in ('RGB', 'RGBA'):
             raw = raw.convert('RGBA')
         self.original_image = raw
@@ -1601,7 +1602,7 @@ class ImageViewerGPU:
         self.image_path = path
         self.image_name = name
         try:
-            img = PILImage.open(path)
+            img = load_pil_image(path)
             if img.mode not in ('RGB', 'RGBA'):
                 img = img.convert('RGBA')
             self.original_image = img

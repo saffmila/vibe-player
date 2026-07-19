@@ -44,7 +44,7 @@ a = Analysis(
     binaries=[],
     datas=_datas,
     # Sem se píšou moduly, které PyInstaller sám nenašel
-    hiddenimports=['PIL._tkinter_finder'], 
+    hiddenimports=['PIL._tkinter_finder', 'psd_tools'], 
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

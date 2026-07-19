@@ -23,6 +23,7 @@ from PIL import Image, ImageDraw, ImageOps, ImageTk
 from file_operations import *
 from gui_elements import create_search_window
 from image_operations import create_image_viewer
+from image_loader import load_pil_image, get_pil_image_size
 from video_operations import VideoPlayer
 from video_merge import open_merge_videos_dialog
 from utils import get_video_size
@@ -30,6 +31,11 @@ from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS, preview_skip_subdir
 from virtual_folders import load_virtual_folders
 from hotkeys import DEFAULT_HOTKEYS, menu_accel, rename_accelerators_label
 from bookmark_manager import BookmarkManager
+from folder_scroll_state import (
+    clamp_yview,
+    normalize_scroll_path,
+    remember_folder_scroll,
+)
 
 
 def _norm_video_path(path) -> str:
@@ -321,6 +327,20 @@ class VtpGridMixin:
         self.current_directory = dir_path
         logging.info(f"--- [START Load] Displaying: {self.current_directory} ---")
 
+        # Sync left tree after an actual folder open (thumb double-click / navigate),
+        # not on mere folder-thumb selection.
+        try:
+            prev_key = (
+                os.path.normcase(os.path.normpath(str(prev_cd)))
+                if prev_cd
+                else None
+            )
+            new_key = os.path.normcase(os.path.normpath(str(dir_path)))
+            if prev_key != new_key and hasattr(self, "_schedule_tree_sync_for_current_dir"):
+                self._schedule_tree_sync_for_current_dir(delay_ms=30)
+        except Exception:
+            pass
+
         _nav_clear = getattr(
             self, "_maybe_clear_folder_cache_mark_blocks_after_display_nav", None
         )
@@ -335,6 +355,24 @@ class VtpGridMixin:
                 stop_watch()
             except Exception:
                 logging.debug("stop_directory_watcher during nav failed", exc_info=True)
+
+        # Drop deferred preview/click work from the previous folder — otherwise a
+        # pending after() may still open a missing/stale file and freeze the UI
+        # while decoding a huge image on the main thread.
+        for attr in ("_preview_timer", "_click_timer"):
+            job = getattr(self, attr, None)
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except (tk.TclError, ValueError):
+                    pass
+                setattr(self, attr, None)
+        ip = getattr(self, "info_panel", None)
+        if ip is not None and hasattr(ip, "cancel_pending_preview"):
+            try:
+                ip.cancel_pending_preview()
+            except Exception:
+                pass
 
         # Optional auto-watch of the new folder (off by default).
         if getattr(self, "auto_refresh_folder", False):
@@ -384,114 +422,167 @@ class VtpGridMixin:
             logging.error(f"Unexpected error processing entry '{entry_or_path}': {e}")
             return None
 
-    def _prepare_thumbnail_data(self, dir_path, sort_option=None, filter_option=None):
+    def _prepare_thumbnail_data(self, dir_path, sort_option=None, filter_option=None, render_id=None):
         """
         Loads, processes, and sorts the list of files and folders for the given directory path.
         Handles virtual libraries and filesystem errors.
-        sort_option, filter_option: must be passed when called from worker thread (Tkinter vars not thread-safe).
-        Returns the sorted list of item dictionaries, or None if an error occurs or the directory is empty.
-        Uses the _process_single_entry_for_list helper.
+        sort_option, filter_option: pass when called from worker thread (Tkinter vars not thread-safe).
+        render_id: if provided, abort early when a newer display_thumbnails() has started
+        (avoids blocking the 2-thread DirLoader pool with obsolete folder loads).
+        Returns the sorted list of item dictionaries, or None if an error occurs, empty, or aborted.
+        Does not assign ``self.video_files`` — caller must do that after confirming render_id.
         """
-        video_files_list = [] # Use a local list to gather items
+        def _aborted():
+            return render_id is not None and self._render_id != render_id
+
+        video_files_list = []  # Use a local list to gather items
+        t_scan0 = time.perf_counter()
         try:
             # Load file list (virtual or real)
             if dir_path.startswith("virtual_library://"):
-                # Process virtual library contents into the local list
                 library_name = dir_path.split("://")[1]
-                # Ensure load_virtual_folders() returns the expected structure
                 virtual_data = load_virtual_folders()
                 entries = virtual_data.get("virtual_folders", {}).get(library_name, [])
-                logging.info(f"Processing virtual library '{library_name}' with {len(entries)} entries.")
-                for file_path in entries:
-                    # Add processed entry to video_files_list
+                logging.info(
+                    "Processing virtual library '%s' with %d entries.",
+                    library_name,
+                    len(entries),
+                )
+                for i, file_path in enumerate(entries):
+                    if i & 31 == 0 and _aborted():
+                        logging.info(
+                            "[Prepare] abort virtual scan rid=%s (superseded)",
+                            render_id,
+                        )
+                        return None
                     entry_data = self._process_single_entry_for_list(file_path)
                     if entry_data:
                         video_files_list.append(entry_data)
                     else:
-                        # Log if an entry from virtual library is skipped (e.g., file deleted)
-                        logging.warning(f"Skipping invalid or unsupported entry from virtual library '{library_name}': {file_path}")
-
+                        logging.warning(
+                            "Skipping invalid or unsupported entry from virtual library '%s': %s",
+                            library_name,
+                            file_path,
+                        )
 
             else:
-                # Process real directory contents into the local list
                 if not os.path.isdir(dir_path):
-                     # This check might be redundant if _initialize_thumbnail_display worked, but good for safety
-                     logging.error(f"Path is not a directory: {dir_path}")
-                     # Raise specific error type consistent with os.listdir failure
-                     raise FileNotFoundError(f"Directory not found or is not a directory: {dir_path}")
+                    logging.error(f"Path is not a directory: {dir_path}")
+                    raise FileNotFoundError(
+                        f"Directory not found or is not a directory: {dir_path}"
+                    )
 
                 logging.info(f"Processing directory contents for: {dir_path}")
-                # Use scandir for potentially better performance on large directories
-                # Wrap in try-except specifically for os.scandir permission issues
                 try:
                     with os.scandir(dir_path) as it:
-                        for entry in it:
-                            # Add processed entry using the helper function
-                            entry_data = self._process_single_entry_for_list(entry.path)
+                        for i, entry in enumerate(it):
+                            if i & 31 == 0 and _aborted():
+                                logging.info(
+                                    "[Prepare] abort scan rid=%s after %d entries (superseded)",
+                                    render_id,
+                                    i,
+                                )
+                                return None
+                            # Pass DirEntry (not entry.path) to avoid per-file exists/isdir/isfile.
+                            entry_data = self._process_single_entry_for_list(entry)
                             if entry_data:
+                                # Cheap stats for Size/Date sort — one DirEntry.stat(), not later getsize/mtime.
+                                if not entry_data.get("is_folder"):
+                                    try:
+                                        st = entry.stat(follow_symlinks=False)
+                                        entry_data["_size"] = int(st.st_size)
+                                        entry_data["_mtime"] = float(st.st_mtime)
+                                    except OSError:
+                                        pass
                                 video_files_list.append(entry_data)
                 except PermissionError:
-                     # Re-raise PermissionError to be caught by the outer try-except
-                     raise
+                    raise
                 except OSError as e:
-                     # Catch other OS errors during scandir (e.g., path too long on Windows)
-                     logging.error(f"OS Error scanning directory '{dir_path}': {e}", exc_info=True)
-                     # Re-raise as a generic Exception or handle specifically
-                     raise Exception(f"Failed to scan directory: {e}") from e
-
+                    logging.error(
+                        f"OS Error scanning directory '{dir_path}': {e}", exc_info=True
+                    )
+                    raise Exception(f"Failed to scan directory: {e}") from e
 
         except FileNotFoundError:
-            # Error already logged in _initialize or caught here
-            logging.error(f"Directory not found during data preparation: {dir_path}") # Log again for clarity
-            return None # Return None on critical error
+            logging.error(f"Directory not found during data preparation: {dir_path}")
+            return None
         except PermissionError:
-            # Error already logged in _initialize or caught here
             logging.error(f"Permission denied during data preparation for: {dir_path}")
-            # No need to show messagebox again if _initialize already did
-            return None # Return None on critical error
+            return None
         except Exception as e:
-            # Catch errors from scandir or _process_single_entry_for_list
-            logging.error(f"Unexpected error preparing thumbnail data for {dir_path}: {e}", exc_info=True)
-            # messagebox must run on main thread — schedule from worker
+            logging.error(
+                f"Unexpected error preparing thumbnail data for {dir_path}: {e}",
+                exc_info=True,
+            )
             msg = f"Failed to read directory contents:\n{dir_path}"
             self.after(0, lambda m=msg: messagebox.showerror("Error", m))
-            return None # Return None on unexpected error
+            return None
 
-        # Sort the collected files only if the list is not empty
+        scan_s = time.perf_counter() - t_scan0
+
+        if _aborted():
+            logging.info("[Prepare] abort before sort rid=%s (superseded)", render_id)
+            return None
+
         if not video_files_list:
             logging.info("No media files found or processed in directory.")
-            # Update main list to empty
-            self.video_files = []
-        else:
-            logging.info(f"Sorting {len(video_files_list)} collected items...")
-            try:
-                # Sorting might fail if sort_key accesses properties incorrectly
-                sorted_items = self.sort_thumbnails(video_files_list, sort_option, filter_option)
-                self.video_files = sorted_items # Update the main class attribute *after* sorting
-            except Exception as e:
-                logging.error(f"Error during sorting thumbnails for {dir_path}: {e}", exc_info=True)
-                self.after(0, lambda: messagebox.showerror("Error", "Failed to sort directory items."))
-                return None # Return None if sorting fails critically
+            return []
 
-        # Status bar updates must run on main thread
-        self.after(0, self.update_status_bar)
+        logging.info(
+            "Sorting %d collected items... (option=%s, scan=%.3fs, rid=%s)",
+            len(video_files_list),
+            sort_option,
+            scan_s,
+            render_id,
+        )
+        t_sort0 = time.perf_counter()
+        try:
+            sorted_items = self.sort_thumbnails(
+                video_files_list, sort_option, filter_option
+            )
+        except Exception as e:
+            logging.error(
+                f"Error during sorting thumbnails for {dir_path}: {e}", exc_info=True
+            )
+            self.after(
+                0, lambda: messagebox.showerror("Error", "Failed to sort directory items.")
+            )
+            return None
 
-        # Final check on self.video_files after potential sorting error handling
-        if not self.video_files:
-            # Empty list or sorting failed — adjust UI on main thread
+        if _aborted():
+            logging.info(
+                "[Prepare] abort after sort rid=%s (superseded, sort=%.3fs)",
+                render_id,
+                time.perf_counter() - t_sort0,
+            )
+            return None
+
+        if not sorted_items:
             def _empty_ui_update():
                 try:
                     self.wide_folders_frame.pack_forget()
                     self.regular_thumbnails_frame.pack_forget()
-                    self.regular_thumbnails_frame.pack(side="top", fill="both", expand=True, padx=5, pady=5)
+                    self.regular_thumbnails_frame.pack(
+                        side="top", fill="both", expand=True, padx=5, pady=5
+                    )
                     self.adjust_scroll_region_and_filler()
                 except Exception as e:
-                    logging.error(f"Error adjusting UI for empty directory {dir_path}: {e}")
-            self.after(0, _empty_ui_update)
-            return None # Return None if empty
+                    logging.error(
+                        f"Error adjusting UI for empty directory {dir_path}: {e}"
+                    )
 
-        logging.info(f"Prepared and sorted {len(self.video_files)} items.")
-        return self.video_files # Return the final sorted list (or unsorted list if sort failed and Option 1 was chosen)
+            self.after(0, _empty_ui_update)
+            self.after(0, self.update_status_bar)
+            return []
+
+        logging.info(
+            "Prepared and sorted %d items. (sort=%.3fs, option=%s, rid=%s)",
+            len(sorted_items),
+            time.perf_counter() - t_sort0,
+            sort_option,
+            render_id,
+        )
+        return sorted_items
 
 
 
@@ -707,6 +798,36 @@ class VtpGridMixin:
 
 
 
+    def capture_current_folder_scroll(self) -> None:
+        """Save the current virtual-grid yview fraction for ``current_directory``."""
+        path = getattr(self, "current_directory", None)
+        if not normalize_scroll_path(str(path) if path else ""):
+            return
+        try:
+            if not getattr(self, "_vg_active", False):
+                return
+            canvas = getattr(self, "canvas", None)
+            if canvas is None:
+                return
+            frac = clamp_yview(canvas.yview()[0])
+            if frac is None:
+                return
+            positions = getattr(self, "folder_scroll_positions", None)
+            if positions is None:
+                self.folder_scroll_positions = {}
+                positions = self.folder_scroll_positions
+            remember_folder_scroll(positions, path, frac)
+        except Exception:
+            logging.debug("[ScrollState] capture failed", exc_info=True)
+
+    def peek_folder_scroll(self, path: str):
+        """Return saved yview fraction for ``path``, or None."""
+        key = normalize_scroll_path(str(path) if path else "")
+        if not key:
+            return None
+        positions = getattr(self, "folder_scroll_positions", None) or {}
+        return clamp_yview(positions.get(key))
+
     def display_thumbnails(
         self, dir_path, force_refresh=False, thumbnail_time=None, preserve_scroll=False
     ):
@@ -717,6 +838,8 @@ class VtpGridMixin:
         3. Main thread renders the GUI.
 
         preserve_scroll: if True, restore vertical canvas scroll fraction after reload (virtual grid only). Used e.g. after in-place DnD refresh of the same folder.
+        When navigating to another folder, the previous folder's scroll is saved and the
+        destination's last scroll (if any) is restored — including after app restart.
         """
         if self._should_refresh_search_results_instead(dir_path):
             self.display_last_search_results()
@@ -730,18 +853,40 @@ class VtpGridMixin:
         if was_search_view and hasattr(self, "status_bar") and self.status_bar:
             self._show_return_to_search_status()
 
+        leaving = getattr(self, "current_directory", None)
+        same_folder = False
+        try:
+            left_key = normalize_scroll_path(str(leaving)) if leaving else None
+            dest_key = normalize_scroll_path(str(dir_path)) if dir_path else None
+            same_folder = bool(left_key and dest_key and left_key == dest_key)
+        except Exception:
+            same_folder = False
+
+        # Remember scroll for the folder we are leaving (favorites, tree, etc.).
+        if leaving and not same_folder:
+            self.capture_current_folder_scroll()
+
         # Capture before any clear — clear_thumbnails resets yview.
         if preserve_scroll:
             try:
                 if getattr(self, "_vg_active", False):
-                    self._thumb_reload_preserve_yview = max(
-                        0.0, min(1.0, float(self.canvas.yview()[0]))
-                    )
+                    frac = max(0.0, min(1.0, float(self.canvas.yview()[0])))
+                    self._thumb_reload_preserve_yview = frac
+                    if same_folder and leaving:
+                        remember_folder_scroll(
+                            getattr(self, "folder_scroll_positions", {}),
+                            leaving,
+                            frac,
+                        )
                 else:
                     self._thumb_reload_preserve_yview = None
             except Exception:
                 self._thumb_reload_preserve_yview = None
+        elif not same_folder or not getattr(self, "_vg_active", False):
+            # New folder, or first paint (e.g. startup already set current_directory).
+            self._thumb_reload_preserve_yview = self.peek_folder_scroll(dir_path)
         else:
+            # Same folder already on screen and not preserve_scroll → reset to top.
             self._thumb_reload_preserve_yview = None
 
         # Force the UI to calculate its actual dimensions before we start
@@ -788,8 +933,12 @@ class VtpGridMixin:
                 self._is_loading = False
                 return
 
-            # 1. Load data (file listing, sort) — heavy I/O, off main thread
-            sorted_file_list = self._prepare_thumbnail_data(dir_path, sort_option, filter_option)
+            # 1. Load data (file listing, sort) — heavy I/O, off main thread.
+            # Abort checks inside prepare free the DirLoader pool when the user
+            # clicks another folder before the previous scan/sort finishes.
+            sorted_file_list = self._prepare_thumbnail_data(
+                dir_path, sort_option, filter_option, render_id=render_id
+            )
 
             # Check again after the potentially slow I/O
             if self._render_id != render_id:
@@ -804,6 +953,30 @@ class VtpGridMixin:
                     self.adjust_scroll_region_and_filler()
 
                 self.after(0, _adjust_no_data)
+                return
+
+            # Only the winning render_id may publish the file list.
+            self.video_files = sorted_file_list
+            self.after(0, self.update_status_bar)
+
+            if not self.video_files:
+                self._is_loading = False
+
+                def _empty_ui_update():
+                    try:
+                        self.wide_folders_frame.pack_forget()
+                        self.regular_thumbnails_frame.pack_forget()
+                        self.regular_thumbnails_frame.pack(
+                            side="top", fill="both", expand=True, padx=5, pady=5
+                        )
+                        self.adjust_scroll_region_and_filler()
+                    except Exception as e:
+                        logging.error(
+                            "Error adjusting UI for empty directory %s: %s", dir_path, e
+                        )
+                    self._thumb_reload_preserve_yview = None
+
+                self.after(0, _empty_ui_update)
                 return
 
             # Build path→index map once here in background so UI chunks don't repeat this
@@ -2435,6 +2608,7 @@ class VtpGridMixin:
             hdd_pil = Image.open(os.path.join(P, "tree_hdd.PNG")).resize((icon_size, icon_size), Image.LANCZOS)
             google_pil = Image.open(os.path.join(P, "tree_google.PNG")).resize((icon_size, icon_size), Image.LANCZOS)
             desktop_pil = Image.open(os.path.join(P, "tree_desktop.png")).resize((icon_size, icon_size), Image.LANCZOS)
+            downloads_pil = Image.open(os.path.join(P, "tree_downloads.png")).resize((icon_size, icon_size), Image.LANCZOS)
             documents_pil = Image.open(os.path.join(P, "tree_documents.png")).resize((icon_size, icon_size), Image.LANCZOS)
             pictures_pil = Image.open(os.path.join(P, "tree_pictures.png")).resize((icon_size, icon_size), Image.LANCZOS)
             videos_pil = Image.open(os.path.join(P, "tree_videos.png")).resize((icon_size, icon_size), Image.LANCZOS)
@@ -2449,6 +2623,7 @@ class VtpGridMixin:
             self.hdd_icon = ImageTk.PhotoImage(hdd_pil)
             self.google_icon = ImageTk.PhotoImage(google_pil)
             self.desktop_icon = ImageTk.PhotoImage(desktop_pil)
+            self.downloads_icon = ImageTk.PhotoImage(downloads_pil)
             self.documents_icon = ImageTk.PhotoImage(documents_pil)
             self.pictures_icon = ImageTk.PhotoImage(pictures_pil)
             self.videos_icon = ImageTk.PhotoImage(videos_pil)
@@ -2483,6 +2658,7 @@ class VtpGridMixin:
             up = os.path.expanduser("~")
             specials = (
                 (os.path.normcase(os.path.join(up, "Desktop")), self.desktop_icon),
+                (os.path.normcase(os.path.join(up, "Downloads")), self.downloads_icon),
                 (os.path.normcase(os.path.join(up, "Documents")), self.documents_icon),
                 (os.path.normcase(os.path.join(up, "Pictures")), self.pictures_icon),
                 (os.path.normcase(os.path.join(up, "Videos")), self.videos_icon),
@@ -3698,12 +3874,7 @@ class VtpGridMixin:
                 )
                 if stale or not (width and height):
                     try:
-                        with Image.open(file_path) as im:
-                            try:
-                                im = ImageOps.exif_transpose(im) or im
-                            except Exception:
-                                pass
-                            width, height = im.size
+                        width, height = get_pil_image_size(file_path)
                         if hasattr(self, "database") and self.database:
                             self.database.update_file_metadata(
                                 file_path, width=width, height=height
@@ -5595,20 +5766,10 @@ class VtpGridMixin:
                 return
 
         self.select_thumbnail(index, shift=shift, ctrl=ctrl, trigger_preview=False, click_widget=label)
-        # Use the already-known folder flag from video_files instead of os.path.isdir():
-        # on a mapped network drive (e.g. j:\) a stat call can block the UI thread for
-        # seconds when the SMB share stalls, freezing the whole app on a folder click.
-        is_dir = False
-        if file_path:
-            if 0 <= index < len(self.video_files):
-                is_dir = bool(self.video_files[index].get('is_folder', False))
-            else:
-                is_dir = os.path.isdir(file_path)
-        if file_path and is_dir:
-            self.current_directory = file_path
-            self._schedule_tree_sync_for_current_dir()
-
-
+        # Folder thumbs: selection only. Do NOT change current_directory or sync/open the
+        # tree here — that runs process_directory on the UI thread (listdir + isdir per
+        # entry) and freezes on ComfyUI folders with thousands of images. Opening is
+        # Double-Button-1 → display_thumbnails, which syncs the tree after the load.
 
     def _schedule_tree_sync_for_current_dir(self, delay_ms: int = 10):
         """Debounce folder -> tree synchronization."""

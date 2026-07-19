@@ -14,7 +14,8 @@ import time
 import customtkinter as ctk
 from database import Database
 from utils import get_video_size
-from utils import ThumbnailCache
+from utils import ThumbnailCache, file_fingerprint
+from image_loader import load_pil_image, get_pil_image_size
 from vtp_constants import IMAGE_FORMATS
 import subprocess
 from io import BytesIO
@@ -154,15 +155,15 @@ class FileOperations:
                 elif file_path.lower().endswith(self.IMAGE_FORMATS):
                     if pil_only_images:
                         try:
-                            with Image.open(file_path) as image:
-                                image = ImageOps.exif_transpose(image).convert("RGBA")
-                                image.thumbnail(small_thumb_size, Image.LANCZOS)
-                                bg = Image.new("RGBA", small_thumb_size, (71, 71, 71, 255))
-                                x = (small_thumb_size[0] - image.size[0]) // 2
-                                y = (small_thumb_size[1] - image.size[1]) // 2
-                                bg.paste(image, (x, y), image)
-                                thumbnails.append(bg)
-                                continue
+                            image = load_pil_image(file_path)
+                            image = ImageOps.exif_transpose(image).convert("RGBA")
+                            image.thumbnail(small_thumb_size, Image.LANCZOS)
+                            bg = Image.new("RGBA", small_thumb_size, (71, 71, 71, 255))
+                            x = (small_thumb_size[0] - image.size[0]) // 2
+                            y = (small_thumb_size[1] - image.size[1]) // 2
+                            bg.paste(image, (x, y), image)
+                            thumbnails.append(bg)
+                            continue
                         except (UnidentifiedImageError, OSError) as e:
                             logging.debug("[FolderPreview] Skip unreadable image %s: %s", file_path, e)
                             continue
@@ -625,9 +626,55 @@ def get_cache_dir_path(file_path, cache_dir):
     return cache_dir_path, full_path
 
 
+def _thumb_src_meta_path(cache_path: str) -> str:
+    return cache_path + ".src"
+
+
+def _write_thumb_src_meta(cache_path: str, fingerprint: tuple[int, int] | None) -> None:
+    if fingerprint is None:
+        return
+    try:
+        with open(_thumb_src_meta_path(cache_path), "w", encoding="utf-8") as f:
+            f.write(f"{fingerprint[0]} {fingerprint[1]}\n")
+    except OSError:
+        pass
+
+
+def _read_thumb_src_meta(cache_path: str) -> tuple[int, int] | None:
+    try:
+        with open(_thumb_src_meta_path(cache_path), "r", encoding="utf-8") as f:
+            parts = f.read().strip().split()
+        if len(parts) >= 2:
+            return (int(parts[0]), int(parts[1]))
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def is_thumb_disk_cache_valid(source_path: str, cache_path: str) -> bool:
+    """True when disk thumb still matches the source file (mtime+size).
+
+    New caches store a ``.src`` sidecar. Legacy JPEGs without sidecar are
+    accepted only when the source is not newer than the cached JPEG — so a
+    same-name replace after delete/move regenerates automatically.
+    """
+    if not os.path.isfile(cache_path):
+        return False
+    fp = file_fingerprint(source_path)
+    if fp is None:
+        return False
+    stored = _read_thumb_src_meta(cache_path)
+    if stored is not None:
+        return stored == fp
+    try:
+        return fp[0] <= os.stat(cache_path).st_mtime_ns
+    except OSError:
+        return False
+
 
 def create_image_thumbnail(image_path, thumbnail_size, cache_enabled=True, database=None, cache_dir="thumbnail_cache", overwrite=False):
     """Generate or retrieve cached image thumbnail. Registers file in database if provided."""
+    source_fp = file_fingerprint(image_path)
     if not overwrite:
         cached_thumbnail = thumbnail_cache.get(image_path)
         # print (f"IMAGE THUMB cached_thumbnail {cached_thumbnail}")
@@ -649,12 +696,18 @@ def create_image_thumbnail(image_path, thumbnail_size, cache_enabled=True, datab
         # logging.info(f"create_image_thumbnail - cache_key: {cache_key}")
         # logging.info(f"create_image_thumbnail - final cache_path: {cache_path}")
 
-        if cache_enabled and not overwrite and os.path.exists(cache_path):
+        if (
+            cache_enabled
+            and not overwrite
+            and is_thumb_disk_cache_valid(image_path, cache_path)
+        ):
             _cached_img = Image.open(cache_path)
             _cached_img.load()
-            return ctk.CTkImage(light_image=_cached_img, dark_image=_cached_img)
+            thumb = ctk.CTkImage(light_image=_cached_img, dark_image=_cached_img)
+            thumbnail_cache.set(image_path, thumb, fingerprint=source_fp)
+            return thumb
 
-        image = Image.open(image_path)
+        image = load_pil_image(image_path)
         try:
             image = ImageOps.exif_transpose(image) or image
         except Exception:
@@ -671,6 +724,7 @@ def create_image_thumbnail(image_path, thumbnail_size, cache_enabled=True, datab
         bg = Image.new('RGB', thumbnail_size, (71, 71, 71))
         bg.paste(image, ((thumbnail_size[0] - image.size[0]) // 2, (thumbnail_size[1] - image.size[1]) // 2))
         bg.save(cache_path, format=save_format)
+        _write_thumb_src_meta(cache_path, source_fp or file_fingerprint(image_path))
         
         thumbnail = ctk.CTkImage(light_image=bg, dark_image=bg)  # Create the CTkImage object
         
@@ -703,7 +757,9 @@ def create_image_thumbnail(image_path, thumbnail_size, cache_enabled=True, datab
         
         # After generating the thumbnail
         if thumbnail is not None:
-            thumbnail_cache.set(image_path, thumbnail)  # Save to cache
+            thumbnail_cache.set(
+                image_path, thumbnail, fingerprint=source_fp or file_fingerprint(image_path)
+            )
         
         # logging.info(f"Thumbnail created and saved at: {cache_path}")
         return ctk.CTkImage(light_image=bg, dark_image=bg)
@@ -746,6 +802,7 @@ def create_video_thumbnail(video_path, thumbnail_size, thumbnail_format, capture
         return thumb_obj
 
     # --- Simplified caching logic ---
+    source_fp = file_fingerprint(video_path)
     if not overwrite:
         cached_thumbnail = thumbnail_cache.get(video_path)
         if cached_thumbnail:
@@ -757,10 +814,10 @@ def create_video_thumbnail(video_path, thumbnail_size, thumbnail_format, capture
             cache_key = f"{os.path.basename(video_path)}_{thumbnail_size[0]}x{thumbnail_size[1]}.jpg"
             cache_path = os.path.join(cache_dir_path, cache_key)
             
-            if os.path.exists(cache_path):
+            if is_thumb_disk_cache_valid(video_path, cache_path):
                 image = Image.open(cache_path)
                 thumbnail = ctk.CTkImage(light_image=image, dark_image=image)
-                thumbnail_cache.set(video_path, thumbnail)
+                thumbnail_cache.set(video_path, thumbnail, fingerprint=source_fp)
                 
                 # FIX: Return via our helper function when loading from disk too
                 return _finalize_and_return(thumbnail)
@@ -803,6 +860,7 @@ def create_video_thumbnail(video_path, thumbnail_size, thumbnail_format, capture
         bg = Image.new('RGB', thumbnail_size, (71, 71, 71))
         bg.paste(image, ((thumbnail_size[0] - image.size[0]) // 2, (thumbnail_size[1] - image.size[1]) // 2))
         bg.save(cache_path, format="JPEG")
+        _write_thumb_src_meta(cache_path, source_fp or file_fingerprint(video_path))
         if overwrite:
             logging.info(
                 "[ThumbCache] saved overwrite path=%s time=%s cache=%s",
@@ -812,7 +870,9 @@ def create_video_thumbnail(video_path, thumbnail_size, thumbnail_format, capture
             )
 
         thumbnail = ctk.CTkImage(light_image=bg, dark_image=bg)
-        thumbnail_cache.set(video_path, thumbnail)
+        thumbnail_cache.set(
+            video_path, thumbnail, fingerprint=source_fp or file_fingerprint(video_path)
+        )
 
         # FIX: Even when newly generated, return via our helper function, so video duration gets saved.
         return _finalize_and_return(thumbnail)
@@ -1213,6 +1273,8 @@ def capture_fullres_frame(video_path, method="ffmpeg", time_sec=10.0):
 def save_capture_image(controller, video_path, player, method="ffmpeg"):
     """
     Captures a frame from the video at the current playback time and saves it.
+
+    Returns the saved file path on success, otherwise None.
     """
     # --- New logic to get time from the player object ---
     time_sec = 10.0 # Default fallback value
@@ -1223,16 +1285,22 @@ def save_capture_image(controller, video_path, player, method="ffmpeg"):
 
     if not video_path or not os.path.exists(video_path):
         logging.info(f"[Capture] Video path not provided or file not found: {video_path}")
-        return
+        return None
 
     # The rest of the function remains the same...
     frame = capture_fullres_frame(video_path, method=method, time_sec=time_sec)
     if frame is None:
         logging.info(f"[Capture] Failed to capture frame from: {video_path}")
-        return
+        return None
 
-    # ... rest of code for generating filename and saving
-    out_dir = os.getcwd()
+    # Save outside the project tree (cwd is often app/) so captures don't pollute git.
+    out_dir = os.path.join(os.path.expanduser("~"), "Pictures", "vibe_player")
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as e:
+        logging.info(f"[Capture] Cannot create output folder {out_dir}: {e}")
+        return None
+
     base_name = os.path.splitext(os.path.basename(video_path))[0]
     now_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     h, m, s = int(time_sec // 3600), int((time_sec % 3600) // 60), int(time_sec % 60)
@@ -1243,10 +1311,10 @@ def save_capture_image(controller, video_path, player, method="ffmpeg"):
     try:
         Image.fromarray(frame).save(out_path, format="PNG", optimize=True)
         logging.info(f"[Capture] Frame saved: {out_path}")
+        return out_path
     except Exception as e:
         logging.info(f"[Capture] Error saving frame for {video_path}: {e}")
-
-        
+        return None
 
 def resize_and_crop_frame(frame, target_size, crop_to_fit=True):
     """
@@ -1382,12 +1450,7 @@ def get_file_info(path):
     
     if os.path.isfile(path):
         if path.lower().endswith(IMAGE_FORMATS):
-            with Image.open(path) as image:
-                try:
-                    image = ImageOps.exif_transpose(image) or image
-                except Exception:
-                    pass
-                width, height = image.size
+            width, height = get_pil_image_size(path)
             dimensions = f"{width}x{height}"
         elif path.lower().endswith(_OPENCV_FRAGILE_VIDEO_EXTS):
             dimensions = "Unknown"
@@ -1420,15 +1483,13 @@ def get_file_metadata(path):
         if os.path.isfile(path):
             ext = path.lower()
             if ext.endswith(IMAGE_FORMATS):
-                with Image.open(path) as img:
+                metadata["width"], metadata["height"] = get_pil_image_size(path)
+                if not path.lower().endswith((".psd", ".psb")):
                     try:
-                        img = ImageOps.exif_transpose(img) or img
-                    except Exception:
-                        pass
-                    metadata["width"], metadata["height"] = img.size
-                    try:
-                        exif_data = img.getexif()
-                        metadata["description"] = exif_data.get(270)
+                        # EXIF description only — open lazily, no full decode required for tag read.
+                        with Image.open(path) as img:
+                            exif_data = img.getexif()
+                            metadata["description"] = exif_data.get(270)
                     except Exception as e:
                         metadata["description"] = f"EXIF Error: {e}"
             elif ext.endswith(('.avi', '.mp4', '.mkv', '.mov', '.wmv', '.flv', '.mpeg', '.mpg', '.webm',

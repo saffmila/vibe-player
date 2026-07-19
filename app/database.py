@@ -271,11 +271,10 @@ class Database:
             return 0, 0
         if ext in IMAGE_FORMATS:
             try:
-                from PIL import Image
+                from image_loader import get_pil_image_size
 
-                with Image.open(file_path) as img:
-                    w, h = img.size
-                    return int(w), int(h)
+                w, h = get_pil_image_size(file_path)
+                return int(w), int(h)
             except Exception:
                 return 0, 0
         return 0, 0

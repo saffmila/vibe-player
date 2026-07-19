@@ -34,6 +34,8 @@ IMAGE_FORMATS = (
     ".webp",
     ".tif",
     ".tiff",
+    ".psd",
+    ".psb",
 )
 
 # Do not recurse into these when building folder preview grids (Windows junk / ACL).
