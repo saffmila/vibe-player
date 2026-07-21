@@ -604,17 +604,65 @@ class VtpWindowLayoutMixin:
         self.update_thumbnail_info()
 
     def show_error_message(self, title, message):
-        """Display an error message dialog."""
+        """Display a modal error dialog. Reuses an open one instead of stacking copies."""
+        existing = getattr(self, "_error_dialog", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.title(title)
+                    label = getattr(self, "_error_dialog_label", None)
+                    if label is not None and label.winfo_exists():
+                        label.configure(text=message)
+                    existing.lift()
+                    existing.focus_force()
+                    try:
+                        existing.grab_set()
+                    except tk.TclError:
+                        pass
+                    return
+            except tk.TclError:
+                self._error_dialog = None
+                self._error_dialog_label = None
+
         error_window = ctk.CTkToplevel(self)
+        self._error_dialog = error_window
         error_window.title(title)
         self._center_toplevel_window(error_window, 400, 200)
         error_window.resizable(False, False)
+        try:
+            error_window.transient(self)
+        except Exception:
+            pass
+        error_window.attributes("-topmost", True)
 
         label = ctk.CTkLabel(error_window, text=message, wraplength=350, anchor="w", justify="left")
         label.pack(padx=10, pady=10)
+        self._error_dialog_label = label
 
-        btn_ok = ctk.CTkButton(error_window, text="OK", command=error_window.destroy)
+        def _close():
+            if getattr(self, "_error_dialog", None) is error_window:
+                self._error_dialog = None
+                self._error_dialog_label = None
+            try:
+                error_window.grab_release()
+            except tk.TclError:
+                pass
+            if error_window.winfo_exists():
+                error_window.destroy()
+
+        btn_ok = ctk.CTkButton(error_window, text="OK", command=_close)
         btn_ok.pack(pady=10)
+        error_window.protocol("WM_DELETE_WINDOW", _close)
+        error_window.bind("<Return>", lambda _e: _close())
+        error_window.bind("<Escape>", lambda _e: _close())
+
+        try:
+            error_window.grab_set()
+        except tk.TclError:
+            pass
+        error_window.lift()
+        error_window.focus_force()
+        error_window.wait_window()
 
     def _center_toplevel_window(
         self,

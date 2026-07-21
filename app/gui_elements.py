@@ -1193,14 +1193,49 @@ def setup_gui(app):
         app.refresh_dir_button.pack(side=ctk.LEFT, padx=4, pady=5)
 
     # --- Sort Dropdown ---
-    _SORT_CHOICES = ["Filename", "Size", "Date", "Dimensions", "File Type"]
+    _SORT_KEYS = ["Filename", "Size", "Date", "Dimensions", "File Type", "Rating"]
+    _SORT_REVERSE_LABEL_OFF = "↕ Reverse order"
+    _SORT_REVERSE_LABEL_ON = "↕ Reverse order ●"
+
+    def _sort_dropdown_values():
+        reverse_on = bool(getattr(app, "sort_reverse", False))
+        reverse_label = _SORT_REVERSE_LABEL_ON if reverse_on else _SORT_REVERSE_LABEL_OFF
+        return list(_SORT_KEYS) + [reverse_label]
+
     _saved_sort = getattr(app, "_pending_sort_option", None)
-    if _saved_sort not in _SORT_CHOICES:
+    if _saved_sort not in _SORT_KEYS:
         _saved_sort = "Filename"
+    app.sort_reverse = bool(
+        getattr(app, "_pending_sort_reverse", getattr(app, "sort_reverse", False))
+    )
     app.sort_option = ctk.StringVar(value=_saved_sort)
+    app._sort_keys = tuple(_SORT_KEYS)
+    app._sort_reverse_label_off = _SORT_REVERSE_LABEL_OFF
+    app._sort_reverse_label_on = _SORT_REVERSE_LABEL_ON
+
+    def _sync_sort_dropdown_values():
+        try:
+            app.sort_dropdown.configure(values=_sort_dropdown_values())
+        except Exception:
+            pass
 
     def _on_sort_option_chosen(choice):
         app._toolbar_combo_begin()
+        reverse_labels = (_SORT_REVERSE_LABEL_OFF, _SORT_REVERSE_LABEL_ON)
+        if choice in reverse_labels:
+            app.sort_reverse = not bool(getattr(app, "sort_reverse", False))
+            # Keep the real sort key selected — Reverse is a toggle, not a mode.
+            current = app.sort_option.get()
+            if current not in _SORT_KEYS:
+                current = _saved_sort if _saved_sort in _SORT_KEYS else "Filename"
+                app.sort_option.set(current)
+            try:
+                app.sort_dropdown.set(current)
+            except Exception:
+                pass
+            _sync_sort_dropdown_values()
+        elif choice in _SORT_KEYS:
+            app.sort_option.set(choice)
         if hasattr(app, "save_preferences"):
             try:
                 app.save_preferences()
@@ -1211,9 +1246,9 @@ def setup_gui(app):
     app.sort_dropdown = ctk.CTkComboBox(
         app.toolbar_frame,
         variable=app.sort_option,
-        values=_SORT_CHOICES,
+        values=_sort_dropdown_values(),
         command=_on_sort_option_chosen,
-        width=110,
+        width=130,
         dropdown_font=DROPDOWN_FONT,
         fg_color=dropdown_frame_color,
         border_color=dropdown_frame_color,
@@ -1221,6 +1256,7 @@ def setup_gui(app):
     )
     app.sort_dropdown.set(app.sort_option.get())
     app.sort_dropdown.pack(side=ctk.LEFT, padx=(45, 6), pady=5)
+    app._sync_sort_dropdown_values = _sync_sort_dropdown_values
 
     # --- Thumbnail Size Dropdown ---
     thumbnail_size_choices = ["160x120", "240x180", "320x240", "400x300", "480x360"]
@@ -2059,6 +2095,17 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
     selected_audio_device = app.audio_device_var.get()
     audio_device_id = selected_audio_device.split('(')[-1].strip(')')
 
+    _sort_keys = ("Filename", "Size", "Date", "Dimensions", "File Type", "Rating")
+    _sort_val = (
+        app.sort_option.get()
+        if getattr(app, "sort_option", None) is not None
+        else getattr(app, "_pending_sort_option", "Filename")
+    )
+    if _sort_val not in _sort_keys:
+        _sort_val = getattr(app, "_pending_sort_option", "Filename")
+        if _sort_val not in _sort_keys:
+            _sort_val = "Filename"
+
     preferences = {
         "capture_method": app.capture_method_var.get(),
         "thumbnail_size": f"{app.thumbnail_size[0]}x{app.thumbnail_size[1]}",
@@ -2107,11 +2154,8 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
         "dnd_confirm_dialogs": getattr(app, "dnd_confirm_dialogs", False),
         "delete_to_trash": bool(getattr(app, "delete_to_trash", True)),
         "auto_refresh_folder": bool(getattr(app, "auto_refresh_folder", False)),
-        "sort_option": (
-            app.sort_option.get()
-            if getattr(app, "sort_option", None) is not None
-            else getattr(app, "_pending_sort_option", "Filename")
-        ),
+        "sort_option": _sort_val,
+        "sort_reverse": bool(getattr(app, "sort_reverse", False)),
         "image_viewer_use_pyglet": bool(getattr(app, "image_viewer_use_pyglet", False)),
     }
     # Save splitter positions (fractions 0-1) when panes are visible

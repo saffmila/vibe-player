@@ -53,12 +53,15 @@ def load_pil_image(path: str) -> Image.Image:
 
     For PSD/PSB, returns a composited flatten suitable for display — not
     editable layers. Raises on failure (same as ``Image.open`` for other formats).
+
+    Always detach from the filesystem handle after load — leaving Image.open()
+    open locks the path on Windows and freezes shutil.move / deletes.
     """
     if is_psd_path(path):
         return _load_psd(path)
-    image = Image.open(path)
-    image.load()
-    return image
+    with Image.open(path) as image:
+        image.load()
+        return image.copy()
 
 
 def _load_psd(path: str) -> Image.Image:

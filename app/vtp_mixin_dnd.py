@@ -305,37 +305,49 @@ class VtpDndMixin:
                 logging.warning("[DnD] DROP tree: target not a folder (hover=%s)", hover)
                 return
 
+            # Snapshot folder sources BEFORE the FS move. After shutil.move the old
+            # paths are gone, so os.path.isdir(src) would wrongly skip tree surgery
+            # and leave a ghost node at the original location.
+            folder_sources = list(dirs)
+            src_parents = {
+                os.path.dirname(s)
+                for s in sources
+                if os.path.dirname(s)
+            }
+
             def _after_tree_op():
-                if is_move:
-                    for src in sources:
-                        self.update_tree_view(src, dest_folder)
-                        self.refresh_folder_icons_subtree(os.path.dirname(src))
-                    parent = os.path.dirname(sources[0])
-                    if not parent or not os.path.isdir(parent):
-                        parent = dest_folder
-                    self.refresh_folder_icons_subtree(dest_folder)
-                    self.display_thumbnails(
-                        parent, force_refresh=True, preserve_scroll=True
-                    )
-                else:
-                    self.refresh_folder_icons_subtree(dest_folder)
-                    # refresh_tree_view selects dest_folder in the tree; if the tree has focus,
-                    # <<TreeviewSelect>> would load that folder — stay on current_directory instead.
-                    self._suppress_tree_select_navigation = True
-                    try:
+                # Always stay on the open folder. Navigating to dirname(sources[0]) after
+                # a move jumped into the Explorer source when dropping external files.
+                view = getattr(self, "current_directory", None)
+                if not view or not os.path.isdir(view):
+                    view = dest_folder
+
+                # Only folder moves need tree-node surgery; file drops are not tree nodes
+                # (update_tree_view(file) would walk the whole open tree looking for a jpg).
+                self._suppress_tree_select_navigation = True
+                try:
+                    if is_move:
+                        for src in folder_sources:
+                            self.update_tree_view(src, dest_folder)
+                        for src_parent in src_parents:
+                            if src_parent and os.path.isdir(src_parent):
+                                self.refresh_folder_icon(src_parent)
+                    else:
                         self.refresh_tree_view(dest_folder)
+                    self.refresh_folder_icon(dest_folder)
+                    if folder_sources or not is_move:
                         self.select_current_folder_in_tree()
-                        self.display_thumbnails(
-                            self.current_directory,
-                            force_refresh=True,
-                            preserve_scroll=True,
+                    self.display_thumbnails(
+                        view,
+                        force_refresh=True,
+                        preserve_scroll=True,
+                    )
+                finally:
+                    self.after_idle(
+                        lambda: setattr(
+                            self, "_suppress_tree_select_navigation", False
                         )
-                    finally:
-                        self.after_idle(
-                            lambda: setattr(
-                                self, "_suppress_tree_select_navigation", False
-                            )
-                        )
+                    )
 
             self._dnd_confirm_and_execute(
                 sources=sources,
@@ -373,6 +385,10 @@ class VtpDndMixin:
             return
 
         def _deferred():
+            try:
+                self._dnd_release_preview_handles()
+            except Exception:
+                logging.debug("[DnD] preview release before op failed", exc_info=True)
             if getattr(self, "dnd_confirm_dialogs", False):
                 self._dnd_show_dialog_and_run(sources, dest, is_move, on_success)
             else:
@@ -625,6 +641,35 @@ class VtpDndMixin:
             return [source_folder] if source_folder else []
         return self._sync_directory_parent_cache_status(src, dst, is_move)
 
+    def _dnd_release_preview_handles(self):
+        """Cancel pending preview/VLC before moving files (same idea as delete prep)."""
+        for attr in ("_preview_timer", "_click_timer"):
+            job = getattr(self, attr, None)
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+        ip = getattr(self, "info_panel", None)
+        if ip is not None and hasattr(ip, "cancel_pending_preview"):
+            try:
+                ip.cancel_pending_preview()
+            except Exception:
+                pass
+        if hasattr(self, "stop_preview"):
+            try:
+                self.stop_preview()
+            except Exception:
+                pass
+        if ip is not None and hasattr(ip, "preview_image_tk"):
+            ip.preview_image_tk = None
+        try:
+            import gc
+            gc.collect()
+        except Exception:
+            pass
+
     def _dnd_execute_copy_move_thread(
         self,
         sources: list[str],
@@ -721,10 +766,27 @@ class VtpDndMixin:
                         continue
 
                 is_dir = os.path.isdir(src)
-                if is_dir:
-                    shutil.move(src, dst) if is_move else shutil.copytree(src, dst)
-                else:
-                    shutil.move(src, dst) if is_move else shutil.copy2(src, dst)
+                logging.info("[DnD] %s start: %s -> %s", action, src, dst)
+                last_err = None
+                for attempt in range(8):
+                    try:
+                        if is_dir:
+                            shutil.move(src, dst) if is_move else shutil.copytree(src, dst)
+                        else:
+                            shutil.move(src, dst) if is_move else shutil.copy2(src, dst)
+                        last_err = None
+                        break
+                    except PermissionError as e:
+                        last_err = e
+                        logging.warning(
+                            "[DnD] %s locked (attempt %s/8): %s",
+                            action,
+                            attempt + 1,
+                            src,
+                        )
+                        time.sleep(0.05 * (attempt + 1))
+                if last_err is not None:
+                    raise last_err
                 changed_folders = self._dnd_sync_db_cache(
                     src, dst, is_dir=is_dir, is_move=is_move
                 )
@@ -736,6 +798,10 @@ class VtpDndMixin:
                 logging.error(f"[DnD] error during {action}: {src} -> {dst}: {e}")
 
         def _finish():
+            try:
+                self._dnd_release_preview_handles()
+            except Exception:
+                pass
             if hasattr(self, "resume_directory_watcher"):
                 self.resume_directory_watcher(restart=True)
             if ok:
@@ -826,6 +892,10 @@ class VtpDndMixin:
         title = f"{'Move' if is_move else 'Copy'} - confirmation"
 
         def _confirm_run():
+            try:
+                self._dnd_release_preview_handles()
+            except Exception:
+                pass
             threading.Thread(
                 target=lambda: self._dnd_execute_copy_move_thread(
                     sources, dest, is_move, on_success

@@ -281,7 +281,9 @@ class VideoThumbnailPlayer(
         # Anti-accidental drag: tree DnD only starts after the cursor actually travels this far
         # from the press point. A click (or a small hand shake on a folder / expander) never
         # crosses it, while an intentional drag does. The timeout caps the busy-poll window.
-        self._dnd_drag_min_distance_px_tree = 12
+        # 24px is deliberately above the OS ~4px OLE threshold and the previous 12px value —
+        # tree clicks (esp. near expanders) were still starting drags too often.
+        self._dnd_drag_min_distance_px_tree = 24
         self._dnd_drag_distance_timeout_ms = 800
         self._dnd_press_ts = 0.0
         self._dnd_press_kind = None   # "thumb" | "tree" | None
@@ -469,6 +471,7 @@ class VideoThumbnailPlayer(
         
         self.status_bar.set_stop_callback(self.stop_scan)
         self.selected_rating = 0
+        self.sort_reverse = False
         self.update_thread = threading.Thread(target=self._update_status)
         self.update_thread.daemon = True
         self.update_thread.start()
@@ -1105,7 +1108,15 @@ class VideoThumbnailPlayer(
             self.tree.delete(source_node)  # Remove the item from its original location
             logging.info(f"Removed source node: {source_path}")
         else:
-            logging.info(f"WARNING: Source node not found for {source_path}")
+            # Node not findable (closed ancestors / stale cache): re-scan the parent so
+            # any open ghost row for the moved folder is pruned from disk state.
+            parent = os.path.dirname(source_path) if source_path else None
+            parent_node = self.find_node_by_path(parent) if parent else None
+            if parent_node and parent and os.path.isdir(parent):
+                self.process_directory(parent_node, parent)
+                logging.info(f"Pruned source parent after miss: {parent}")
+            else:
+                logging.info(f"WARNING: Source node not found for {source_path}")
 
         # Refresh the target node
         target_node = self.find_node_by_path(target_path)
@@ -1130,20 +1141,32 @@ class VideoThumbnailPlayer(
         def confirm_create(folder_name):
             if not folder_name.strip():
                 self.show_error_message(title="Error", message="Folder name cannot be empty!")
-                return
+                return False
 
             new_folder_path = os.path.join(parent_path, folder_name.strip())
             if os.path.exists(new_folder_path):
                 self.show_error_message(title="Error", message="Folder already exists!")
-                return
+                return False
 
             try:
                 os.mkdir(new_folder_path)
                 logging.info(f"Created new folder: {new_folder_path}")
+                # display_thumbnails → clear_thumbnails wipes selection; restore after reload
+                saved_paths = [
+                    item[0]
+                    for item in (getattr(self, "selected_thumbnails", None) or [])
+                    if isinstance(item, (list, tuple)) and item
+                ]
                 self.update_tree_view(new_folder_path, parent_path)
+                if saved_paths:
+                    self._pending_select_paths = list(saved_paths)
                 self.display_thumbnails(self.current_directory, preserve_scroll=True)
+                if saved_paths:
+                    self.after(200, lambda: self._try_restore_pending_selection(retries=20))
             except Exception as e:
                 self.show_error_message(title="Error", message=f"Could not create folder: {e}")
+                return False
+            return True
 
         self.universal_dialog(
             title="Create New Folder",
@@ -1159,15 +1182,15 @@ class VideoThumbnailPlayer(
             new_name = new_name.strip()
             if not new_name:
                 self.show_error_message(title="Error", message="Name cannot be empty.")
-                return
+                return False
             if not old_path or not os.path.exists(old_path):
                 self.show_error_message(
                     title="Rename failed",
                     message=f"The original item no longer exists:\n{old_path}",
                 )
-                return
+                return False
             if new_name == os.path.basename(old_path):
-                return
+                return True
 
             new_path = os.path.join(os.path.dirname(old_path), new_name)
             if os.path.exists(new_path):
@@ -1175,7 +1198,7 @@ class VideoThumbnailPlayer(
                     title="Error",
                     message=f"An item named '{new_name}' already exists.",
                 )
-                return
+                return False
 
             try:
                 os.rename(old_path, new_path)
@@ -1221,6 +1244,8 @@ class VideoThumbnailPlayer(
             except Exception as e:
                 logging.error("Rename failed: %s -> %s: %s", old_path, new_path, e)
                 self.show_error_message(title="Rename failed", message=str(e))
+                return False
+            return True
 
         self.universal_dialog(
             title="Rename",
@@ -1261,7 +1286,23 @@ class VideoThumbnailPlayer(
             default_input (str): The default value for the input field if enabled.
             modal (bool): Whether to grab all app input while the dialog is open.
         """
+        # Avoid stacking multiple universal dialogs (e.g. repeated DnD warnings).
+        existing = getattr(self, "_active_universal_dialog", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.lift()
+                    existing.focus_force()
+                    logging.debug(
+                        "universal_dialog: reused open dialog instead of creating '%s'",
+                        title,
+                    )
+                    return
+            except tk.TclError:
+                self._active_universal_dialog = None
+
         dialog_window = ctk.CTkToplevel(self)
+        self._active_universal_dialog = dialog_window
         dialog_window.title(title)
         _dw, _dh = (600, 220) if input_field else (400, 200)
         self._center_toplevel_window(dialog_window, _dw, _dh)
@@ -1275,6 +1316,14 @@ class VideoThumbnailPlayer(
         dialog_window.attributes('-topmost', True)
         if modal:
             dialog_window.grab_set()
+
+        def _clear_active_dialog(event):
+            if event.widget is not dialog_window:
+                return
+            if getattr(self, "_active_universal_dialog", None) is dialog_window:
+                self._active_universal_dialog = None
+
+        dialog_window.bind("<Destroy>", _clear_active_dialog, add="+")
 
         _msg_wrap = 540 if input_field else 350
         label = ctk.CTkLabel(
@@ -1296,11 +1345,16 @@ class VideoThumbnailPlayer(
             if confirm_in_progress:
                 return "break"
             confirm_in_progress = True
+            result = True
             if confirm_callback:
                 if input_field:
-                    confirm_callback(input_var.get())  # Pass the input value
+                    result = confirm_callback(input_var.get())  # Pass the input value
                 else:
-                    confirm_callback()
+                    result = confirm_callback()
+            # False = validation failed; keep dialog open so the user can fix input.
+            if result is False:
+                confirm_in_progress = False
+                return "break"
             if dialog_window.winfo_exists():
                 dialog_window.destroy()
             return "break"
@@ -3899,16 +3953,13 @@ class VideoThumbnailPlayer(
                     values=(full_path, path_hash),
                 )
 
-                # Add dummy child only when REAL subfolders exist.
-                try:
-                    with os.scandir(full_path) as child_scan:
-                        has_subdirs = any(
-                            c.is_dir(follow_symlinks=False) for c in child_scan
-                        )
-                    if has_subdirs and not self.tree.get_children(node):
-                        self.tree.insert(node, 'end', text='', values=('dummy',))
-                except Exception as e:
-                    logging.warning(f"Could not check children for: {full_path} → {e}")
+                # Always insert a dummy so the expand chevron appears. Do NOT
+                # scandir each child here — folders full of media (no / late
+                # subdirs) freeze the UI thread for seconds (see TreeProcess SLOW).
+                # Opening the node runs process_directory, which removes the dummy
+                # and fills real children (or leaves the folder empty).
+                if not self.tree.get_children(node):
+                    self.tree.insert(node, 'end', text='', values=('dummy',))
 
             elapsed = time.perf_counter() - started
             if elapsed >= 0.20:
@@ -4102,6 +4153,9 @@ class VideoThumbnailPlayer(
             except Exception as e:
                 # Correctly log any unexpected errors using an f-string.
                 logging.warning(f"An error occurred while destroying the image preview: {e}")
+        # Drop PhotoImage / PIL refs so Windows can move/delete the previewed file.
+        if hasattr(self.info_panel, "preview_image_tk"):
+            self.info_panel.preview_image_tk = None
 
 
     def _mark_menu_interaction(self):
@@ -4173,39 +4227,52 @@ class VideoThumbnailPlayer(
         if time.time() - self._last_menu_interaction_time < 0.2:
             return
 
+        # After a real DnD drag, ButtonRelease still fires — must NOT schedule preview
+        # of a path that may already have been moved (native crash / stale PIL load).
+        if getattr(self, "_dnd_drag_happened", False):
+            for attr in ("_preview_timer", "_click_timer"):
+                job = getattr(self, attr, None)
+                if job is not None:
+                    try:
+                        self.after_cancel(job)
+                    except (tk.TclError, ValueError):
+                        pass
+                    setattr(self, attr, None)
+            self._dnd_drag_happened = False
+            return
+
         # After Ctrl+A (etc.), ButtonPress skipped select on an already-selected cell so DnD can keep
         # multi-selection; on release without a real drag, collapse to the clicked thumb.
         # Use modifiers from Button-1 press (on_thumb_click / select_range), not from release:
         # Windows often clears Ctrl/Shift in the ButtonRelease-1 state after Ctrl+click, which
         # wrongly triggered collapse and left only one item selected before Delete.
-        if not getattr(self, "_dnd_drag_happened", False):
-            if len(self.selected_thumbnails) > 1:
-                press_shift = getattr(self, "_thumb_last_press_shift", False)
-                press_ctrl = getattr(self, "_thumb_last_press_ctrl", False)
-                if not press_shift and not press_ctrl:
-                    try:
-                        nfp = os.path.normcase(os.path.normpath(file_path))
-                        idx = next(
-                            i
-                            for i, vf in enumerate(self.video_files)
-                            if os.path.normcase(os.path.normpath(vf.get("path", ""))) == nfp
+        if len(self.selected_thumbnails) > 1:
+            press_shift = getattr(self, "_thumb_last_press_shift", False)
+            press_ctrl = getattr(self, "_thumb_last_press_ctrl", False)
+            if not press_shift and not press_ctrl:
+                try:
+                    nfp = os.path.normcase(os.path.normpath(file_path))
+                    idx = next(
+                        i
+                        for i, vf in enumerate(self.video_files)
+                        if os.path.normcase(os.path.normpath(vf.get("path", ""))) == nfp
+                    )
+                except StopIteration:
+                    idx = None
+                if idx is not None:
+                    sel_idx = {
+                        t[2]
+                        for t in self.selected_thumbnails
+                        if isinstance(t, (list, tuple)) and len(t) > 2
+                    }
+                    if idx in sel_idx:
+                        self.select_thumbnail(
+                            idx,
+                            shift=False,
+                            ctrl=False,
+                            trigger_preview=False,
                         )
-                    except StopIteration:
-                        idx = None
-                    if idx is not None:
-                        sel_idx = {
-                            t[2]
-                            for t in self.selected_thumbnails
-                            if isinstance(t, (list, tuple)) and len(t) > 2
-                        }
-                        if idx in sel_idx:
-                            self.select_thumbnail(
-                                idx,
-                                shift=False,
-                                ctrl=False,
-                                trigger_preview=False,
-                            )
-        
+
         # Folder navigation is Double-click → display_thumbnails. Do not change
         # current_directory or expand the tree on single-click (freezes on huge dirs).
         is_folder = False
@@ -5124,12 +5191,18 @@ class VideoThumbnailPlayer(
         self.display_thumbnails(path)
             
    
-    def sort_thumbnails(self, files_list, sort_option=None, filter_option=None):
-        """sort_option, filter_option: pass when called from worker thread (avoids Tkinter from non-main thread)."""
+    def sort_thumbnails(self, files_list, sort_option=None, filter_option=None, sort_reverse=None):
+        """sort_option, filter_option, sort_reverse: pass when called from worker thread (avoids Tkinter from non-main thread)."""
         if sort_option is None:
             sort_option = self.sort_option.get()
         if filter_option is None:
             filter_option = self.filter_option.get()
+        if sort_reverse is None:
+            sort_reverse = bool(getattr(self, "sort_reverse", False))
+
+        # Reverse is a toggle in the dropdown, never a sort key.
+        if sort_option and ("Reverse order" in str(sort_option) or str(sort_option).startswith("↕")):
+            sort_option = "Filename"
 
         def _dimensions_area(path: str) -> int:
             # Prefer DB (instant) — opening every Flux PNG during sort freezes folder loads.
@@ -5149,6 +5222,29 @@ class VideoThumbnailPlayer(
             except Exception:
                 pass
             return 0
+
+        rating_by_path: dict[str, int] = {}
+        if sort_option == "Rating":
+            paths = [f["path"] for f in files_list if not f.get("is_folder")]
+            try:
+                bulk = self.database.get_entries_bulk(paths) if paths else {}
+            except Exception:
+                bulk = {}
+            for path in paths:
+                try:
+                    norm = self.database.normalize_path(path)
+                except Exception:
+                    norm = path
+                rec = bulk.get(norm) if bulk else None
+                if rec is None:
+                    try:
+                        rec = self.database.get_entry(path)
+                    except Exception:
+                        rec = None
+                try:
+                    rating_by_path[path] = int((rec or {}).get("rating") or 0)
+                except (TypeError, ValueError):
+                    rating_by_path[path] = 0
 
         def sort_key(f):
             if f['is_folder']:
@@ -5172,6 +5268,9 @@ class VideoThumbnailPlayer(
                         return (1, _dimensions_area(path))
                     elif sort_option == "File Type":
                         return (1, os.path.splitext(path)[-1].lower())
+                    elif sort_option == "Rating":
+                        # Highest rating first; unrated (0) last. Tie-break by name.
+                        return (1, -rating_by_path.get(path, 0), f['name'].lower())
                     else:
                         return (1, f['name'].lower())
                 except Exception as e:
@@ -5191,7 +5290,13 @@ class VideoThumbnailPlayer(
                 if (record := self.database.get_entry(f['path'])) and record.get('rating', 0) == self.selected_rating
             ]
 
-        return sorted(files_list, key=sort_key)
+        sorted_list = sorted(files_list, key=sort_key)
+        if sort_reverse:
+            folders = [f for f in sorted_list if f.get("is_folder")]
+            files = [f for f in sorted_list if not f.get("is_folder")]
+            files.reverse()
+            return folders + files
+        return sorted_list
 
  
     def get_video_dimensions(self, file_path):

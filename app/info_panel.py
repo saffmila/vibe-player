@@ -513,6 +513,7 @@ class InfoPanelFrame(ctk.CTkFrame):
             except Exception as e:
                 logging.warning(f"InfoPanel: Error destroying previous canvas: {e}")
         self.preview_canvas = None
+        self.preview_image_tk = None
 
         if not image_path:
             return

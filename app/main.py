@@ -69,7 +69,20 @@ if IS_HEADLESS:
     except Exception:
         pass
 else:
-    faulthandler_output_file = original_stderr
+    # Console build: keep stderr for interactive debugging, also mirror native
+    # crash dumps into app.log so hard AVs leave a footprint after restart.
+    try:
+        log_file_handle = open(log_path, "a", encoding="utf-8")
+        faulthandler_output_file = log_file_handle
+    except Exception:
+        faulthandler_output_file = original_stderr
+        log_file_handle = None
+    if faulthandler_output_file is not original_stderr:
+        try:
+            # Dual-enable is not supported — prefer log file for post-mortem.
+            logging.info("Faulthandler will write native crash dumps to %s", log_path)
+        except Exception:
+            pass
 
 # --- Step 4: Enable faulthandler with correct output target ---
 if faulthandler_output_file:
@@ -77,7 +90,7 @@ if faulthandler_output_file:
         faulthandler.enable(file=faulthandler_output_file)
         logging.info(
             "Faulthandler enabled successfully (writing to: %s).",
-            "log file" if IS_HEADLESS else "original console",
+            "log file" if faulthandler_output_file is not original_stderr else "original console",
         )
     except Exception as e:
         logging.error("Could not enable faulthandler: %s", e)

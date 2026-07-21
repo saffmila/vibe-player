@@ -78,6 +78,8 @@ class ImageViewerLegacy:
 
         # Proměnná pro časovač HQ renderu
         self._hq_timer = None
+        self._overlay_after_id = None
+        self._zoom_timer = None
         
         # --- NOVÉ PROMĚNNÉ ---
         self.bg_colors = ['black', '#303030', 'white']
@@ -154,26 +156,35 @@ class ImageViewerLegacy:
         self.update_scrollbars()
         self._set_image_scrollregion_only()
 
-        #Na konci initu vynutíme první vykreslení HUDu
-        self.image_window.after(100, self._refresh_overlays)
-
         # Same flags as Pyglet viewer — used by main.py fast-open and delete flow
         self._running = True
 
+        #Na konci initu vynutíme první vykreslení HUDu
+        self._overlay_after_id = self.image_window.after(100, self._refresh_overlays)
+
         def _on_toplevel_close():
-            self._running = False
-            try:
-                self.image_window.destroy()
-            except tk.TclError:
-                pass
+            self._do_close()
 
         self.image_window.protocol("WM_DELETE_WINDOW", _on_toplevel_close)
+
+    def _cancel_pending_image_timers(self):
+        for attr in ("_hq_timer", "_overlay_after_id", "_zoom_timer"):
+            job = getattr(self, attr, None)
+            if job is None:
+                continue
+            try:
+                self.image_window.after_cancel(job)
+            except Exception:
+                pass
+            setattr(self, attr, None)
 
     def _do_close(self):
         """Match Pyglet viewer API for controller / fast-open code paths."""
         self._running = False
+        self._cancel_pending_image_timers()
         try:
-            self.image_window.destroy()
+            if self.image_window.winfo_exists():
+                self.image_window.destroy()
         except tk.TclError:
             pass
 
@@ -187,6 +198,13 @@ class ImageViewerLegacy:
             self.controller.confirm_delete_item(paths=[self.image_path])
 
     def center_image(self):
+        if not getattr(self, "_running", False):
+            return
+        try:
+            if not self.image_window.winfo_exists():
+                return
+        except tk.TclError:
+            return
         self.canvas.update_idletasks()  # důležité, aby Canvas znal správné rozměry!
 
         canvas_width = self.canvas.winfo_width()
@@ -213,6 +231,13 @@ class ImageViewerLegacy:
         self.canvas.coords(self.canvas_image, x, y)
 
     def _refresh_overlays(self):
+        if not getattr(self, "_running", False):
+            return
+        try:
+            if not self.image_window.winfo_exists():
+                return
+        except tk.TclError:
+            return
         self.draw_info_hud()
         self.draw_minimap()
         self.draw_zoom_overlay()
@@ -474,9 +499,20 @@ class ImageViewerLegacy:
         high_quality=False -> Použije rychlý BILINEAR (pro zoomování).
         high_quality=True  -> Použije pomalý LANCZOS (pro finální zobrazení).
         """
+        if not getattr(self, "_running", False):
+            return
+        try:
+            if not self.image_window.winfo_exists():
+                return
+        except tk.TclError:
+            return
+
         # 1. Zrušíme jakýkoliv čekající HQ render (protože uživatel právě změnil stav)
         if self._hq_timer:
-            self.image_window.after_cancel(self._hq_timer)
+            try:
+                self.image_window.after_cancel(self._hq_timer)
+            except Exception:
+                pass
             self._hq_timer = None
 
         width = int(self.original_image.width * self.zoom_factor)
@@ -508,7 +544,7 @@ class ImageViewerLegacy:
         # 4. Naplánování HQ renderu (Debounce)
         # Pokud jsme teď jeli v rychlém režimu, řekneme: 
         # "Za 150ms to překresli do hezka, pokud do té doby uživatel nic neudělá."
-        if not high_quality:
+        if not high_quality and getattr(self, "_running", False):
             self._hq_timer = self.image_window.after(150, self._render_hq)
             
         # --- ZDE MUSÍ BÝT TOTO: ---
@@ -516,6 +552,9 @@ class ImageViewerLegacy:
 
     def _render_hq(self):
         """Voláno časovačem, když je klid."""
+        self._hq_timer = None
+        if not getattr(self, "_running", False):
+            return
         logging.info("[HQ Render] Refining image quality...")
         self.update_image(high_quality=True)
 

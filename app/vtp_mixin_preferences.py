@@ -286,16 +286,24 @@ class VtpPreferencesMixin:
                         self.stop_directory_watcher()
                     except Exception:
                         pass
-                _SORT_CHOICES = ("Filename", "Size", "Date", "Dimensions", "File Type")
+                _SORT_KEYS = ("Filename", "Size", "Date", "Dimensions", "File Type", "Rating")
                 sort_val = settings.get("sort_option", "Filename")
-                if sort_val not in _SORT_CHOICES:
+                if sort_val not in _SORT_KEYS:
                     sort_val = "Filename"
                 self._pending_sort_option = sort_val
+                self.sort_reverse = bool(settings.get("sort_reverse", False))
+                self._pending_sort_reverse = self.sort_reverse
                 if getattr(self, "sort_option", None) is not None:
                     self.sort_option.set(sort_val)
                     if getattr(self, "sort_dropdown", None) is not None:
                         try:
                             self.sort_dropdown.set(sort_val)
+                        except Exception:
+                            pass
+                    sync = getattr(self, "_sync_sort_dropdown_values", None)
+                    if callable(sync):
+                        try:
+                            sync()
                         except Exception:
                             pass
                 self.image_viewer_use_pyglet = bool(
@@ -365,6 +373,8 @@ class VtpPreferencesMixin:
             self.delete_to_trash = True
             self.auto_refresh_folder = False
             self._pending_sort_option = "Filename"
+            self.sort_reverse = False
+            self._pending_sort_reverse = False
             if getattr(self, "sort_option", None) is not None:
                 self.sort_option.set("Filename")
             self.image_viewer_use_pyglet = False

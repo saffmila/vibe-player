@@ -422,11 +422,11 @@ class VtpGridMixin:
             logging.error(f"Unexpected error processing entry '{entry_or_path}': {e}")
             return None
 
-    def _prepare_thumbnail_data(self, dir_path, sort_option=None, filter_option=None, render_id=None):
+    def _prepare_thumbnail_data(self, dir_path, sort_option=None, filter_option=None, render_id=None, sort_reverse=None):
         """
         Loads, processes, and sorts the list of files and folders for the given directory path.
         Handles virtual libraries and filesystem errors.
-        sort_option, filter_option: pass when called from worker thread (Tkinter vars not thread-safe).
+        sort_option, filter_option, sort_reverse: pass when called from worker thread (Tkinter vars not thread-safe).
         render_id: if provided, abort early when a newer display_thumbnails() has started
         (avoids blocking the 2-thread DirLoader pool with obsolete folder loads).
         Returns the sorted list of item dictionaries, or None if an error occurs, empty, or aborted.
@@ -434,6 +434,9 @@ class VtpGridMixin:
         """
         def _aborted():
             return render_id is not None and self._render_id != render_id
+
+        if sort_reverse is None:
+            sort_reverse = bool(getattr(self, "sort_reverse", False))
 
         video_files_list = []  # Use a local list to gather items
         t_scan0 = time.perf_counter()
@@ -529,16 +532,17 @@ class VtpGridMixin:
             return []
 
         logging.info(
-            "Sorting %d collected items... (option=%s, scan=%.3fs, rid=%s)",
+            "Sorting %d collected items... (option=%s, reverse=%s, scan=%.3fs, rid=%s)",
             len(video_files_list),
             sort_option,
+            sort_reverse,
             scan_s,
             render_id,
         )
         t_sort0 = time.perf_counter()
         try:
             sorted_items = self.sort_thumbnails(
-                video_files_list, sort_option, filter_option
+                video_files_list, sort_option, filter_option, sort_reverse=sort_reverse
             )
         except Exception as e:
             logging.error(
@@ -910,6 +914,7 @@ class VtpGridMixin:
         # 3. Read Tk variables on main thread (not safe from worker)
         sort_option = self.sort_option.get()
         filter_option = self.filter_option.get()
+        sort_reverse = bool(getattr(self, "sort_reverse", False))
 
         # 4. Heavy work (listdir, sort) in dedicated I/O pool.
         # Prevent starvation when thumbnail workers are busy generating images.
@@ -921,12 +926,13 @@ class VtpGridMixin:
             my_render_id,
             sort_option,
             filter_option,
+            sort_reverse,
         )
 
 
 
         
-    def _worker_prepare_and_display(self, dir_path, force_refresh, thumbnail_time, render_id, sort_option, filter_option):
+    def _worker_prepare_and_display(self, dir_path, force_refresh, thumbnail_time, render_id, sort_option, filter_option, sort_reverse=False):
         try:
             # Abort immediately if a newer load has already been requested
             if self._render_id != render_id:
@@ -937,7 +943,7 @@ class VtpGridMixin:
             # Abort checks inside prepare free the DirLoader pool when the user
             # clicks another folder before the previous scan/sort finishes.
             sorted_file_list = self._prepare_thumbnail_data(
-                dir_path, sort_option, filter_option, render_id=render_id
+                dir_path, sort_option, filter_option, render_id=render_id, sort_reverse=sort_reverse
             )
 
             # Check again after the potentially slow I/O
@@ -3515,6 +3521,55 @@ class VtpGridMixin:
             pass
         self._pending_select_path = None
         logging.info("[Merge] Selected merged file in grid: %s", path)
+
+    def _try_restore_pending_selection(self, retries=20):
+        """Restore multi-selection by path after an async grid reload (e.g. new folder)."""
+        paths = getattr(self, "_pending_select_paths", None)
+        if not paths:
+            return
+        if getattr(self, "_is_loading", False):
+            if retries > 0:
+                self.after(150, lambda: self._try_restore_pending_selection(retries - 1))
+            return
+
+        new_selection = []
+        missing = 0
+        for path in paths:
+            idx = self._index_for_grid_path(path)
+            if idx is None:
+                missing += 1
+                continue
+            label_info = self._thumbnail_label_info_for_path(path, idx)
+            if not label_info:
+                label_info = {"index": idx, "canvas": None, "path": path}
+            new_selection.append((path, label_info, idx))
+
+        if not new_selection:
+            if retries > 0 and missing:
+                self.after(150, lambda: self._try_restore_pending_selection(retries - 1))
+            else:
+                self._pending_select_paths = None
+            return
+
+        self.selected_thumbnails = new_selection
+        self.selected_thumbnail_index = new_selection[-1][2]
+        self.selected_file_path = new_selection[-1][0]
+        self._prev_selected_indices = set()
+        try:
+            self.update_thumbnail_selection()
+        except Exception:
+            logging.debug("restore selection: update_thumbnail_selection failed", exc_info=True)
+        if getattr(self, "_vg_active", False):
+            try:
+                self._vg_reapply_selection()
+            except Exception:
+                logging.debug("restore selection: _vg_reapply_selection failed", exc_info=True)
+        try:
+            self.update_status_bar()
+        except Exception:
+            pass
+        self._pending_select_paths = None
+        logging.info("Restored thumbnail selection: %s item(s)", len(new_selection))
 
     def play_video_selection(self, file_path):
             """
