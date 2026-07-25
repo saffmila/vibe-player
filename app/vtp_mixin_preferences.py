@@ -333,6 +333,9 @@ class VtpPreferencesMixin:
                 self.image_viewer_use_pyglet = bool(
                     settings.get("image_viewer_use_pyglet", False)
                 )
+                self.image_viewer_open_fullscreen = bool(
+                    settings.get("image_viewer_open_fullscreen", True)
+                )
                 # Splitter positions (fractions 0-1)
                 self._saved_main_sash_fraction = settings.get("splitter_main_fraction")
                 self._saved_left_sash_fraction = settings.get("splitter_left_fraction")
@@ -402,6 +405,7 @@ class VtpPreferencesMixin:
             if getattr(self, "sort_option", None) is not None:
                 self.sort_option.set("Filename")
             self.image_viewer_use_pyglet = False
+            self.image_viewer_open_fullscreen = True
             #load audio device only it wasnt loaded before
             if "audio_device" in settings:
                     self.audio_device_var.set(settings["audio_device"])

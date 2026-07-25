@@ -2565,6 +2565,43 @@ class VtpGridMixin:
             self, image_path, image_name, use_pyglet
         )
 
+    def open_image_viewer_edit(self, image_path, action: str):
+        """
+        Open the image viewer and start an edit action.
+
+        ``action``: ``"crop"`` | ``"resize"``.
+        Crop uses the Canvas viewer (inline HUD is Legacy-only).
+        """
+        image_name = os.path.basename(image_path)
+        if hasattr(self, "current_image_window") and self.current_image_window:
+            try:
+                self.current_image_window.image_window.destroy()
+            except Exception:
+                pass
+
+        # Crop overlay exists only on ImageViewerLegacy.
+        use_gpu = bool(getattr(self, "image_viewer_use_pyglet", False)) and action != "crop"
+        self.current_image_window = create_image_viewer(
+            self, image_path, image_name, use_gpu
+        )
+
+        delay_ms = 150 if getattr(self, "image_viewer_open_fullscreen", True) else 50
+
+        def _start_edit():
+            viewer = getattr(self, "current_image_window", None)
+            if viewer is None:
+                return
+            if action == "crop":
+                enter = getattr(viewer, "enter_crop_mode", None)
+                if callable(enter):
+                    enter()
+                return
+            if action == "resize":
+                open_dlg = getattr(viewer, "open_resize_dialog", None)
+                if callable(open_dlg):
+                    open_dlg()
+
+        self.after(delay_ms, _start_edit)
 
     def setup_icons(self):
         """
@@ -3286,6 +3323,24 @@ class VtpGridMixin:
             menu.add_command(label="▶ Play Video", command=lambda:  self.play_video_selection(file_path) )   #self.open_video_player(file_path, video_name)
         elif (mimetype and mimetype.startswith("image")) or lower_path.endswith(IMAGE_FORMATS):
             menu.add_command(label="🖼 Show Image", command=lambda: self.open_image_viewer(file_path, os.path.basename(file_path)))
+            menu.add_separator()
+            # Image edit tools — open viewer then enter crop / resize.
+            _crop_acc = menu_accel(_hk, "image_crop")
+            _crop_opts = {
+                "label": "Crop…",
+                "command": lambda fp=file_path: self.open_image_viewer_edit(fp, "crop"),
+            }
+            if _crop_acc:
+                _crop_opts["accelerator"] = _crop_acc
+            menu.add_command(**_crop_opts)
+            _rs_acc = menu_accel(_hk, "image_resize")
+            _rs_opts = {
+                "label": "Resize Image…",
+                "command": lambda fp=file_path: self.open_image_viewer_edit(fp, "resize"),
+            }
+            if _rs_acc:
+                _rs_opts["accelerator"] = _rs_acc
+            menu.add_command(**_rs_opts)
 
         else:
             menu.add_command(label="Open", command=lambda: os.startfile(file_path))  # fallback

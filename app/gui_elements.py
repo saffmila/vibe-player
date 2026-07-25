@@ -2175,6 +2175,23 @@ def create_preferences_window(app):
         justify="left",
     ).pack(anchor="w", padx=10, pady=(2, 6))
 
+    image_viewer_fs_var = ctk.BooleanVar(
+        value=bool(getattr(app, "image_viewer_open_fullscreen", True))
+    )
+    ctk.CTkCheckBox(
+        image_viewer_frame,
+        text="Open images in fullscreen",
+        variable=image_viewer_fs_var,
+    ).pack(anchor="w", padx=10, pady=(4, 2))
+    ctk.CTkLabel(
+        image_viewer_frame,
+        text="When off, opens a window sized to the image (fits the screen).",
+        font=("Helvetica", 11),
+        text_color=("gray35", "gray65"),
+        wraplength=520,
+        justify="left",
+    ).pack(anchor="w", padx=10, pady=(2, 6))
+
     # === GENERAL OPTIONS ===
     general_options_frame = ctk.CTkFrame(general_section)
     general_options_frame.pack(fill="both", expand=True, padx=10, pady=10)
@@ -2331,6 +2348,7 @@ def create_preferences_window(app):
         if hasattr(app, "play_broken_videos_var"):
             app.play_broken_videos_var.set(app.play_broken_videos)
         app.image_viewer_use_pyglet = image_viewer_pyglet_var.get()
+        app.image_viewer_open_fullscreen = bool(image_viewer_fs_var.get())
         app.video_show_hud = hud_enabled_var.get()
         app.gpu_upscale = gpu_upscale_var.get()
         app.vlc_enable_postproc = vlc_postproc_var.get()
@@ -2467,6 +2485,9 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
         "sort_option": _sort_val,
         "sort_reverse": bool(getattr(app, "sort_reverse", False)),
         "image_viewer_use_pyglet": bool(getattr(app, "image_viewer_use_pyglet", False)),
+        "image_viewer_open_fullscreen": bool(
+            getattr(app, "image_viewer_open_fullscreen", True)
+        ),
     }
     # Save splitter positions (fractions 0-1) when panes are visible
     try:
@@ -2555,6 +2576,9 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
         app.stop_directory_watcher()
     app.image_viewer_use_pyglet = bool(
         preferences.get("image_viewer_use_pyglet", False)
+    )
+    app.image_viewer_open_fullscreen = bool(
+        preferences.get("image_viewer_open_fullscreen", True)
     )
     app.apply_preferences()
     logging.info(f"Preferences saved: {preferences}")

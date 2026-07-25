@@ -30,7 +30,10 @@ from gui_elements import (
     rating_pyglet_rgba,
     _current_file_rating,
 )
+from image_crop_hud import CropModeController
+from image_edit_guard import confirm_leave_image_edit
 from image_loader import load_pil_frames, load_pil_image
+from image_resize_dialog import open_resize_image_dialog
 from vtp_constants import IMAGE_FORMATS
 
 
@@ -84,12 +87,11 @@ class ImageViewerLegacy:
 
         self.canvas_image = self.canvas.create_image(0, 0, image=self.photo, anchor=tk.NW)
 
-        self.image_window.geometry(f"{self.original_image.width}x{self.original_image.height}")
-
         self.zoom_factor = 1.0
         # Uživatelsky zvolený režim zobrazení — při přechodu na další obrázek se znovu aplikuje,
         # dokud uživatel nezmění zoom (manual) nebo nezvolí jiný režim.
         self._view_fit_mode = "none"  # none | best_fit | fit_width | actual | manual
+        self._windowed_geometry = None  # restored when leaving fullscreen
 
         # Proměnná pro časovač HQ renderu
         self._hq_timer = None
@@ -104,6 +106,11 @@ class ImageViewerLegacy:
         self.zoom_text_id = None
         self.minimap_max_size = 150
         self.minimap_padding = 12
+
+        # Inline crop mode (bottom HUD + canvas overlay); inactive until enter_crop_mode().
+        self.crop = CropModeController(self)
+        self._resize_dialog = None  # open ResizeImageDialog instance, if any
+        self._image_dirty = False   # True after in-memory resize until save/reload
 
         # --- BINDINGS (Napojení na centrální hotkeys) ---
         # Funkce pro bezpečné získání klávesy z hlavního nastavení
@@ -130,18 +137,22 @@ class ImageViewerLegacy:
         self.canvas.bind("<Configure>", self.resize_canvas)
 
         # 2. Navigace (Z `hotkeys.py`)
-        self.image_window.bind(hk('image_next', '<Right>'), consume(lambda e: self.show_next_image()))
-        self.image_window.bind(hk('image_prev', '<Left>'), consume(lambda e: self.show_prev_image()))
-        self.image_window.bind(hk('close_window', '<Escape>'), consume(lambda e: self._do_close()))
-        self.image_window.bind(hk('image_delete', '<Delete>'), consume(self.delete_current_image))
+        self.image_window.bind(hk('image_next', '<Right>'), consume(self._hotkey_next_image))
+        self.image_window.bind(hk('image_prev', '<Left>'), consume(self._hotkey_prev_image))
+        # Escape: cancel crop when active, otherwise close the viewer.
+        self.image_window.bind(hk('close_window', '<Escape>'), consume(self._on_escape_key))
+        self.image_window.bind(hk('image_delete', '<Delete>'), consume(self._hotkey_delete))
+        # Enter confirms crop (default = overwrite with confirmation).
+        self.image_window.bind("<Return>", consume(self._on_return_key))
+        self.image_window.bind("<KP_Enter>", consume(self._on_return_key))
 
         # 3. Manipulace s obrázkem (Z `hotkeys.py`)
-        self.image_window.bind(hk('image_actual_size', 'a'), consume(lambda e: self.actual_size()))
-        self.image_window.bind(hk('image_toggle_bg', 'c'), consume(self.toggle_background))
-        self.image_window.bind(hk('image_toggle_info', 'i'), consume(self.toggle_info))
+        self.image_window.bind(hk('image_actual_size', 'a'), consume(lambda e: self._hotkey_unless_crop(self.actual_size)))
+        self.image_window.bind(hk('image_toggle_bg', 'c'), consume(lambda e: self._hotkey_unless_crop(self.toggle_background, e)))
+        self.image_window.bind(hk('image_toggle_info', 'i'), consume(lambda e: self._hotkey_unless_crop(self.toggle_info, e)))
         
-        self.image_window.bind(hk('image_fit_best', 'b'), consume(lambda e: self.best_fit()))
-        self.image_window.bind(hk('image_fit_width', 'w'), consume(lambda e: self.fit_width()))
+        self.image_window.bind(hk('image_fit_best', 'b'), consume(lambda e: self._hotkey_unless_crop(self.best_fit)))
+        self.image_window.bind(hk('image_fit_width', 'w'), consume(lambda e: self._hotkey_unless_crop(self.fit_width)))
         
         self.image_window.bind(hk('image_zoom_in', '+'), consume(self.zoom_in))
         self.image_window.bind(hk('image_zoom_out', '-'), consume(self.zoom_out))
@@ -149,13 +160,17 @@ class ImageViewerLegacy:
         self.image_window.bind("<Control-plus>", consume(self.zoom_in))
         self.image_window.bind("<Control-minus>", consume(self.zoom_out))
 
-        self.image_window.bind(hk('image_rotate_left', 'l'), consume(lambda e: self.rotate_left()))
-        self.image_window.bind(hk('image_rotate_right', 'r'), consume(lambda e: self.rotate_right()))
-        self.image_window.bind(hk('image_flip_h', 'h'), consume(lambda e: self.flip_horizontal()))
-        self.image_window.bind(hk('image_flip_v', 'v'), consume(lambda e: self.flip_vertical()))
+        self.image_window.bind(hk('image_rotate_left', 'l'), consume(lambda e: self._hotkey_unless_crop(self.rotate_left)))
+        self.image_window.bind(hk('image_rotate_right', 'r'), consume(lambda e: self._hotkey_unless_crop(self.rotate_right)))
+        self.image_window.bind(hk('image_flip_h', 'h'), consume(lambda e: self._hotkey_unless_crop(self.flip_horizontal)))
+        self.image_window.bind(hk('image_flip_v', 'v'), consume(lambda e: self._hotkey_unless_crop(self.flip_vertical)))
+        self.image_window.bind(hk('image_crop', 'x'), consume(self._hotkey_crop))
+        self.image_window.bind('X', consume(self._hotkey_crop))
+        self.image_window.bind(hk('image_resize', '<Control-r>'), consume(self._hotkey_resize))
+        self.image_window.bind('<Control-R>', consume(self._hotkey_resize))
         
-        self.image_window.bind(hk('image_copy', '<Control-c>'), consume(lambda e: self.copy_image_to_clipboard()))
-        self.image_window.bind(hk('image_save', '<Control-s>'), consume(lambda e: self.save_image_to_folder()))
+        self.image_window.bind(hk('image_copy', '<Control-c>'), consume(lambda e: self._hotkey_unless_crop(self.copy_image_to_clipboard)))
+        self.image_window.bind(hk('image_save', '<Control-s>'), consume(lambda e: self._hotkey_unless_crop(self.save_image_to_folder)))
         if callable(getattr(self.controller, "open_library", None)):
             self.image_window.bind("<Control-l>", consume(lambda e: self.controller.open_library()))
             self.image_window.bind("<Control-L>", consume(lambda e: self.controller.open_library()))
@@ -163,7 +178,7 @@ class ImageViewerLegacy:
         # 4. Fullscreen
         self.image_window.bind(hk('image_fullscreen', '<F11>'), consume(self.toggle_fullscreen))
         # Fallback pro "F" (běžné v prohlížečích) a Alt-Enter
-        self.image_window.bind("f", consume(self.toggle_fullscreen))
+        self.image_window.bind("f", consume(lambda e: self._hotkey_unless_crop(self.toggle_fullscreen, e)))
         self.image_window.bind("<Alt-Return>", consume(self.toggle_fullscreen))
 
         self.image_window.bind("<F10>", lambda e: self.debug_print_monitor())
@@ -175,6 +190,9 @@ class ImageViewerLegacy:
         self._running = True
         self._start_animation_if_needed()
 
+        open_fs = bool(getattr(self.controller, "image_viewer_open_fullscreen", True))
+        self._layout_initial_window(open_fullscreen=open_fs)
+
         #Na konci initu vynutíme první vykreslení HUDu
         self._overlay_after_id = self.image_window.after(100, self._refresh_overlays)
 
@@ -182,6 +200,93 @@ class ImageViewerLegacy:
             self._do_close()
 
         self.image_window.protocol("WM_DELETE_WINDOW", _on_toplevel_close)
+
+    def _monitor_at(self, x, y):
+        """Return the monitor containing screen point (x, y), or the primary."""
+        try:
+            monitors = get_monitors()
+        except Exception:
+            return None
+        for mon in monitors:
+            if mon.x <= x < mon.x + mon.width and mon.y <= y < mon.y + mon.height:
+                return mon
+        return monitors[0] if monitors else None
+
+    def _layout_initial_window(self, *, open_fullscreen: bool = False):
+        """
+        Size the window so the image fits the canvas without needless scrollbars.
+
+        Tk ``geometry(WxH)`` on Windows sizes the *outer* frame (incl. title bar),
+        so a naive image-sized geometry leaves the client smaller than the photo.
+        We measure chrome and grow the outer size accordingly; if the image is
+        larger than the work area, we best-fit and size the window to that.
+        """
+        try:
+            px = self.parent.winfo_rootx() + max(1, self.parent.winfo_width()) // 2
+            py = self.parent.winfo_rooty() + max(1, self.parent.winfo_height()) // 2
+        except Exception:
+            px, py = self.screen_width // 2, self.screen_height // 2
+
+        mon = self._monitor_at(px, py)
+        if mon is None:
+            mon_w, mon_h, mon_x, mon_y = self.screen_width, self.screen_height, 0, 0
+        else:
+            mon_w, mon_h, mon_x, mon_y = mon.width, mon.height, mon.x, mon.y
+
+        margin = 56
+        max_w = max(320, mon_w - margin * 2)
+        max_h = max(240, mon_h - margin * 2)
+
+        iw, ih = self.original_image.size
+        if iw < 1 or ih < 1:
+            return
+
+        if iw <= max_w and ih <= max_h:
+            self.zoom_factor = 1.0
+            self._view_fit_mode = "actual"
+            client_w, client_h = iw, ih
+        else:
+            scale = min(max_w / iw, max_h / ih)
+            self.zoom_factor = scale
+            self._view_fit_mode = "best_fit"
+            client_w = max(1, int(round(iw * scale)))
+            client_h = max(1, int(round(ih * scale)))
+
+        # First pass — place roughly, then correct for window chrome.
+        x = mon_x + max(0, (mon_w - client_w) // 2)
+        y = mon_y + max(0, (mon_h - client_h) // 2)
+        self.image_window.geometry(f"{client_w}x{client_h}+{x}+{y}")
+        self.image_window.update_idletasks()
+
+        self.hbar.grid_remove()
+        self.vbar.grid_remove()
+        self.image_window.update_idletasks()
+
+        cw = max(1, self.canvas.winfo_width())
+        ch = max(1, self.canvas.winfo_height())
+        ow = max(1, self.image_window.winfo_width())
+        oh = max(1, self.image_window.winfo_height())
+        chrome_w = max(0, ow - cw)
+        chrome_h = max(0, oh - ch)
+
+        outer_w = min(mon_w, client_w + chrome_w)
+        outer_h = min(mon_h, client_h + chrome_h)
+        x = mon_x + max(0, (mon_w - outer_w) // 2)
+        y = mon_y + max(0, (mon_h - outer_h) // 2)
+        geom = f"{outer_w}x{outer_h}+{x}+{y}"
+        self.image_window.geometry(geom)
+        self._windowed_geometry = geom
+
+        self.update_image(center=True, high_quality=True)
+
+        if open_fullscreen:
+            # Defer until the window is mapped so monitor detection is stable.
+            self.image_window.after(30, self._enter_fullscreen_initial)
+
+    def _enter_fullscreen_initial(self):
+        if not getattr(self, "_running", False) or self.is_fullscreen:
+            return
+        self.set_fullscreen(True)
 
     def _is_animated(self) -> bool:
         return len(getattr(self, "_anim_frames", []) or []) > 1
@@ -267,6 +372,8 @@ class ImageViewerLegacy:
 
     def _do_close(self):
         """Match Pyglet viewer API for controller / fast-open code paths."""
+        if getattr(self, "crop", None) is not None and self.crop.active:
+            self.crop.exit()
         self._running = False
         self._cancel_pending_image_timers()
         self._anim_frames = []
@@ -276,6 +383,166 @@ class ImageViewerLegacy:
                 self.image_window.destroy()
         except tk.TclError:
             pass
+
+    def _crop_active(self) -> bool:
+        return bool(getattr(self, "crop", None) and self.crop.active)
+
+    def enter_crop_mode(self):
+        """Start inline crop overlay + bottom HUD toolbar."""
+        self.crop.enter()
+
+    def exit_crop_mode(self):
+        """Cancel crop mode without applying."""
+        self.crop.exit()
+
+    def _on_escape_key(self, event=None):
+        """Escape cancels crop when active; otherwise closes the viewer."""
+        if self._crop_active():
+            self.exit_crop_mode()
+            return
+        self._do_close()
+
+    def _on_return_key(self, event=None):
+        """Enter applies crop (overwrite + confirm) when crop mode is active."""
+        if not self._crop_active():
+            return
+        hud = self.crop.hud
+        if hud is not None:
+            focused = self.image_window.focus_get()
+            # CTkEntry focus is on an inner tk widget — commit size if editing W/H.
+            for entry in (hud.width_entry, hud.height_entry):
+                inner = getattr(entry, "_entry", None)
+                if focused is not None and (focused is entry or focused is inner):
+                    hud._commit_size()
+                    break
+        self.crop.apply("overwrite")
+
+    def _hotkey_unless_crop(self, fn, event=None):
+        """No-op for viewer actions that conflict with crop mode."""
+        if self._crop_active():
+            return
+        if event is None:
+            return fn()
+        try:
+            return fn(event)
+        except TypeError:
+            return fn()
+
+    def _hotkey_next_image(self, event=None):
+        self.show_next_image()
+
+    def _hotkey_prev_image(self, event=None):
+        self.show_prev_image()
+
+    def _hotkey_delete(self, event=None):
+        if not self._confirm_leave_edit_for_navigation():
+            return
+        self.delete_current_image(event)
+
+    def _hotkey_crop(self, event=None):
+        """Toggle crop mode with the image_crop hotkey (default: X)."""
+        if self._crop_active():
+            self.exit_crop_mode()
+        else:
+            self.enter_crop_mode()
+
+    def _hotkey_resize(self, event=None):
+        """Open the resize dialog (blocked while cropping)."""
+        if self._crop_active():
+            return
+        self.open_resize_dialog()
+
+    def _resize_dialog_open(self) -> bool:
+        dlg = getattr(self, "_resize_dialog", None)
+        if dlg is None:
+            return False
+        try:
+            return bool(dlg.winfo_exists())
+        except Exception:
+            self._resize_dialog = None
+            return False
+
+    def _active_edit_processes(self) -> list:
+        """Labels for the leave-edit confirmation (Crop / Resize)."""
+        names = []
+        if self._crop_active():
+            names.append("Crop")
+        if self._resize_dialog_open() or getattr(self, "_image_dirty", False):
+            # Dialog open, or resize already applied but not saved.
+            if "Resize" not in names:
+                names.append("Resize")
+        return names
+
+    def _abandon_image_edits(self):
+        """Cancel crop / close resize dialog / clear dirty flag (no save)."""
+        if self._crop_active():
+            self.exit_crop_mode()
+        if self._resize_dialog_open():
+            try:
+                self._resize_dialog.force_close()
+            except Exception:
+                pass
+            self._resize_dialog = None
+        self._image_dirty = False
+
+    def _confirm_leave_edit_for_navigation(self) -> bool:
+        """Return True if navigation may proceed (possibly after user confirms)."""
+        processes = self._active_edit_processes()
+        if not processes:
+            return True
+        parent = self.image_window
+        if not confirm_leave_image_edit(parent, processes):
+            return False
+        self._abandon_image_edits()
+        return True
+
+    def open_resize_dialog(self):
+        """Show the Resize Image modal for the current image."""
+        if self._crop_active():
+            self.exit_crop_mode()
+        if self._resize_dialog_open():
+            try:
+                self._resize_dialog.lift()
+                self._resize_dialog.focus_force()
+            except Exception:
+                pass
+            return
+        w, h = self.original_image.size
+        dlg = open_resize_image_dialog(
+            self.image_window,
+            orig_width=w,
+            orig_height=h,
+            on_apply=self.resize_image,
+        )
+        self._resize_dialog = dlg
+
+        def _clear_ref(_event=None):
+            if getattr(self, "_resize_dialog", None) is dlg:
+                self._resize_dialog = None
+
+        try:
+            dlg.bind("<Destroy>", _clear_ref)
+        except Exception:
+            pass
+
+    def resize_image(self, new_width, new_height, resampling_filter=PILImage.LANCZOS):
+        """Resize all animation frames (or the still image) and refresh the view."""
+        if self._crop_active():
+            self.exit_crop_mode()
+        w = max(1, int(new_width))
+        h = max(1, int(new_height))
+        filt = resampling_filter if resampling_filter is not None else PILImage.LANCZOS
+        self._map_anim_frames(lambda im: im.resize((w, h), filt))
+        self._image_dirty = True
+        if self._view_fit_mode == "best_fit":
+            self.best_fit()
+        elif self._view_fit_mode == "fit_width":
+            self.fit_width()
+        elif self._view_fit_mode == "actual":
+            self.zoom_factor = 1.0
+            self.update_image(center=True)
+        else:
+            self.update_image(center=True)
 
     def delete_current_image(self, event=None):
         """Vyžádá smazání aktuálního obrázku."""
@@ -328,8 +595,14 @@ class ImageViewerLegacy:
         except tk.TclError:
             return
         self.draw_info_hud()
-        self.draw_minimap()
-        self.draw_zoom_overlay()
+        # Hide minimap / zoom HUD while cropping — bottom strip is owned by crop toolbar.
+        if self._crop_active():
+            self.canvas.delete("minimap")
+            self.canvas.delete("zoom_hud")
+            self.crop.redraw()
+        else:
+            self.draw_minimap()
+            self.draw_zoom_overlay()
 
     def _on_canvas_xscroll(self, *args):
         self.canvas.xview(*args)
@@ -348,6 +621,15 @@ class ImageViewerLegacy:
             self.canvas.config(scrollregion=(0, 0, 1, 1))
 
     def load_image(self, path, name):
+        if self._resize_dialog_open():
+            try:
+                self._resize_dialog.force_close()
+            except Exception:
+                pass
+            self._resize_dialog = None
+        if self._crop_active():
+            self.exit_crop_mode()
+        self._image_dirty = False
         self.image_path = path
         self.image_name = name
 
@@ -382,6 +664,8 @@ class ImageViewerLegacy:
 
 
     def skip(self, direction):
+        if not self._confirm_leave_edit_for_navigation():
+            return
         try:
             all_files = [f for f in self.controller.video_files if f['path'].lower().endswith(IMAGE_FORMATS)]
             # Najít index pomocí cesty k souboru
@@ -451,6 +735,8 @@ class ImageViewerLegacy:
         self.update_image(center=True)
         
     def rotate_left(self):
+        if self._crop_active():
+            self.exit_crop_mode()
         self._map_anim_frames(lambda im: im.rotate(90, expand=True))
         if self._view_fit_mode == "best_fit":
             self.best_fit()
@@ -466,6 +752,8 @@ class ImageViewerLegacy:
             self.update_image(center=True)
 
     def rotate_right(self):
+        if self._crop_active():
+            self.exit_crop_mode()
         self._map_anim_frames(lambda im: im.rotate(-90, expand=True))
         if self._view_fit_mode == "best_fit":
             self.best_fit()
@@ -481,10 +769,14 @@ class ImageViewerLegacy:
             self.update_image(center=True)
 
     def flip_horizontal(self):
+        if self._crop_active():
+            self.exit_crop_mode()
         self._map_anim_frames(lambda im: im.transpose(PILImage.FLIP_LEFT_RIGHT))
         self.update_image()
 
     def flip_vertical(self):
+        if self._crop_active():
+            self.exit_crop_mode()
         self._map_anim_frames(lambda im: im.transpose(PILImage.FLIP_TOP_BOTTOM))
         self.update_image()
 
@@ -494,6 +786,7 @@ class ImageViewerLegacy:
                                                   filetypes=[("PNG files", "*.png"), ("JPEG files", "*.jpg;*.jpeg"), ("All Files", "*.*")])
         if save_path:
             self.original_image.save(save_path)
+            self._image_dirty = False
 
     def start_pan(self, event):
         self.canvas.scan_mark(event.x, event.y)
@@ -507,35 +800,48 @@ class ImageViewerLegacy:
         self._refresh_overlays()
  
     def toggle_fullscreen(self, event=None):
-        self.is_fullscreen = not self.is_fullscreen
+        self.set_fullscreen(not self.is_fullscreen)
+
+    def set_fullscreen(self, enabled: bool):
+        """Enter or leave borderless fullscreen on the current monitor."""
+        enabled = bool(enabled)
+        if enabled == self.is_fullscreen:
+            return
         self.image_window.update_idletasks()
 
-        if self.is_fullscreen:
-            # Zjisti, na kterém monitoru okno je
+        if enabled:
+            try:
+                self._windowed_geometry = self.image_window.geometry()
+            except tk.TclError:
+                pass
             x = self.image_window.winfo_x() + self.image_window.winfo_width() // 2
             y = self.image_window.winfo_y() + self.image_window.winfo_height() // 2
-            
-            target_monitor = None
-            for monitor in get_monitors():
-                if (monitor.x <= x < monitor.x + monitor.width and
-                    monitor.y <= y < monitor.y + monitor.height):
-                    target_monitor = monitor
-                    break
-            
+            target_monitor = self._monitor_at(x, y)
+
+            self.is_fullscreen = True
             if target_monitor:
                 self.image_window.overrideredirect(True)
-                self.image_window.geometry(f"{target_monitor.width}x{target_monitor.height}+{target_monitor.x}+{target_monitor.y}")
+                self.image_window.geometry(
+                    f"{target_monitor.width}x{target_monitor.height}+{target_monitor.x}+{target_monitor.y}"
+                )
             else:
-                self.image_window.attributes("-fullscreen", True) # Fallback
+                self.image_window.attributes("-fullscreen", True)
+            # Fit the image to the fullscreen canvas.
+            if self._view_fit_mode in ("none", "actual", "manual"):
+                self._view_fit_mode = "best_fit"
+            self.image_window.after(80, self.best_fit)
         else:
+            self.is_fullscreen = False
             self.image_window.overrideredirect(False)
             self.image_window.attributes("-fullscreen", False)
-            # Restore reasonable size
-            self.image_window.geometry(f"{min(1200, self.original_image.width)}x{min(900, self.original_image.height)}")
+            geom = getattr(self, "_windowed_geometry", None)
+            if geom:
+                self.image_window.geometry(geom)
+            else:
+                self._layout_initial_window(open_fullscreen=False)
 
         self.update_scrollbars()
         self._set_image_scrollregion_only()
-        # Po změně velikosti vycentrujeme
         self.image_window.after(100, self.center_image)
         self._refresh_overlays()
 
@@ -911,6 +1217,18 @@ class ImageViewerLegacy:
         menu.add_command(label=f"Flip Horizontal ({hk_label('image_flip_h', 'H')})", command=self.flip_horizontal)
         menu.add_command(label=f"Flip Vertical ({hk_label('image_flip_v', 'V')})", command=self.flip_vertical)
         menu.add_separator()
+        if self._crop_active():
+            menu.add_command(label="Cancel Crop (Esc)", command=self.exit_crop_mode)
+        else:
+            menu.add_command(
+                label=f"Crop… ({hk_label('image_crop', 'X')})",
+                command=self.enter_crop_mode,
+            )
+        menu.add_command(
+            label=f"Resize Image… ({hk_label('image_resize', 'Ctrl+R')})",
+            command=self.open_resize_dialog,
+        )
+        menu.add_separator()
         menu.add_command(label=f"Save As ({hk_label('image_save', 'Ctrl+S')})", command=self.save_image_to_folder)
         menu.add_command(label=f"Copy ({hk_label('image_copy', 'Ctrl+C')})", command=self.copy_image_to_clipboard)
         menu.add_separator()
@@ -1273,6 +1591,8 @@ class ImageViewerGPU:
         self._lmb_click_xy = None  # (x, y) in window coords, last LMB
 
         self._running = True
+        self._resize_dialog = None
+        self._image_dirty = False
 
         _ensure_pyglet_worker()
 
@@ -1458,6 +1778,10 @@ class ImageViewerGPU:
 
         _pyglet_active.append(self)
 
+        if bool(getattr(self.controller, "image_viewer_open_fullscreen", True)):
+            self._do_toggle_fullscreen()
+            self._do_best_fit()
+
     # ------------------------------------------------------------------
     # Hotkey map  (worker thread — built once after pyglet is ready)
     # ------------------------------------------------------------------
@@ -1480,10 +1804,12 @@ class ImageViewerGPU:
             '<F11>':       (k.F11,    False),
             '<Control-c>': (k.C,      True),
             '<Control-s>': (k.S,      True),
+            '<Control-r>': (k.R,      True),
+            '<Control-R>': (k.R,      True),
             'a': (k.A, False), 'b': (k.B, False), 'c': (k.C, False), 'i': (k.I, False),
             'w': (k.W, False), '+': (k.PLUS,  False), '-': (k.MINUS, False),
             'l': (k.L, False), 'r': (k.R,     False), 'h': (k.H,     False),
-            'v': (k.V, False), 'f': (k.F,     False),
+            'v': (k.V, False), 'f': (k.F,     False), 'x': (k.X,     False),
         }
         hmap = getattr(self.controller, 'hotkeys_map', {})
         self._hotkey_sym_map: dict = {}
@@ -1775,6 +2101,8 @@ class ImageViewerGPU:
         elif action == 'image_flip_v':       self._do_flip_v()
         elif action == 'image_copy':         _main(0, self.copy_image_to_clipboard)
         elif action == 'image_save':         _main(0, self.save_image_to_folder)
+        elif action == 'image_resize':       _main(0, self.open_resize_dialog)
+        elif action == 'image_crop':         pass  # crop HUD is Legacy-only for now
 
     def _on_close(self):
         self._do_close()
@@ -1800,6 +2128,7 @@ class ImageViewerGPU:
             self._apply_viewport_fit()
             self.window.set_caption(name)
             self._hud_cache_path = None
+            self._image_dirty = False
             self._update_hud()
         except Exception as e:
             logging.error(f"[ImageViewer] Failed to load {name}: {e}")
@@ -1847,6 +2176,17 @@ class ImageViewerGPU:
         self.original_image = self.original_image.transpose(PILImage.FLIP_TOP_BOTTOM)
         self._upload_texture(self.original_image);  self._update_hud()
 
+    def _do_resize(self, new_width, new_height, resampling_filter):
+        w = max(1, int(new_width))
+        h = max(1, int(new_height))
+        filt = resampling_filter if resampling_filter is not None else PILImage.LANCZOS
+        self.original_image = self.original_image.resize((w, h), filt)
+        self._img_w, self._img_h = self.original_image.size
+        self._image_dirty = True
+        self._upload_texture(self.original_image)
+        self._apply_viewport_fit()
+        self._update_hud()
+
     def _do_toggle_fullscreen(self):
         if not self.is_fullscreen:
             wx, wy = self.window.get_location()
@@ -1875,9 +2215,12 @@ class ImageViewerGPU:
     # ------------------------------------------------------------------
 
     def load_image(self, path, name):
+        self._abandon_image_edits()
         self._schedule_pyglet(self._do_load_image, path, name)
 
     def skip(self, direction):
+        if not self._confirm_leave_edit_for_navigation():
+            return
         try:
             files = [f for f in self.controller.video_files
                      if f['path'].lower().endswith(IMAGE_FORMATS)]
@@ -1906,6 +2249,70 @@ class ImageViewerGPU:
     def toggle_background(self, e=None): self._schedule_pyglet(self._do_toggle_background)
     def toggle_info(self, e=None):       self._schedule_pyglet(self._do_toggle_info)
 
+    def _resize_dialog_open(self) -> bool:
+        dlg = getattr(self, "_resize_dialog", None)
+        if dlg is None:
+            return False
+        try:
+            return bool(dlg.winfo_exists())
+        except Exception:
+            self._resize_dialog = None
+            return False
+
+    def _active_edit_processes(self) -> list:
+        names = []
+        if self._resize_dialog_open() or getattr(self, "_image_dirty", False):
+            names.append("Resize")
+        return names
+
+    def _abandon_image_edits(self):
+        if self._resize_dialog_open():
+            try:
+                self._resize_dialog.force_close()
+            except Exception:
+                pass
+            self._resize_dialog = None
+        self._image_dirty = False
+
+    def _confirm_leave_edit_for_navigation(self) -> bool:
+        processes = self._active_edit_processes()
+        if not processes:
+            return True
+        if not confirm_leave_image_edit(self.parent, processes):
+            return False
+        self._abandon_image_edits()
+        return True
+
+    def open_resize_dialog(self):
+        """Show resize dialog on the Tk thread; apply runs on the pyglet worker."""
+        if self._resize_dialog_open():
+            try:
+                self._resize_dialog.lift()
+                self._resize_dialog.focus_force()
+            except Exception:
+                pass
+            return
+        w, h = self.original_image.size
+        dlg = open_resize_image_dialog(
+            self.parent,
+            orig_width=w,
+            orig_height=h,
+            on_apply=self.resize_image,
+        )
+        self._resize_dialog = dlg
+
+        def _clear_ref(_event=None):
+            if getattr(self, "_resize_dialog", None) is dlg:
+                self._resize_dialog = None
+
+        try:
+            dlg.bind("<Destroy>", _clear_ref)
+        except Exception:
+            pass
+
+    def resize_image(self, new_width, new_height, resampling_filter=PILImage.LANCZOS):
+        self._schedule_pyglet(self._do_resize, new_width, new_height, resampling_filter)
+
     def delete_current_image(self, event=None):
         logging.info(f"[ImageViewer] Requesting delete: {self.image_path}")
         if hasattr(self.controller, 'confirm_delete_item'):
@@ -1933,6 +2340,7 @@ class ImageViewerGPU:
         )
         if path:
             self.original_image.save(path)
+            self._image_dirty = False
 
     # ------------------------------------------------------------------
     # HUD  (worker thread)
@@ -2060,6 +2468,12 @@ class ImageViewerGPU:
         menu.add_command(label="Rotate Right", accelerator=hk('image_rotate_right', 'R'), command=self.rotate_right)
         menu.add_command(label="Flip H", accelerator=hk('image_flip_h', 'H'), command=self.flip_horizontal)
         menu.add_command(label="Flip V", accelerator=hk('image_flip_v', 'V'), command=self.flip_vertical)
+        menu.add_separator()
+        menu.add_command(
+            label="Resize Image…",
+            accelerator=hk('image_resize', 'Ctrl+R'),
+            command=self.open_resize_dialog,
+        )
         menu.add_separator()
         menu.add_command(label="Save As…", accelerator=hk('image_save', 'Ctrl+S'), command=self.save_image_to_folder)
         menu.add_command(label="Copy", accelerator=hk('image_copy', 'Ctrl+C'), command=self.copy_image_to_clipboard)

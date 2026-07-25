@@ -518,6 +518,8 @@ class VideoThumbnailPlayer(
         self.current_image_window = None
         # False = Tk legacy viewer (default); True = Pyglet/OpenGL (settings.json)
         self.image_viewer_use_pyglet = False
+        # FastStone-style: open image viewer in fullscreen on double-click
+        self.image_viewer_open_fullscreen = True
         self.search_window = None
         self.skip_generated = True
         self.search_param = ctk.StringVar(value="filename")  # Initialize with a default value

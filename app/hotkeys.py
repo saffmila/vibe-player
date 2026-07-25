@@ -39,6 +39,8 @@ DEFAULT_HOTKEYS = {
     'image_rotate_right': 'r',       # Rotate Right
     'image_flip_h': 'h',             # Flip Horizontal
     'image_flip_v': 'v',             # Flip Vertical
+    'image_crop': 'x',               # Enter crop mode (inline HUD)
+    'image_resize': '<Control-r>',   # Resize image dialog
     # --- Image Viewer: Visuals (NEW) ---
     'image_toggle_bg': 'c',          # Background color cycle
     'image_toggle_info': 'i',        # Info HUD toggle
@@ -177,7 +179,7 @@ HOTKEY_HELP_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Image viewer window", (
         "image_next", "image_prev", "image_copy", "image_save", "image_delete",
         "close_window", "image_fullscreen", "image_rotate_left", "image_rotate_right",
-        "image_flip_h", "image_flip_v", "image_toggle_bg", "image_toggle_info",
+        "image_flip_h", "image_flip_v", "image_crop", "image_resize", "image_toggle_bg", "image_toggle_info",
         "image_actual_size", "image_fit_best", "image_fit_width",
         "image_zoom_in", "image_zoom_out", "image_zoom_in_ctrl", "image_zoom_out_ctrl",
         "image_fullscreen_f", "image_fullscreen_alt_enter", "image_debug_monitor",
@@ -221,6 +223,8 @@ HOTKEY_LABELS: dict[str, str] = {
     "image_rotate_right": "Rotate right",
     "image_flip_h": "Flip horizontal",
     "image_flip_v": "Flip vertical",
+    "image_crop": "Crop image",
+    "image_resize": "Resize image",
     "image_toggle_bg": "Cycle background",
     "image_toggle_info": "Toggle info HUD",
     "image_actual_size": "Actual size",
