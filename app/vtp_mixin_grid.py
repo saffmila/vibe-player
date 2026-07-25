@@ -5996,6 +5996,8 @@ class VtpGridMixin:
             
             # --- Update other UI parts (This part was fine) ---
             self.update_panel_info(file_path)
+            if hasattr(self, "notify_caption_selection"):
+                self.notify_caption_selection(file_path)
 
 
 

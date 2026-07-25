@@ -192,9 +192,33 @@ class VtpPreferencesMixin:
                 if hasattr(self.timeline_container, "set_restore_height"):
                     self.timeline_container.set_restore_height(saved_timeline_restore_height)
 
+        # --- Bottom panel mode (Timeline / Captions) ---
+        captions_enabled = bool(settings.get("captions_mode_enabled", False))
+        if hasattr(self, "captions_mode_enabled_var"):
+            self.captions_mode_enabled_var.set(captions_enabled)
+        if hasattr(self, "caption_autosave_var"):
+            self.caption_autosave_var.set(bool(settings.get("caption_autosave", True)))
 
+        desired_mode = settings.get("bottom_panel_mode", "Timeline")
+        if desired_mode not in ("Timeline", "Captions"):
+            desired_mode = "Timeline"
+        if not captions_enabled:
+            desired_mode = "Timeline"
 
-
+        if hasattr(self, "set_captions_mode_enabled"):
+            # Restores switch visibility; mode applied inside
+            self.set_captions_mode_enabled(
+                captions_enabled,
+                save_prefs=False,
+                restore_mode=desired_mode,
+            )
+        elif hasattr(self, "set_bottom_panel_mode"):
+            self.set_bottom_panel_mode(desired_mode, save_prefs=False)
+        else:
+            self.bottom_panel_mode = desired_mode
+            if hasattr(self, "timeline_container") and self.timeline_container:
+                expanded = self.timeline_container.expanded
+                self.ShowTWidget = bool(expanded and desired_mode == "Timeline")
 
     def load_preferences(self):
         settings = {}  # Initialize as an empty dictionary in case the file doesn't exist

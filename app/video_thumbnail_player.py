@@ -131,6 +131,7 @@ from concurrent.futures import ThreadPoolExecutor
 from video_operations import VideoPlayer, get_audio_devices, prewarm_vlc_instance
 from timeline_manager import TimelineManager
 from timeline_bar_widget import TimelineBarWidget
+from caption_editor_widget import CaptionEditorWidget
 from multi_timeline_viewer import MultiTimelineViewer
 from utils import create_menu
 import win32api
@@ -697,6 +698,37 @@ class VideoThumbnailPlayer(
 
         self.timeline_container = TogglePanelFrame(self.right_split, title="Timeline", app=self)
 
+        # Mode switch: Timeline ↔ Captions (hidden until View → Enable Captions mode)
+        self.bottom_panel_mode = "Timeline"
+        self.bottom_panel_mode_var = ctk.StringVar(value="Timeline")
+        if not hasattr(self, "captions_mode_enabled_var"):
+            self.captions_mode_enabled_var = ctk.BooleanVar(value=False)
+        self.bottom_panel_switch = ctk.CTkSegmentedButton(
+            self.timeline_container.header_frame,
+            values=["Timeline", "Captions"],
+            variable=self.bottom_panel_mode_var,
+            width=160,
+            height=18,
+            font=ctk.CTkFont(size=10),
+            command=self.set_bottom_panel_mode,
+        )
+        # Packed only when captions mode is enabled (see set_captions_mode_enabled)
+
+        # Autosave toggle — shown only in Captions mode, to the right of the switch
+        self.caption_autosave_var = ctk.BooleanVar(value=True)
+        self.caption_autosave_check = ctk.CTkCheckBox(
+            self.timeline_container.header_frame,
+            text="Autosave",
+            variable=self.caption_autosave_var,
+            width=90,
+            height=18,
+            checkbox_width=16,
+            checkbox_height=16,
+            font=ctk.CTkFont(size=10),
+            command=self._on_caption_autosave_toggled,
+        )
+        # Packed when Captions mode is active
+
         self.timeline_widget = TimelineBarWidget(
             parent=self.timeline_container,
             controller=self,
@@ -704,8 +736,13 @@ class VideoThumbnailPlayer(
             timeline_manager=self.timeline_manager,
             on_seek=self.seek_video
         )
-        
         self.timeline_widget.pack(fill="both", expand=True)
+
+        self.caption_editor = CaptionEditorWidget(
+            parent=self.timeline_container,
+            controller=self,
+        )
+        # Packed only when Captions mode is active
 
         self.timeline_container.content_widget = self.timeline_widget
         self.timeline_container.parent_paned = self.right_split
@@ -3351,15 +3388,39 @@ class VideoThumbnailPlayer(
 
 
     def _is_input_focused(self):
-        """True only when a text field in a dialog (Toplevel) has focus, not the main window.
-        Block hotkeys only while typing in popups (keywords, search, rename...),
-        not when the search bar or other fields in the main app have focus."""
+        """True when typing in a text field — block global hotkeys (Backspace, arrows, …).
+
+        - Dialogs (Toplevel): any Entry/Text
+        - Main window: caption editor (and its inner tk.Text), so dataset captions
+          can be typed without triggering parent-dir / navigation shortcuts
+        """
         focused = self.focus_get()
         if focused is None:
             return False
-        if focused.winfo_class() not in ('Entry', 'Text', 'TEntry', 'TText'):
+
+        # Caption editor lives in the main window; walk masters to detect it.
+        caption = getattr(self, "caption_editor", None)
+        if caption is not None:
+            try:
+                w = focused
+                while w is not None:
+                    if w is caption:
+                        return True
+                    w = getattr(w, "master", None)
+            except Exception:
+                pass
+
+        if focused.winfo_class() not in (
+            "Entry",
+            "Text",
+            "TEntry",
+            "TText",
+            "CTkEntry",
+            "CTkTextbox",
+        ):
             return False
-        # Only block when the focused field is in a window other than the main app
+        # Other main-window fields (toolbar search, …): keep hotkeys active.
+        # Dialogs: block.
         return focused.winfo_toplevel() is not self
 
     def _is_app_focused(self):
@@ -3571,10 +3632,175 @@ class VideoThumbnailPlayer(
                 self.show_infopanel_var.set(expanded)
             logging.info(f"[TOGGLE][InfoPanel] preview_on set to {expanded}")
         elif title == "Timeline":
-            self.ShowTWidget = expanded
+            # Timeline updates only when the panel is expanded AND mode is Timeline
+            mode = getattr(self, "bottom_panel_mode", "Timeline")
+            self.ShowTWidget = bool(expanded and mode == "Timeline")
             if hasattr(self, "show_timeline_var"):
                 self.show_timeline_var.set(expanded)
-            logging.info(f"[TOGGLE][Timeline] ShowTWidget set to {expanded}")
+            logging.info(
+                f"[TOGGLE][Timeline] expanded={expanded} mode={mode} ShowTWidget={self.ShowTWidget}"
+            )
+            if expanded and mode == "Captions" and hasattr(self, "caption_editor"):
+                self.caption_editor.load_for_path(
+                    getattr(self, "selected_file_path", None),
+                    commit_previous=False,
+                )
+
+    def _on_caption_autosave_toggled(self):
+        if hasattr(self, "save_preferences"):
+            try:
+                self.save_preferences()
+            except Exception:
+                logging.debug("[Caption] Could not save autosave pref", exc_info=True)
+
+    def set_captions_mode_enabled(self, enabled=None, *, save_prefs=True, restore_mode=None):
+        """
+        Opt-in Captions UI (View → Enable Captions Mode).
+        When disabled, hide Timeline/Captions switch and force Timeline content.
+        """
+        if enabled is None:
+            var = getattr(self, "captions_mode_enabled_var", None)
+            enabled = bool(var.get()) if var is not None else False
+        else:
+            enabled = bool(enabled)
+
+        if hasattr(self, "captions_mode_enabled_var"):
+            self.captions_mode_enabled_var.set(enabled)
+
+        switch = getattr(self, "bottom_panel_switch", None)
+        if switch is not None:
+            try:
+                if enabled:
+                    if not switch.winfo_ismapped():
+                        switch.pack(side="left", padx=(10, 0), pady=1)
+                else:
+                    switch.pack_forget()
+            except tk.TclError:
+                pass
+
+        if not enabled:
+            # Leave captions if active; hide autosave checkbox
+            if getattr(self, "bottom_panel_mode", "Timeline") == "Captions":
+                self.set_bottom_panel_mode("Timeline", save_prefs=False)
+            else:
+                self._set_caption_autosave_visible(False)
+            if getattr(self, "timeline_container", None) and hasattr(
+                self.timeline_container, "title_label"
+            ):
+                try:
+                    self.timeline_container.title_label.configure(text="Timeline")
+                except Exception:
+                    pass
+        else:
+            mode = restore_mode or getattr(self, "bottom_panel_mode", "Timeline")
+            if mode not in ("Timeline", "Captions"):
+                mode = "Timeline"
+            self.set_bottom_panel_mode(mode, save_prefs=False)
+
+        logging.info("[Captions] mode enabled=%s", enabled)
+        if save_prefs and hasattr(self, "save_preferences"):
+            try:
+                self.save_preferences()
+            except Exception:
+                logging.debug("[Captions] Could not save enable pref", exc_info=True)
+
+    def _set_caption_autosave_visible(self, visible: bool):
+        check = getattr(self, "caption_autosave_check", None)
+        if check is None:
+            return
+        try:
+            if visible:
+                if not check.winfo_ismapped():
+                    check.pack(side="left", padx=(10, 0), pady=1)
+            else:
+                check.pack_forget()
+        except tk.TclError:
+            pass
+
+    def set_bottom_panel_mode(self, mode=None, *, save_prefs=True):
+        """
+        Switch the bottom panel between Timeline and Captions editor.
+        ``mode`` may be passed by CTkSegmentedButton as the selected value.
+        """
+        if mode is None:
+            mode = self.bottom_panel_mode_var.get() if hasattr(self, "bottom_panel_mode_var") else "Timeline"
+        if mode not in ("Timeline", "Captions"):
+            mode = "Timeline"
+
+        # Captions requires opt-in (View → Enable Captions Mode)
+        captions_on = True
+        if hasattr(self, "captions_mode_enabled_var"):
+            try:
+                captions_on = bool(self.captions_mode_enabled_var.get())
+            except Exception:
+                captions_on = False
+        if mode == "Captions" and not captions_on:
+            mode = "Timeline"
+
+        prev = getattr(self, "bottom_panel_mode", "Timeline")
+
+        # Leaving Captions with unsaved edits — respect Autosave / prompt
+        if prev == "Captions" and mode != "Captions" and hasattr(self, "caption_editor"):
+            if not self.caption_editor.commit_before_leave():
+                if hasattr(self, "bottom_panel_mode_var"):
+                    self.bottom_panel_mode_var.set("Captions")
+                self.bottom_panel_mode = "Captions"
+                return
+
+        self.bottom_panel_mode = mode
+        if hasattr(self, "bottom_panel_mode_var"):
+            self.bottom_panel_mode_var.set(mode)
+
+        expanded = bool(
+            getattr(self, "timeline_container", None)
+            and self.timeline_container.expanded
+        )
+
+        if mode == "Captions":
+            if hasattr(self, "timeline_widget"):
+                self.timeline_widget.pack_forget()
+            if hasattr(self, "caption_editor"):
+                self.caption_editor.pack(fill="both", expand=True)
+                self.timeline_container.content_widget = self.caption_editor
+                self.caption_editor.load_for_path(
+                    getattr(self, "selected_file_path", None),
+                    commit_previous=(prev == "Captions"),
+                )
+            self._set_caption_autosave_visible(True)
+            self.ShowTWidget = False
+        else:
+            if hasattr(self, "caption_editor"):
+                self.caption_editor.pack_forget()
+            if hasattr(self, "timeline_widget"):
+                self.timeline_widget.pack(fill="both", expand=True)
+                self.timeline_container.content_widget = self.timeline_widget
+            self._set_caption_autosave_visible(False)
+            self.ShowTWidget = expanded
+
+        logging.info("[BottomPanel] mode=%s ShowTWidget=%s", mode, self.ShowTWidget)
+        # Keep header title in sync with active mode
+        if getattr(self, "timeline_container", None) and hasattr(self.timeline_container, "title_label"):
+            try:
+                self.timeline_container.title_label.configure(text=mode)
+            except Exception:
+                pass
+        if save_prefs and hasattr(self, "save_preferences"):
+            try:
+                self.save_preferences()
+            except Exception:
+                logging.debug("[BottomPanel] Could not save preferences on mode switch", exc_info=True)
+
+    def notify_caption_selection(self, file_path):
+        """Called when thumbnail selection changes — refresh captions panel if active."""
+        if not getattr(self, "captions_mode_enabled_var", None) or not self.captions_mode_enabled_var.get():
+            return
+        if getattr(self, "bottom_panel_mode", "Timeline") != "Captions":
+            return
+        if not hasattr(self, "caption_editor") or self.caption_editor is None:
+            return
+        if not (getattr(self, "timeline_container", None) and self.timeline_container.expanded):
+            return
+        self.caption_editor.load_for_path(file_path)
 
 
     def toggle_infopanel_menu(self, save_prefs=True, *, from_view_menu=False):

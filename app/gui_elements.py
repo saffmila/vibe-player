@@ -829,6 +829,17 @@ def build_view_menu(app):
     app.show_timeline_var = _tl_opts["variable"]
     view_menu.add_checkbutton(**_tl_opts)
 
+    if not hasattr(app, "captions_mode_enabled_var"):
+        app.captions_mode_enabled_var = ctk.BooleanVar(value=False)
+    view_menu.add_checkbutton(
+        label="Enable Captions Mode",
+        variable=app.captions_mode_enabled_var,
+        command=lambda: app.set_captions_mode_enabled(
+            app.captions_mode_enabled_var.get(),
+            save_prefs=True,
+        ),
+    )
+
     thumbnail_size_menu = create_menu(app, view_menu)
     for size in ["160x120", "240x180", "320x240", "400x300", "480x360"]:
         thumbnail_size_menu.add_radiobutton(label=size, variable=app.thumbnail_size_option, value=size,
@@ -2413,6 +2424,17 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
         "tree_font_size": app.base_font_size,
         "info_panel_expanded": app.info_panel_container.expanded if app.info_panel_container else True,
         "timeline_widget_expanded": app.timeline_container.expanded if app.timeline_container else True,
+        "bottom_panel_mode": getattr(app, "bottom_panel_mode", "Timeline"),
+        "captions_mode_enabled": (
+            bool(app.captions_mode_enabled_var.get())
+            if getattr(app, "captions_mode_enabled_var", None) is not None
+            else False
+        ),
+        "caption_autosave": (
+            bool(app.caption_autosave_var.get())
+            if getattr(app, "caption_autosave_var", None) is not None
+            else True
+        ),
         "info_panel_restore_height": (
             app.info_panel_container.get_restore_height()
             if app.info_panel_container and hasattr(app.info_panel_container, "get_restore_height")
