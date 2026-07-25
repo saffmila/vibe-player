@@ -1228,6 +1228,20 @@ class ImageViewerLegacy:
             label=f"Resize Image… ({hk_label('image_resize', 'Ctrl+R')})",
             command=self.open_resize_dialog,
         )
+        # Compare uses grid multi-select (controller.selected_thumbnails).
+        _cmp_paths = []
+        _open_cmp = getattr(self.controller, "open_image_compare", None)
+        _sel_cmp = getattr(self.controller, "selected_image_paths_for_compare", None)
+        if callable(_sel_cmp):
+            try:
+                _cmp_paths = _sel_cmp(None) or []
+            except Exception:
+                _cmp_paths = []
+        if callable(_open_cmp) and len(_cmp_paths) >= 2:
+            menu.add_command(
+                label=f"Compare Images… ({hk_label('image_compare', 'Ctrl+Shift+C')})",
+                command=lambda: _open_cmp(_cmp_paths),
+            )
         menu.add_separator()
         menu.add_command(label=f"Save As ({hk_label('image_save', 'Ctrl+S')})", command=self.save_image_to_folder)
         menu.add_command(label=f"Copy ({hk_label('image_copy', 'Ctrl+C')})", command=self.copy_image_to_clipboard)
@@ -2474,6 +2488,20 @@ class ImageViewerGPU:
             accelerator=hk('image_resize', 'Ctrl+R'),
             command=self.open_resize_dialog,
         )
+        _cmp_paths = []
+        _open_cmp = getattr(self.controller, "open_image_compare", None)
+        _sel_cmp = getattr(self.controller, "selected_image_paths_for_compare", None)
+        if callable(_sel_cmp):
+            try:
+                _cmp_paths = _sel_cmp(None) or []
+            except Exception:
+                _cmp_paths = []
+        if callable(_open_cmp) and len(_cmp_paths) >= 2:
+            menu.add_command(
+                label="Compare Images…",
+                accelerator=hk('image_compare', 'Ctrl+Shift+C'),
+                command=lambda: _open_cmp(_cmp_paths),
+            )
         menu.add_separator()
         menu.add_command(label="Save As…", accelerator=hk('image_save', 'Ctrl+S'), command=self.save_image_to_folder)
         menu.add_command(label="Copy", accelerator=hk('image_copy', 'Ctrl+C'), command=self.copy_image_to_clipboard)

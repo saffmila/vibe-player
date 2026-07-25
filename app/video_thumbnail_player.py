@@ -2403,6 +2403,13 @@ class VideoThumbnailPlayer(
         else:
             self._clipboard_status_flash("Select a file or tree item for keywords.", 3500)
 
+    def _hotkey_image_compare(self, event=None):
+        """Open compare dialog when ≥2 images are selected in the grid."""
+        open_fn = getattr(self, "open_image_compare", None)
+        if callable(open_fn):
+            open_fn()
+        return "break"
+
     def _hotkey_global_delete(self, event=None):
         if self._skip_file_clipboard_hotkey():
             return
@@ -3493,6 +3500,11 @@ class VideoThumbnailPlayer(
         self.bind_all(self.hotkeys_map['search'], g(lambda event: self.open_search_window()))
         self.bind_all(self.hotkeys_map['metadata'], g(self._hotkey_metadata))
         self.bind_all(self.hotkeys_map['keywords'], g(self._hotkey_keywords))
+
+        # --- Image compare (grid selection; Ctrl+Shift+C — avoids video Shift+C) ---
+        _cmp = self.hotkeys_map.get("image_compare", "<Control-Shift-C>")
+        for seq in {_cmp, "<Control-Shift-c>", "<Control-Shift-C>"}:
+            self.bind_all(seq, g(self._hotkey_image_compare))
 
         # --- Essentials (Refresh, Rename, Up) ---
         # F5 = soft folder reload (listing). Hard thumbnail rebuild stays in context menus.

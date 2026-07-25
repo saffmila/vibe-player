@@ -41,6 +41,8 @@ DEFAULT_HOTKEYS = {
     'image_flip_v': 'v',             # Flip Vertical
     'image_crop': 'x',               # Enter crop mode (inline HUD)
     'image_resize': '<Control-r>',   # Resize image dialog
+    # Compare selected images (Ctrl+Shift+C — Shift+C is video frame capture)
+    'image_compare': '<Control-Shift-C>',
     # --- Image Viewer: Visuals (NEW) ---
     'image_toggle_bg': 'c',          # Background color cycle
     'image_toggle_info': 'i',        # Info HUD toggle
@@ -150,7 +152,7 @@ HOTKEY_HELP_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     )),
     ("Thumbnail grid", (
         "thumbnail_move_up", "thumbnail_move_down", "thumbnail_move_left",
-        "thumbnail_move_right", "zoom_thumb",
+        "thumbnail_move_right", "zoom_thumb", "image_compare",
     )),
     ("File & clipboard", (
         "delete", "rename", "rename_secondary", "select_all",
@@ -179,7 +181,8 @@ HOTKEY_HELP_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Image viewer window", (
         "image_next", "image_prev", "image_copy", "image_save", "image_delete",
         "close_window", "image_fullscreen", "image_rotate_left", "image_rotate_right",
-        "image_flip_h", "image_flip_v", "image_crop", "image_resize", "image_toggle_bg", "image_toggle_info",
+        "image_flip_h", "image_flip_v", "image_crop", "image_resize", "image_compare",
+        "image_toggle_bg", "image_toggle_info",
         "image_actual_size", "image_fit_best", "image_fit_width",
         "image_zoom_in", "image_zoom_out", "image_zoom_in_ctrl", "image_zoom_out_ctrl",
         "image_fullscreen_f", "image_fullscreen_alt_enter", "image_debug_monitor",
@@ -225,6 +228,7 @@ HOTKEY_LABELS: dict[str, str] = {
     "image_flip_v": "Flip vertical",
     "image_crop": "Crop image",
     "image_resize": "Resize image",
+    "image_compare": "Compare selected images",
     "image_toggle_bg": "Cycle background",
     "image_toggle_info": "Toggle info HUD",
     "image_actual_size": "Actual size",
