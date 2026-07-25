@@ -5086,12 +5086,38 @@ class VideoThumbnailPlayer(
             self.display_thumbnails(self.current_directory)
 
     def refresh_current_directory(self, event=None):
-        """Soft reload of the current folder listing (toolbar / F5). Preserves scroll."""
+        """Soft reload of the current folder listing (toolbar / F5). Preserves scroll.
+
+        Also refreshes the left tree for the current folder so new/deleted
+        subfolders show up without a manual collapse/expand.
+        """
         dir_path = getattr(self, "current_directory", None)
         if not dir_path:
             return "break"
         self._thumb_grid_suppress_decode_until_nav = False
         logging.info("Soft refresh of current directory: %s", dir_path)
+
+        # Tree first (sync). Suppress <<TreeviewSelect>> so selection_set inside
+        # refresh_tree_view does not kick off a second folder load.
+        self._suppress_tree_select_navigation = True
+        try:
+            if isinstance(dir_path, str) and dir_path.startswith("virtual_library://"):
+                if hasattr(self, "refresh_virtual_libraries"):
+                    self.refresh_virtual_libraries()
+                if hasattr(self, "select_current_folder_in_tree"):
+                    self.select_current_folder_in_tree()
+            elif os.path.isdir(dir_path) and hasattr(self, "refresh_tree_view"):
+                self.refresh_tree_view(dir_path)
+        except Exception:
+            logging.debug("Tree refresh during folder refresh failed", exc_info=True)
+        finally:
+            try:
+                self.after_idle(
+                    lambda: setattr(self, "_suppress_tree_select_navigation", False)
+                )
+            except Exception:
+                self._suppress_tree_select_navigation = False
+
         self.display_thumbnails(dir_path, preserve_scroll=True)
         return "break"
 
