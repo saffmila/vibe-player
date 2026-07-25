@@ -56,12 +56,54 @@ def load_pil_image(path: str) -> Image.Image:
 
     Always detach from the filesystem handle after load — leaving Image.open()
     open locks the path on Windows and freezes shutil.move / deletes.
+
+    Animated GIF/WebP: returns the first frame only (thumbnails / static preview).
+    Use ``load_pil_frames`` when the viewer should play the animation.
     """
     if is_psd_path(path):
         return _load_psd(path)
     with Image.open(path) as image:
         image.load()
         return image.copy()
+
+
+def load_pil_frames(path: str) -> tuple[list[Image.Image], list[int]]:
+    """Load display frames for the image viewer.
+
+    Returns ``(frames, durations_ms)``. Static images (and PSD) yield one frame
+    and duration ``0`` (caller should not animate). Animated GIF/WebP yield every
+    frame; durations are clamped to a usable playback range.
+
+    Detaches from the filesystem handle after load (same Windows lock concern as
+    ``load_pil_image``).
+    """
+    if is_psd_path(path):
+        return [_load_psd(path)], [0]
+
+    with Image.open(path) as image:
+        n_frames = int(getattr(image, "n_frames", 1) or 1)
+        animated = bool(getattr(image, "is_animated", False)) and n_frames > 1
+        if not animated:
+            image.load()
+            return [image.copy()], [0]
+
+        frames: list[Image.Image] = []
+        durations: list[int] = []
+        for i in range(n_frames):
+            image.seek(i)
+            # RGBA keeps transparency stable across frames for Tk PhotoImage.
+            frame = image.convert("RGBA")
+            frames.append(frame.copy())
+            raw_ms = image.info.get("duration", 100)
+            try:
+                ms = int(raw_ms)
+            except (TypeError, ValueError):
+                ms = 100
+            # 0 often means "default"; very low values thrash the UI timer.
+            if ms <= 0:
+                ms = 100
+            durations.append(max(20, ms))
+        return frames, durations
 
 
 def _load_psd(path: str) -> Image.Image:

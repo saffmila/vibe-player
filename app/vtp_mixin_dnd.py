@@ -11,7 +11,12 @@ import time
 import tkinter as tk
 
 import tkinterdnd2 as dnd
-from gui_elements import get_conflict_rename_path, open_conflict_dialog
+from gui_elements import (
+    get_conflict_rename_path,
+    open_conflict_dialog,
+    open_file_op_progress_dialog,
+)
+from virtual_folders import add_to_virtual_folder, remove_from_virtual_folder
 from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS
 
 
@@ -168,7 +173,7 @@ class VtpDndMixin:
         # Drop onto a folder cell targets that folder; otherwise the open directory.
         target_folder = self._dnd_canvas_folder_under_pointer(event)
         dest = target_folder or current_dir
-        if not dest or not os.path.isdir(dest):
+        if not self._dnd_is_valid_drop_dest(dest):
             logging.warning("[DnD] DROP canvas: no valid destination: %r", dest)
             return
 
@@ -197,14 +202,20 @@ class VtpDndMixin:
             f"target_folder={target_folder} internal={internal} is_move={is_move}"
         )
 
+        dest_is_virtual = self._dnd_is_virtual_library_path(dest)
         dropped_into_subfolder = bool(
             target_folder
             and current_dir
+            and not dest_is_virtual
             and os.path.normcase(os.path.normpath(target_folder))
             != os.path.normcase(os.path.normpath(current_dir))
         )
 
         def _after_canvas_op():
+            if dest_is_virtual:
+                view = current_dir if self._dnd_is_valid_drop_dest(current_dir) else dest
+                self.display_thumbnails(view, force_refresh=True, preserve_scroll=True)
+                return
             self.refresh_folder_icon(dest)
             if dropped_into_subfolder:
                 # Files landed in a sibling/child folder: stay in the open directory so
@@ -292,14 +303,17 @@ class VtpDndMixin:
         sources = files + dirs
 
         if sources and hover:
-            dwell_ms = (time.monotonic() - (self._dnd_tree_hover_since or 0.0)) * 1000.0
-            if dwell_ms < self._dnd_target_dwell_ms:
-                logging.info(
-                    "[DnD] DROP tree ignored (short hover %.0fms < %dms)",
-                    dwell_ms, self._dnd_target_dwell_ms
-                )
-                return
             dest_folder = self._dnd_tree_path_from_item(hover)
+            # Virtual-library drops are membership adds (cheap/safe) — skip the anti-slip
+            # dwell that often rejects quick Explorer drops onto a VL row.
+            if not self._dnd_is_virtual_library_path(dest_folder):
+                dwell_ms = (time.monotonic() - (self._dnd_tree_hover_since or 0.0)) * 1000.0
+                if dwell_ms < self._dnd_target_dwell_ms:
+                    logging.info(
+                        "[DnD] DROP tree ignored (short hover %.0fms < %dms)",
+                        dwell_ms, self._dnd_target_dwell_ms
+                    )
+                    return
             logging.info(f"[DnD] DROP tree: dest_folder={dest_folder}")
             if not dest_folder:
                 logging.warning("[DnD] DROP tree: target not a folder (hover=%s)", hover)
@@ -319,8 +333,24 @@ class VtpDndMixin:
                 # Always stay on the open folder. Navigating to dirname(sources[0]) after
                 # a move jumped into the Explorer source when dropping external files.
                 view = getattr(self, "current_directory", None)
-                if not view or not os.path.isdir(view):
+                if not self._dnd_is_valid_drop_dest(view):
                     view = dest_folder
+
+                if self._dnd_is_virtual_library_path(dest_folder):
+                    # Show the library that received the drop (Explorer → VL must be visible).
+                    self.display_thumbnails(
+                        dest_folder,
+                        force_refresh=True,
+                        preserve_scroll=(
+                            self._dnd_virtual_library_name(view or "")
+                            == self._dnd_virtual_library_name(dest_folder)
+                        ),
+                    )
+                    try:
+                        self.select_current_folder_in_tree()
+                    except Exception:
+                        pass
+                    return
 
                 # Only folder moves need tree-node surgery; file drops are not tree nodes
                 # (update_tree_view(file) would walk the whole open tree looking for a jpg).
@@ -380,8 +410,26 @@ class VtpDndMixin:
     ):
         """
         Shared DnD helper: confirm dialog via after(1) (outside DnD handler), file work in a thread.
+        Virtual library destinations update membership JSON (no filesystem copy/move).
         """
         if not sources or not dest:
+            return
+
+        if self._dnd_is_virtual_library_path(dest):
+            def _deferred_vl():
+                self._dnd_transfer_to_virtual_library(
+                    sources, dest, is_move, on_success
+                )
+            self.after(1, _deferred_vl)
+            return
+
+        sources = self._dnd_filter_noop_fs_sources(sources, dest)
+        if not sources:
+            logging.info(
+                "[DnD] nothing to %s (all sources already at destination): dest=%s",
+                "move" if is_move else "copy",
+                dest,
+            )
             return
 
         def _deferred():
@@ -392,14 +440,194 @@ class VtpDndMixin:
             if getattr(self, "dnd_confirm_dialogs", False):
                 self._dnd_show_dialog_and_run(sources, dest, is_move, on_success)
             else:
-                threading.Thread(
-                    target=lambda: self._dnd_execute_copy_move_thread(
-                        sources, dest, is_move, on_success
-                    ),
-                    daemon=True,
-                ).start()
+                self._dnd_start_copy_move(sources, dest, is_move, on_success)
 
         self.after(1, _deferred)
+
+    def _dnd_filter_noop_fs_sources(self, sources: list[str], dest: str) -> list[str]:
+        """
+        Drop sources that would be a no-op on disk (already live in dest, or nest-into-self).
+        Avoids opening the progress dialog / worker just to skip everything — that path
+        has raced with tkdnd OLE teardown and caused native Access Violations.
+        """
+        if not sources or not dest or self._dnd_is_virtual_library_path(dest):
+            return list(sources or [])
+        dest_norm = os.path.normcase(os.path.normpath(dest))
+        kept = []
+        for src in sources:
+            if not src:
+                continue
+            try:
+                src_norm = os.path.normcase(os.path.normpath(src))
+                dst_norm = os.path.normcase(
+                    os.path.normpath(os.path.join(dest, os.path.basename(src)))
+                )
+            except Exception:
+                kept.append(src)
+                continue
+            if src_norm == dst_norm:
+                logging.info("[DnD] skip no-op (already in dest): %s", src)
+                continue
+            if os.path.isdir(src) and (
+                dest_norm == src_norm or dest_norm.startswith(src_norm + os.sep)
+            ):
+                logging.info("[DnD] skip nest-into-self: %s -> %s", src, dest)
+                continue
+            kept.append(src)
+        return kept
+
+    def _dnd_transfer_to_virtual_library(
+        self,
+        sources: list[str],
+        dest: str,
+        is_move: bool,
+        on_success=None,
+    ):
+        """
+        Drop onto a virtual library: add path references (files stay on disk).
+
+        Move between VLs (internal drag without Ctrl): remove from the open source VL
+        when it differs from the destination. External Explorer drops always *add*
+        (Shift still means FS-move semantics elsewhere; here membership is additive
+        unless dragging from another open VL with move intent).
+        """
+        dest_name = self._dnd_virtual_library_name(dest)
+        if not dest_name:
+            logging.warning("[DnD] VL transfer: invalid dest %r", dest)
+            return
+
+        sources = [p for p in sources if p and (os.path.isfile(p) or os.path.isdir(p))]
+        if not sources:
+            logging.warning("[DnD] VL transfer: no valid source paths")
+            return
+
+        # IMPORTANT: do NOT bail out when current_directory == dest.
+        # That case is "drop into the open virtual library" (Explorer → canvas) and
+        # must still add membership. The old same-library early-return blocked it.
+
+        source_vl = self._dnd_virtual_library_name(
+            getattr(self, "current_directory", None) or ""
+        )
+        # Only strip membership from a *different* source VL on move.
+        remove_from = (
+            source_vl
+            if (is_move and source_vl and source_vl != dest_name)
+            else None
+        )
+
+        added = 0
+        for src in sources:
+            try:
+                add_to_virtual_folder(dest_name, src)
+                added += 1
+            except Exception as e:
+                logging.warning("[DnD] VL add failed for %s: %s", src, e)
+
+        removed = False
+        if remove_from:
+            try:
+                removed = bool(remove_from_virtual_folder(remove_from, sources))
+            except Exception as e:
+                logging.warning(
+                    "[DnD] VL remove from source %r failed: %s", remove_from, e
+                )
+
+        logging.info(
+            "[DnD] VL transfer: dest=%r added=%d move=%s removed_from=%r",
+            dest_name,
+            added,
+            is_move,
+            remove_from if removed else None,
+        )
+
+        if hasattr(self, "refresh_virtual_libraries"):
+            try:
+                self.refresh_virtual_libraries()
+            except Exception:
+                logging.debug("[DnD] refresh_virtual_libraries failed", exc_info=True)
+
+        if on_success:
+            try:
+                on_success()
+            except Exception:
+                logging.debug("[DnD] VL on_success failed", exc_info=True)
+
+        if hasattr(self, "status_bar") and self.status_bar:
+            verb = "Moved" if removed else "Added"
+            self.status_bar.set_action_message(
+                f"DnD: {verb} {added} item(s) -> {dest_name}"
+            )
+
+    def _dnd_should_show_progress(self, sources: list[str]) -> bool:
+        """Show a blocking progress dialog for multi-item or folder ops (can look frozen otherwise)."""
+        if len(sources) >= 2:
+            return True
+        return any(os.path.isdir(p) for p in sources if p)
+
+    def _dnd_open_progress_dialog(self, sources: list[str], is_move: bool):
+        """Open modal progress dialog on the UI thread; store on self for conflict nesting."""
+        action = "Moving" if is_move else "Copying"
+        title = "Move" if is_move else "Copy"
+        try:
+            dialog = open_file_op_progress_dialog(
+                self,
+                title=title,
+                total=len(sources),
+                action_label=action,
+            )
+        except Exception:
+            logging.debug("[DnD] progress dialog open failed", exc_info=True)
+            self._dnd_progress_dialog = None
+            return None
+        self._dnd_progress_dialog = dialog
+        return dialog
+
+    def _dnd_close_progress_dialog(self):
+        dialog = getattr(self, "_dnd_progress_dialog", None)
+        self._dnd_progress_dialog = None
+        if dialog is None:
+            return
+        try:
+            dialog.close()
+        except Exception:
+            logging.debug("[DnD] progress dialog close failed", exc_info=True)
+
+    def _dnd_report_progress(self, dialog, index: int, total: int, path: str):
+        """Schedule a progress update on the main thread (safe from worker)."""
+        if dialog is None:
+            return
+        name = os.path.basename(path) or path
+
+        def _update():
+            try:
+                if dialog.winfo_exists():
+                    dialog.set_progress(index, total, detail=name)
+            except Exception:
+                pass
+
+        try:
+            self.after(0, _update)
+        except Exception:
+            pass
+
+    def _dnd_start_copy_move(
+        self,
+        sources: list[str],
+        dest: str,
+        is_move: bool,
+        on_success=None,
+    ):
+        """Open progress (if needed) on UI thread, then run copy/move in a worker."""
+        progress = None
+        if self._dnd_should_show_progress(sources):
+            progress = self._dnd_open_progress_dialog(sources, is_move)
+
+        threading.Thread(
+            target=lambda: self._dnd_execute_copy_move_thread(
+                sources, dest, is_move, on_success, progress=progress
+            ),
+            daemon=True,
+        ).start()
 
     def _cache_path_for_fs_path(self, fs_path: str) -> str:
         """
@@ -662,6 +890,11 @@ class VtpDndMixin:
                 self.stop_preview()
             except Exception:
                 pass
+        if ip is not None and hasattr(ip, "_stop_preview_image_animation"):
+            try:
+                ip._stop_preview_image_animation()
+            except Exception:
+                pass
         if ip is not None and hasattr(ip, "preview_image_tk"):
             ip.preview_image_tk = None
         try:
@@ -676,6 +909,7 @@ class VtpDndMixin:
         dest: str,
         is_move: bool,
         on_success=None,
+        progress=None,
     ):
         """Run copy/move in a worker; report results on main thread via after()."""
         action = "move" if is_move else "copy"
@@ -686,6 +920,8 @@ class VtpDndMixin:
         replace_all = False
         rename_all = False
         skip_all = False
+        cancelled = False
+        total = len(sources)
 
         if hasattr(self, "suspend_directory_watcher"):
             self.suspend_directory_watcher()
@@ -705,6 +941,7 @@ class VtpDndMixin:
                 )
                 if hasattr(self, "resume_directory_watcher"):
                     self.after(0, lambda: self.resume_directory_watcher(restart=True))
+                self.after(0, self._dnd_close_progress_dialog)
                 self.after(0, lambda s=src, d=dest: self.universal_dialog(
                     title="DnD warning",
                     message=(
@@ -716,7 +953,14 @@ class VtpDndMixin:
                 ))
                 return
 
-        for src in sources:
+        for idx, src in enumerate(sources, start=1):
+            if progress is not None and getattr(progress, "cancelled", False):
+                cancelled = True
+                logging.info("[DnD] %s canceled by user after %s item(s)", action, len(ok))
+                break
+
+            self._dnd_report_progress(progress, idx, total, src)
+
             dst = os.path.join(dest, os.path.basename(src))
             src_norm = os.path.normcase(os.path.normpath(src))
             dest_norm = os.path.normcase(os.path.normpath(dest))
@@ -747,6 +991,7 @@ class VtpDndMixin:
                         choice, apply_all = self._dnd_prompt_conflict_choice(dst)
                         if choice == "cancel":
                             logging.info("[DnD] conflict canceled by user: %s", dst)
+                            cancelled = True
                             break
                         if choice == "skip":
                             if apply_all:
@@ -798,6 +1043,7 @@ class VtpDndMixin:
                 logging.error(f"[DnD] error during {action}: {src} -> {dst}: {e}")
 
         def _finish():
+            self._dnd_close_progress_dialog()
             try:
                 self._dnd_release_preview_handles()
             except Exception:
@@ -805,9 +1051,10 @@ class VtpDndMixin:
             if hasattr(self, "resume_directory_watcher"):
                 self.resume_directory_watcher(restart=True)
             if ok:
-                self.status_bar.set_action_message(
-                    f"DnD: {action_past} {len(ok)} item(s) -> {dest_name}"
-                )
+                msg = f"DnD: {action_past} {len(ok)} item(s) -> {dest_name}"
+                if cancelled:
+                    msg += " (canceled)"
+                self.status_bar.set_action_message(msg)
                 for folder_path in dict.fromkeys(changed_cache_folders):
                     self.refresh_folder_icon(folder_path)
                 # Moving media out can empty a source folder (or strip media from an
@@ -825,6 +1072,8 @@ class VtpDndMixin:
                             )
                 if on_success:
                     on_success()
+            elif cancelled:
+                self.status_bar.set_action_message(f"DnD: {action} canceled")
             if fail:
                 names = ", ".join(os.path.basename(f) for f in fail[:3])
                 if len(fail) > 3:
@@ -843,13 +1092,30 @@ class VtpDndMixin:
         result: dict[str, tuple[str, bool]] = {"value": ("cancel", False)}
 
         def _ask():
+            progress = getattr(self, "_dnd_progress_dialog", None)
+            parent = self
+            try:
+                if progress is not None and progress.winfo_exists():
+                    parent = progress
+                    try:
+                        progress.grab_release()
+                    except Exception:
+                        pass
+            except Exception:
+                progress = None
             try:
                 result["value"] = open_conflict_dialog(
-                    self, os.path.basename(dst_path) or dst_path
+                    parent, os.path.basename(dst_path) or dst_path
                 )
             except Exception:
                 result["value"] = ("cancel", False)
             finally:
+                try:
+                    if progress is not None and progress.winfo_exists():
+                        progress.grab_set()
+                        progress.lift()
+                except Exception:
+                    pass
                 done.set()
 
         self.after(0, _ask)
@@ -896,12 +1162,7 @@ class VtpDndMixin:
                 self._dnd_release_preview_handles()
             except Exception:
                 pass
-            threading.Thread(
-                target=lambda: self._dnd_execute_copy_move_thread(
-                    sources, dest, is_move, on_success
-                ),
-                daemon=True,
-            ).start()
+            self._dnd_start_copy_move(sources, dest, is_move, on_success)
 
         def _cancel_run():
             logging.info("[DnD] Operation canceled by user.")
@@ -1059,13 +1320,32 @@ class VtpDndMixin:
         except Exception:
             pass
 
+    @staticmethod
+    def _dnd_is_virtual_library_path(path) -> bool:
+        return isinstance(path, str) and path.startswith("virtual_library://")
+
+    @staticmethod
+    def _dnd_virtual_library_name(path: str) -> str | None:
+        if not isinstance(path, str) or not path.startswith("virtual_library://"):
+            return None
+        name = path.split("://", 1)[1].strip()
+        return name or None
+
+    def _dnd_is_valid_drop_dest(self, path) -> bool:
+        """Real directory or virtual library URI."""
+        if not path or not isinstance(path, str):
+            return False
+        if self._dnd_is_virtual_library_path(path):
+            return True
+        return os.path.isdir(path)
+
     def _dnd_tree_path_from_item(self, item: str | None) -> str | None:
-        """Absolute path for tree item, or None."""
+        """Absolute path (or virtual_library:// URI) for tree item, or None."""
         if not item:
             return None
         try:
             path = self.tree.set(item, "path")
-            if path and os.path.isdir(path):
+            if path and self._dnd_is_valid_drop_dest(path):
                 return path
         except Exception:
             pass
@@ -1074,9 +1354,16 @@ class VtpDndMixin:
     # ── DnD debounce helpers ───────────────────────────────────────────────
     def _dnd_mark_thumb_press(self, event, file_path: str):
         self._dnd_drag_happened = False
+        self._thumb_double_click_consumed = False
         self._dnd_press_ts = time.monotonic()
         self._dnd_press_kind = "thumb"
         self._dnd_press_path = getattr(event.widget, "file_path", None) or file_path
+        try:
+            self._dnd_press_x_root = int(event.x_root)
+            self._dnd_press_y_root = int(event.y_root)
+        except Exception:
+            self._dnd_press_x_root = None
+            self._dnd_press_y_root = None
 
     def _dnd_mark_tree_press(self, event):
         self._dnd_press_ts = time.monotonic()
@@ -1194,6 +1481,11 @@ class VtpDndMixin:
         """
         tkinterdnd2 drag init from thumbnail canvas: prefer widget file_path, multi-drag from selection.
         """
+        # Real double-click already opened the file — do not start OLE drag on the same press.
+        if getattr(self, "_thumb_double_click_consumed", False):
+            logging.info("[DnD] DRAG OUT blocked (thumb): double-click already consumed")
+            return
+
         canvas_path = getattr(event.widget, 'file_path', None) or clicked_path
 
         if not canvas_path:
@@ -1241,6 +1533,17 @@ class VtpDndMixin:
                 self._dnd_press_path,
                 canvas_path,
                 is_multi_drag
+            )
+            return
+
+        if not self._dnd_movement_exceeds_threshold(
+            getattr(self, "_dnd_drag_min_distance_px_thumb", 16),
+            getattr(self, "_dnd_drag_distance_timeout_ms", 800),
+        ):
+            logging.info(
+                "[DnD] DRAG OUT blocked (thumb): movement below threshold (%spx) — treated as click, press_path=%r",
+                getattr(self, "_dnd_drag_min_distance_px_thumb", 16),
+                self._dnd_press_path,
             )
             return
 
@@ -1303,6 +1606,16 @@ class VtpDndMixin:
         """
         tkinterdnd2 drag init from tree: return selected folder path.
         """
+        # Require a fresh tree press for this gesture. Expander clicks return "break"
+        # before _dnd_mark_tree_press; without this guard a stale press_ts makes hold
+        # checks pass immediately and starts an accidental drag.
+        if self._dnd_press_kind != "tree":
+            logging.info(
+                "[DnD] DRAG OUT blocked (tree): press_kind=%r (need active tree press)",
+                self._dnd_press_kind,
+            )
+            return
+
         press_path = self._dnd_press_path if self._dnd_press_kind == "tree" else None
         sel = self.tree.selection()
         path = ""

@@ -11,6 +11,7 @@ so Canvas-only use never loads GL.
 
 import io
 import logging
+import os
 import queue as _Q
 import sys
 import threading
@@ -20,8 +21,16 @@ from PIL import Image as PILImage, ImageTk
 from screeninfo import get_monitors
 import tkinter as tk
 
-from gui_elements import CTkFlatContextMenu
-from image_loader import load_pil_image
+from gui_elements import (
+    CTkFlatContextMenu,
+    append_rating_cascade_to_flat_menu,
+    append_rating_submenu,
+    format_hud_rating_suffix,
+    rating_color_name,
+    rating_pyglet_rgba,
+    _current_file_rating,
+)
+from image_loader import load_pil_frames, load_pil_image
 from vtp_constants import IMAGE_FORMATS
 
 
@@ -63,13 +72,19 @@ class ImageViewerLegacy:
         self.image_window.grid_rowconfigure(0, weight=1)
         self.image_window.grid_columnconfigure(0, weight=1)
 
-        self.image = load_pil_image(self.image_path)
-        self.original_image = self.image.copy()
-        self.photo = ImageTk.PhotoImage(self.image)
+        # Animation (GIF / animated WebP) — empty until _apply_loaded_frames
+        self._anim_frames: list = []
+        self._anim_durations: list = []
+        self._anim_index = 0
+        self._anim_after_id = None
+
+        frames, durations = load_pil_frames(self.image_path)
+        self._apply_loaded_frames(frames, durations, reset_title=False)
+        self.photo = ImageTk.PhotoImage(self.original_image)
 
         self.canvas_image = self.canvas.create_image(0, 0, image=self.photo, anchor=tk.NW)
 
-        self.image_window.geometry(f"{self.image.width}x{self.image.height}")
+        self.image_window.geometry(f"{self.original_image.width}x{self.original_image.height}")
 
         self.zoom_factor = 1.0
         # Uživatelsky zvolený režim zobrazení — při přechodu na další obrázek se znovu aplikuje,
@@ -158,6 +173,7 @@ class ImageViewerLegacy:
 
         # Same flags as Pyglet viewer — used by main.py fast-open and delete flow
         self._running = True
+        self._start_animation_if_needed()
 
         #Na konci initu vynutíme první vykreslení HUDu
         self._overlay_after_id = self.image_window.after(100, self._refresh_overlays)
@@ -167,8 +183,79 @@ class ImageViewerLegacy:
 
         self.image_window.protocol("WM_DELETE_WINDOW", _on_toplevel_close)
 
+    def _is_animated(self) -> bool:
+        return len(getattr(self, "_anim_frames", []) or []) > 1
+
+    def _apply_loaded_frames(self, frames, durations, *, reset_title: bool = True):
+        """Install decoded frames as the current image (does not start the timer)."""
+        if not frames:
+            raise ValueError("no image frames")
+        self._stop_animation()
+        self._anim_frames = list(frames)
+        self._anim_durations = list(durations) if durations else [0] * len(frames)
+        if len(self._anim_durations) < len(self._anim_frames):
+            self._anim_durations.extend(
+                [100] * (len(self._anim_frames) - len(self._anim_durations))
+            )
+        self._anim_index = 0
+        self.image = self._anim_frames[0]
+        self.original_image = self._anim_frames[0]
+        if reset_title:
+            self.image_window.title(self.image_name)
+
+    def _stop_animation(self):
+        job = getattr(self, "_anim_after_id", None)
+        if job is None:
+            return
+        try:
+            self.image_window.after_cancel(job)
+        except Exception:
+            pass
+        self._anim_after_id = None
+
+    def _start_animation_if_needed(self):
+        self._stop_animation()
+        if not getattr(self, "_running", False) or not self._is_animated():
+            return
+        self._schedule_next_anim_frame()
+
+    def _schedule_next_anim_frame(self):
+        if not getattr(self, "_running", False) or not self._is_animated():
+            return
+        delay = self._anim_durations[self._anim_index % len(self._anim_durations)]
+        self._anim_after_id = self.image_window.after(delay, self._advance_anim_frame)
+
+    def _advance_anim_frame(self):
+        self._anim_after_id = None
+        if not getattr(self, "_running", False) or not self._is_animated():
+            return
+        try:
+            if not self.image_window.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        self._anim_index = (self._anim_index + 1) % len(self._anim_frames)
+        self.original_image = self._anim_frames[self._anim_index]
+        # Fast path only — HQ debounce / HUD redraw would fight the frame timer.
+        self.update_image(high_quality=False, refresh_overlays=False)
+        self._schedule_next_anim_frame()
+
+    def _map_anim_frames(self, transform):
+        """Apply a PIL transform to every animation frame (and the current view)."""
+        was_animated = self._is_animated()
+        if was_animated:
+            self._stop_animation()
+        self._anim_frames = [transform(f) for f in self._anim_frames]
+        if not self._anim_frames:
+            return
+        self._anim_index = min(self._anim_index, len(self._anim_frames) - 1)
+        self.original_image = self._anim_frames[self._anim_index]
+        self.image = self.original_image
+        if was_animated:
+            self._start_animation_if_needed()
+
     def _cancel_pending_image_timers(self):
-        for attr in ("_hq_timer", "_overlay_after_id", "_zoom_timer"):
+        for attr in ("_hq_timer", "_overlay_after_id", "_zoom_timer", "_anim_after_id"):
             job = getattr(self, attr, None)
             if job is None:
                 continue
@@ -182,6 +269,8 @@ class ImageViewerLegacy:
         """Match Pyglet viewer API for controller / fast-open code paths."""
         self._running = False
         self._cancel_pending_image_timers()
+        self._anim_frames = []
+        self._anim_durations = []
         try:
             if self.image_window.winfo_exists():
                 self.image_window.destroy()
@@ -263,9 +352,8 @@ class ImageViewerLegacy:
         self.image_name = name
 
         try:
-            self.image = load_pil_image(path)
-            self.original_image = self.image.copy()
-            self.image_window.title(name)
+            frames, durations = load_pil_frames(path)
+            self._apply_loaded_frames(frames, durations, reset_title=True)
 
             mode = self._view_fit_mode
             if mode == "best_fit":
@@ -280,6 +368,8 @@ class ImageViewerLegacy:
             else:
                 self.zoom_factor = 1.0
                 self.update_image(center=True)
+
+            self._start_animation_if_needed()
 
             # --- AKTUALIZACE HUD ---
             # Zavoláme to explicitně, aby se aktualizoval index souboru (např. 5/120)
@@ -361,7 +451,7 @@ class ImageViewerLegacy:
         self.update_image(center=True)
         
     def rotate_left(self):
-        self.original_image = self.original_image.rotate(90, expand=True)
+        self._map_anim_frames(lambda im: im.rotate(90, expand=True))
         if self._view_fit_mode == "best_fit":
             self.best_fit()
         elif self._view_fit_mode == "fit_width":
@@ -376,7 +466,7 @@ class ImageViewerLegacy:
             self.update_image(center=True)
 
     def rotate_right(self):
-        self.original_image = self.original_image.rotate(-90, expand=True)
+        self._map_anim_frames(lambda im: im.rotate(-90, expand=True))
         if self._view_fit_mode == "best_fit":
             self.best_fit()
         elif self._view_fit_mode == "fit_width":
@@ -391,11 +481,11 @@ class ImageViewerLegacy:
             self.update_image(center=True)
 
     def flip_horizontal(self):
-        self.original_image = self.original_image.transpose(PILImage.FLIP_LEFT_RIGHT)
+        self._map_anim_frames(lambda im: im.transpose(PILImage.FLIP_LEFT_RIGHT))
         self.update_image()
 
     def flip_vertical(self):
-        self.original_image = self.original_image.transpose(PILImage.FLIP_TOP_BOTTOM)
+        self._map_anim_frames(lambda im: im.transpose(PILImage.FLIP_TOP_BOTTOM))
         self.update_image()
 
     def save_image_to_folder(self):
@@ -493,7 +583,7 @@ class ImageViewerLegacy:
                 self._refresh_overlays()
 
 
-    def update_image(self, high_quality=False, center=False):
+    def update_image(self, high_quality=False, center=False, refresh_overlays=True):
         """
         Aktualizuje obrázek na plátně.
         high_quality=False -> Použije rychlý BILINEAR (pro zoomování).
@@ -544,11 +634,17 @@ class ImageViewerLegacy:
         # 4. Naplánování HQ renderu (Debounce)
         # Pokud jsme teď jeli v rychlém režimu, řekneme: 
         # "Za 150ms to překresli do hezka, pokud do té doby uživatel nic neudělá."
-        if not high_quality and getattr(self, "_running", False):
+        # Animace: žádný HQ debounce — soupeřil by s frame timerem.
+        if (
+            not high_quality
+            and getattr(self, "_running", False)
+            and not self._is_animated()
+        ):
             self._hq_timer = self.image_window.after(150, self._render_hq)
             
         # --- ZDE MUSÍ BÝT TOTO: ---
-        self._refresh_overlays()
+        if refresh_overlays:
+            self._refresh_overlays()
 
     def _render_hq(self):
         """Voláno časovačem, když je klid."""
@@ -599,25 +695,59 @@ class ImageViewerLegacy:
             pass
 
         text = f"{index_str}{self.image_name}  |  {w}x{h} px"
+        rating = _current_file_rating(self.controller, self.image_path)
+        rating_suffix = format_hud_rating_suffix(rating)
+        rating_color = rating_color_name(rating)
         
         # Barva textu podle pozadí (aby byl vždy čitelný)
         text_color = "black" if self.bg_colors[self.bg_index] == "white" else "white"
         
-        # Pozice (levý horní roh, ale fixní vůči oknu, ne plátnu)
-        # Canvas v Tkinteru posouvá vše s objekty. 
-        # Aby HUD "plaval" nad obrázkem a neujížděl při posunu, je lepší použít canvas.canvasx/y
-        # NEBO jednodušeji: použít Label widget umístěný přes place(), což je robustnější.
-        
         # Pro jednoduchost a rychlost zkusíme canvas text s offsetem podle scrollu:
         cx = self.canvas.canvasx(10)
         cy = self.canvas.canvasy(10)
+        font = ("Segoe UI", 10, "bold")
         
         # Vytvoření textu s lehkým stínem pro čitelnost
-        self.canvas.create_text(cx+1, cy+1, text=text, anchor="nw", fill="black", font=("Segoe UI", 10, "bold"), tags="hud")
-        self.info_text_id = self.canvas.create_text(cx, cy, text=text, anchor="nw", fill=text_color, font=("Segoe UI", 10, "bold"), tags="hud")
+        self.canvas.create_text(cx + 1, cy + 1, text=text, anchor="nw", fill="black", font=font, tags="hud")
+        self.info_text_id = self.canvas.create_text(cx, cy, text=text, anchor="nw", fill=text_color, font=font, tags="hud")
+
+        if rating_suffix:
+            try:
+                import tkinter.font as tkfont
+                base_w = tkfont.Font(font=font).measure(text)
+            except Exception:
+                base_w = len(text) * 6
+            rx = cx + base_w
+            self.canvas.create_text(
+                rx + 1, cy + 1, text=rating_suffix, anchor="nw", fill="black", font=font, tags="hud"
+            )
+            self.canvas.create_text(
+                rx, cy, text=rating_suffix, anchor="nw", fill=rating_color, font=font, tags="hud"
+            )
         
         # Zajistit, že HUD je vždy nahoře
         self.canvas.tag_raise("hud")
+
+    def notify_rating_changed(self, rating=None):
+        """Refresh HUD after rating assign (visible even over fullscreen image)."""
+        was_off = not getattr(self, "show_info", True)
+        if was_off:
+            self.show_info = True
+        self.draw_info_hud()
+        if was_off and hasattr(self, "image_window"):
+            job = getattr(self, "_rating_hud_restore_job", None)
+            if job is not None:
+                try:
+                    self.image_window.after_cancel(job)
+                except Exception:
+                    pass
+
+            def _restore():
+                self._rating_hud_restore_job = None
+                self.show_info = False
+                self.draw_info_hud()
+
+            self._rating_hud_restore_job = self.image_window.after(3000, _restore)
 
     def _zoom_percent_text(self):
         return f"{int(round(self.zoom_factor * 100))}%"
@@ -784,6 +914,10 @@ class ImageViewerLegacy:
         menu.add_command(label=f"Save As ({hk_label('image_save', 'Ctrl+S')})", command=self.save_image_to_folder)
         menu.add_command(label=f"Copy ({hk_label('image_copy', 'Ctrl+C')})", command=self.copy_image_to_clipboard)
         menu.add_separator()
+        _rating_path = getattr(self, "image_path", None)
+        if _rating_path and os.path.isfile(_rating_path):
+            append_rating_submenu(menu, self.controller, _rating_path)
+            menu.add_separator()
         menu.add_command(label=f"Delete ({hk_label('image_delete', 'Del')})", command=self.delete_current_image)
         menu.add_separator()
         if callable(getattr(self.controller, "open_library", None)):
@@ -1127,6 +1261,8 @@ class ImageViewerGPU:
         self._sprite     = None
         self._hud_label  = None
         self._hud_shadow = None
+        self._hud_rating_label = None
+        self._hud_rating_shadow = None
         self._zoom_label = None
         self._zoom_shadow = None
         self._keys       = None
@@ -1260,6 +1396,18 @@ class ImageViewerGPU:
             batch=self._batch, group=hud_group,
         )
         self._hud_label = pyglet.text.Label(
+            '', font_name='Segoe UI', font_size=10, weight='bold',
+            x=10, y=win_h - 20,
+            color=self._HUD_ON_SURFACE,
+            batch=self._batch, group=hud_group,
+        )
+        self._hud_rating_shadow = pyglet.text.Label(
+            '', font_name='Segoe UI', font_size=10, weight='bold',
+            x=11, y=win_h - 21,
+            color=(0, 0, 0, 200),
+            batch=self._batch, group=hud_group,
+        )
+        self._hud_rating_label = pyglet.text.Label(
             '', font_name='Segoe UI', font_size=10, weight='bold',
             x=10, y=win_h - 20,
             color=self._HUD_ON_SURFACE,
@@ -1434,6 +1582,9 @@ class ImageViewerGPU:
         )
         self._hud_label.y  = self.window.height - 20
         self._hud_shadow.y = self.window.height - 21
+        if self._hud_rating_label is not None:
+            self._hud_rating_label.y = self.window.height - 20
+            self._hud_rating_shadow.y = self.window.height - 21
         zoom_x, zoom_y = self._zoom_overlay_position()
         self._zoom_label.x = zoom_x
         self._zoom_label.y = zoom_y
@@ -1813,22 +1964,59 @@ class ImageViewerGPU:
         if not self.show_info:
             self._hud_label.text  = ''
             self._hud_shadow.text = ''
+            if self._hud_rating_label is not None:
+                self._hud_rating_label.text = ''
+                self._hud_rating_shadow.text = ''
             return
-        text = (
+        base_text = (
             f"{self._get_hud_index_str()}{self.image_name}"
             f"  |  {self._img_w}×{self._img_h} px"
         )
-        self._hud_label.text  = text
-        self._hud_shadow.text = text
+        rating = _current_file_rating(self.controller, self.image_path)
+        rating_suffix = format_hud_rating_suffix(rating)
+        self._hud_label.text  = base_text
+        self._hud_shadow.text = base_text
         if self._BG_HEX[self.bg_index] == "white":
             self._hud_label.color = (0, 0, 0, 230)
             self._hud_shadow.color = (255, 255, 255, 120)
         else:
             self._hud_label.color = self._HUD_ON_SURFACE
             self._hud_shadow.color = (0, 0, 0, 200)
+        if self._hud_rating_label is not None:
+            self._hud_rating_label.text = rating_suffix
+            self._hud_rating_shadow.text = rating_suffix
+            self._hud_rating_label.color = rating_pyglet_rgba(rating)
+            self._hud_rating_shadow.color = (0, 0, 0, 200)
+            rating_x = 10 + int(self._hud_label.content_width)
+            self._hud_rating_label.x = rating_x
+            self._hud_rating_shadow.x = rating_x + 1
 
     def draw_info_hud(self):
         self._schedule_pyglet(self._update_hud)
+
+    def notify_rating_changed(self, rating=None):
+        """Refresh HUD after rating assign (visible even over fullscreen image)."""
+        was_off = not getattr(self, "show_info", True)
+        if was_off:
+            self.show_info = True
+        self.draw_info_hud()
+        if was_off:
+            parent = getattr(self, "parent", None)
+            if parent is None:
+                return
+            job = getattr(self, "_rating_hud_restore_job", None)
+            if job is not None:
+                try:
+                    parent.after_cancel(job)
+                except Exception:
+                    pass
+
+            def _restore():
+                self._rating_hud_restore_job = None
+                self.show_info = False
+                self.draw_info_hud()
+
+            self._rating_hud_restore_job = parent.after(3000, _restore)
 
     # ------------------------------------------------------------------
     # Context menu  (Tkinter thread)
@@ -1876,6 +2064,10 @@ class ImageViewerGPU:
         menu.add_command(label="Save As…", accelerator=hk('image_save', 'Ctrl+S'), command=self.save_image_to_folder)
         menu.add_command(label="Copy", accelerator=hk('image_copy', 'Ctrl+C'), command=self.copy_image_to_clipboard)
         menu.add_separator()
+        _rating_path = getattr(self, "image_path", None)
+        if _rating_path and os.path.isfile(_rating_path):
+            append_rating_cascade_to_flat_menu(menu, self.controller, _rating_path)
+            menu.add_separator()
         menu.add_command(label="Delete", accelerator=hk('image_delete', 'Del'), command=self.delete_current_image)
         menu.add_separator()
         if callable(getattr(self.controller, "open_library", None)):

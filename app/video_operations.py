@@ -30,6 +30,12 @@ import sys
 import ctypes
 # from gui_elements import create_menu
 from utils import create_menu
+from gui_elements import (
+    append_rating_submenu,
+    format_hud_rating_suffix,
+    rating_vlc_marquee_color,
+    _current_file_rating,
+)
 from hotkeys import DEFAULT_HOTKEYS, DOCUMENTED_EXTRA_HOTKEYS, menu_accel
 import logging
 
@@ -919,13 +925,16 @@ class VideoPlayer:
             logging.info("[BrokenOverlay] strict: state=%s no dims -> overlay", st)
             self._show_broken_playback_overlay()
     
-    def show_hud(self):
+    def show_hud(self, force=False):
         """
         Zobrazí Overlay HUD (Info) přímo v obraze pomocí OSD funkce VLC.
         Je to bezpečné, neinvazivní a funguje i ve Fullscreenu.
+        ``force=True`` ukáže marquee i když je video HUD vypnutý (např. po změně ratingu).
         """
             
-        if not getattr(self.controller, "video_show_hud", True) or not self.player:
+        if not force and not getattr(self.controller, "video_show_hud", True):
+            return
+        if not self.player:
             return    
             
      
@@ -939,20 +948,16 @@ class VideoPlayer:
                 total = len(self.playlist_manager.playlist)
                 index_str = f"[{current}/{total}] "
             elif self.controller.video_files:
-                 # Fallback pro složku
+                 # Fallback for folder
                  current = self.controller.current_video_index + 1
                  total = len(self.controller.video_files)
                  index_str = f"[{current}/{total}] "
 
-            # Jméno a Čas
             name = self.video_name
-            
-            # Formátování času (volitelné, pokud to tam chceš)
-            # t_curr = int(self.player.get_time() / 1000)
-            # t_len = int(self.player.get_length() / 1000)
-            # time_str = f"{t_curr//60:02}:{t_curr%60:02} / {t_len//60:02}:{t_len%60:02}"
-            
-            full_text = f"{index_str}{name}".lower()
+            rating = _current_file_rating(self.controller, self.video_path)
+            rating_str = format_hud_rating_suffix(rating)
+            # Keep name lowercased; rating suffix keeps menu colors via marquee tint.
+            full_text = f"{index_str}{name}".lower() + rating_str
 
             # 2. Poslání do VLC (Marquee - běžící text, ale my ho zastavíme)
             # Konstanty pro VLC Marquee (aby to fungovalo i bez importu vlc enumů)
@@ -970,8 +975,8 @@ class VideoPlayer:
             # Nastavit text
             self.player.video_set_marquee_string(_Text, full_text)
             
-            # Nastavení vzhledu
-            self.player.video_set_marquee_int(_Color, 0xB0B3B8)
+            # Nastavení vzhledu — rating barva (1=modrá … 5=červená), jinak šedá
+            self.player.video_set_marquee_int(_Color, rating_vlc_marquee_color(rating))
             self.player.video_set_marquee_int(_Opacity, 200)     # Průhlednost (0-255)
             self.player.video_set_marquee_int(_Size, 24)         # Velikost písma (px)
             self.player.video_set_marquee_int(_Timeout, 3000)    # Zmizí za 3000 ms (3s)
@@ -3463,6 +3468,14 @@ class VideoPlayer:
         )
 
         menu.add_separator()
+
+        append_rating_submenu(
+            menu,
+            self.controller,
+            self.video_path,
+            hotkeys_map=_hk,
+            guard_menu_fn=self._guard_menu_commands,
+        )
 
         speed_menu = tk.Menu(menu, tearoff=0)
         self._guard_menu_commands(speed_menu)

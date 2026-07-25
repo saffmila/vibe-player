@@ -21,7 +21,7 @@ import tkinterdnd2 as dnd
 from PIL import Image, ImageDraw, ImageOps, ImageTk
 
 from file_operations import *
-from gui_elements import create_search_window
+from gui_elements import append_rating_submenu, create_search_window
 from image_operations import create_image_viewer
 from image_loader import load_pil_image, get_pil_image_size
 from video_operations import VideoPlayer
@@ -3321,7 +3321,24 @@ class VtpGridMixin:
         if _pn:
             _pn_opts["accelerator"] = _pn
         menu.add_command(**_pn_opts)
-        menu.add_command(label="Edit Rating", command=lambda: self.edit_rating(file_path))
+        def _apply_thumb_rating(rating, fp=file_path):
+            """Rate whole selection when the clicked thumb is selected; else just that file."""
+            selected = getattr(self, "selected_thumbnails", None) or []
+            db = getattr(self, "database", None)
+            if selected and db is not None:
+                norm = db.normalize_path(fp)
+                if any(db.normalize_path(p) == norm for p, _, _ in selected):
+                    self.set_rating(rating)
+                    return
+            self.save_rating(fp, rating)
+
+        append_rating_submenu(
+            menu,
+            self,
+            file_path,
+            hotkeys_map=_hk,
+            apply_fn=_apply_thumb_rating,
+        )
         _rn = rename_accelerators_label(_hk)
         _rename_opts = {"label": "Rename", "command": lambda: self.rename_item(file_path)}
         if _rn:
@@ -3365,15 +3382,38 @@ class VtpGridMixin:
 
         # menu.add_command(label="Create New Virtual Library", command=self.create_virtual_library)
         # Add to / Remove from Virtual Library
-        virtual_libraries = load_virtual_folders()["virtual_folders"].keys()
+        virtual_libraries = list(load_virtual_folders()["virtual_folders"].keys())
+        active_vl = None
+        cd = getattr(self, "current_directory", None)
+        if isinstance(cd, str) and cd.startswith("virtual_library://"):
+            active_vl = cd.split("://", 1)[1].strip() or None
+            if active_vl and active_vl not in virtual_libraries:
+                active_vl = None
+
         if virtual_libraries:
             add_menu = tk.Menu(menu, tearoff=0)
-            remove_menu = tk.Menu(menu, tearoff=0)
             for name in virtual_libraries:
-                add_menu.add_command(label=name, command=lambda name=name: self.add_to_virtual_library(self.selected_thumbnails, name))
-                remove_menu.add_command(label=name, command=lambda name=name: self.remove_from_virtual_library(self.selected_thumbnails, name))
+                add_menu.add_command(
+                    label=name,
+                    command=lambda name=name: self.add_to_virtual_library(
+                        self.selected_thumbnails, name
+                    ),
+                )
             menu.add_cascade(label="Add to Virtual Library", menu=add_menu)
-            menu.add_cascade(label="Remove from Virtual Library", menu=remove_menu)
+
+            # Remove: only the library currently open (listing every VL is confusing).
+            if active_vl:
+                menu.add_command(
+                    label=f"Remove from Virtual Library ({active_vl})",
+                    command=lambda name=active_vl: self.remove_from_virtual_library(
+                        self.selected_thumbnails, name
+                    ),
+                )
+            else:
+                menu.add_command(
+                    label="Remove from Virtual Library",
+                    state=tk.DISABLED,
+                )
         else:
             menu.add_command(label="Add to Virtual Library", state=tk.DISABLED)
             menu.add_command(label="Remove from Virtual Library", state=tk.DISABLED)
@@ -4396,6 +4436,13 @@ class VtpGridMixin:
                 canvas.bind('<Return>', lambda e, path=file_path: self.on_thumbnail_enter_key(e, path))
             else:
                 canvas.bind("<Return>", lambda e, path=file_path, name=file_name: self.open_image_viewer(path, name))
+
+            # Windows <Double-Button-1> opens directly — do not route through timing-based
+            # on_thumbnail_click (first click of the pair is often swallowed by DnD).
+            canvas.bind(
+                "<Double-Button-1>",
+                lambda e, path=file_path: self._handle_thumbnail_double_click(path),
+            )
 
 
         # Add selection and context menu bindings for both wide folders and standard thumbnails

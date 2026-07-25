@@ -56,31 +56,33 @@ _WANTS_SUPERFAST_MEDIA = os.environ.get("VIBE_SUPERFAST_MEDIA", "1").strip().low
 )
 
 # --- Step 3: Determine faulthandler output target ---
+# Use a *separate* file from app.log. RotatingFileHandler renames app.log on
+# rollover; keeping faulthandler's handle on the same path causes WinError 32
+# (file in use) and floods STDERR with Logging error stacks.
 faulthandler_output_file = None
 log_file_handle = None
+FAULT_LOG_PATH = os.path.join(APP_DIR, "app.fault.log")
 
 if IS_HEADLESS:
     try:
-        log_file_handle = open(log_path, "a", encoding="utf-8")
+        log_file_handle = open(FAULT_LOG_PATH, "a", encoding="utf-8")
         faulthandler_output_file = log_file_handle
-        sys.stdout = log_file_handle
-        sys.stderr = log_file_handle
-        logging.info("pythonw.exe mode detected, stdout/stderr redirected to log file.")
+        # stdout/stderr already go to app.log via StreamToLogger from setup_logging.
+        logging.info("pythonw.exe mode detected, faulthandler -> %s", FAULT_LOG_PATH)
     except Exception:
         pass
 else:
     # Console build: keep stderr for interactive debugging, also mirror native
-    # crash dumps into app.log so hard AVs leave a footprint after restart.
+    # crash dumps into app.fault.log so hard AVs leave a footprint after restart.
     try:
-        log_file_handle = open(log_path, "a", encoding="utf-8")
+        log_file_handle = open(FAULT_LOG_PATH, "a", encoding="utf-8")
         faulthandler_output_file = log_file_handle
     except Exception:
         faulthandler_output_file = original_stderr
         log_file_handle = None
     if faulthandler_output_file is not original_stderr:
         try:
-            # Dual-enable is not supported — prefer log file for post-mortem.
-            logging.info("Faulthandler will write native crash dumps to %s", log_path)
+            logging.info("Faulthandler will write native crash dumps to %s", FAULT_LOG_PATH)
         except Exception:
             pass
 

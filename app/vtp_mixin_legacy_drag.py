@@ -14,7 +14,11 @@ from clipboard_file_list import (
     get_clipboard_file_paths,
     set_clipboard_file_paths,
 )
-from gui_elements import get_conflict_rename_path, open_conflict_dialog
+from gui_elements import (
+    get_conflict_rename_path,
+    open_conflict_dialog,
+    open_file_op_progress_dialog,
+)
 from hotkeys import DEFAULT_HOTKEYS, format_accelerator_menu
 
 
@@ -1019,66 +1023,125 @@ class VtpLegacyDragMixin:
             replace_all = False
             rename_all = False
             skip_all = False
-
-            for file_path in sources:
-                if not os.path.exists(file_path):
-                    continue
-                if os.path.normcase(dest_dir) == os.path.normcase(file_path):
-                    continue
-                if not copy_mode and self._paste_move_would_nest_folder_inside_itself(file_path, dest_dir):
-                    logging.info("[clipboard] Skip move into self: %s -> %s", file_path, dest_dir)
-                    continue
-
-                new_path = os.path.join(dest_dir, os.path.basename(file_path))
-
+            action_label = "Copying" if copy_mode else "Moving"
+            progress = None
+            show_progress = len(sources) >= 2 or any(os.path.isdir(p) for p in sources if p)
+            if show_progress:
                 try:
-                    if os.path.exists(new_path):
-                        if skip_all:
-                            continue
-                        conflict_action = "replace" if replace_all else "rename" if rename_all else None
-                        if conflict_action is None:
-                            action, apply_all = self._legacy_prompt_conflict_choice(new_path)
-                            if action == "cancel":
-                                break
-                            if action == "skip":
-                                if apply_all:
-                                    skip_all = True
+                    progress = open_file_op_progress_dialog(
+                        self,
+                        title="Paste" if copy_mode else "Move",
+                        total=len(sources),
+                        action_label=action_label,
+                    )
+                    self._dnd_progress_dialog = progress
+                except Exception:
+                    logging.debug("[clipboard] progress dialog open failed", exc_info=True)
+                    progress = None
+
+            try:
+                for idx, file_path in enumerate(sources, start=1):
+                    if progress is not None and progress.cancelled:
+                        logging.info("[clipboard] Paste canceled by user")
+                        break
+                    if progress is not None:
+                        progress.set_progress(
+                            idx,
+                            len(sources),
+                            detail=os.path.basename(file_path) or file_path,
+                        )
+                        try:
+                            self.update_idletasks()
+                        except Exception:
+                            pass
+
+                    if not os.path.exists(file_path):
+                        continue
+                    if os.path.normcase(dest_dir) == os.path.normcase(file_path):
+                        continue
+                    if not copy_mode and self._paste_move_would_nest_folder_inside_itself(file_path, dest_dir):
+                        logging.info("[clipboard] Skip move into self: %s -> %s", file_path, dest_dir)
+                        continue
+
+                    new_path = os.path.join(dest_dir, os.path.basename(file_path))
+
+                    try:
+                        if os.path.exists(new_path):
+                            if skip_all:
                                 continue
-                            conflict_action = action
-                            if action == "replace" and apply_all:
-                                replace_all = True
-                            elif action == "rename" and apply_all:
-                                rename_all = True
-                        if conflict_action == "rename":
-                            new_path = get_conflict_rename_path(new_path)
-                        elif conflict_action == "replace" and not self._legacy_delete_existing_target(new_path):
-                            continue
+                            conflict_action = "replace" if replace_all else "rename" if rename_all else None
+                            if conflict_action is None:
+                                # Paste runs on the UI thread — call the modal dialog
+                                # directly (never Event.wait + after, that deadlocks).
+                                parent = self
+                                if progress is not None:
+                                    try:
+                                        if progress.winfo_exists():
+                                            parent = progress
+                                            progress.grab_release()
+                                    except Exception:
+                                        pass
+                                try:
+                                    action, apply_all = open_conflict_dialog(
+                                        parent,
+                                        os.path.basename(new_path) or new_path,
+                                    )
+                                finally:
+                                    if progress is not None:
+                                        try:
+                                            if progress.winfo_exists():
+                                                progress.grab_set()
+                                                progress.lift()
+                                        except Exception:
+                                            pass
+                                if action == "cancel":
+                                    break
+                                if action == "skip":
+                                    if apply_all:
+                                        skip_all = True
+                                    continue
+                                conflict_action = action
+                                if action == "replace" and apply_all:
+                                    replace_all = True
+                                elif action == "rename" and apply_all:
+                                    rename_all = True
+                            if conflict_action == "rename":
+                                new_path = get_conflict_rename_path(new_path)
+                            elif conflict_action == "replace" and not self._legacy_delete_existing_target(new_path):
+                                continue
 
-                    is_dir = os.path.isdir(file_path)
-                    if not copy_mode:
-                        self.database.update_folder_path(file_path, new_path)
-                    self.perform_move_or_copy(file_path, new_path, copy_mode, moved_sources)
-                    if is_dir:
-                        self.move_cache(file_path, new_path)
-                        sync_dir_cache = getattr(self, "_sync_directory_parent_cache_status", None)
-                        if callable(sync_dir_cache):
-                            sync_dir_cache(file_path, new_path, not copy_mode)
-                        self.refresh_folder_icons_subtree(file_path)
-                        self.refresh_folder_icons_subtree(new_path)
-                    elif os.path.exists(new_path):
-                        marker = getattr(self, "_mark_media_destination_folder_cached", None)
-                        if callable(marker):
-                            marker(file_path, new_path, not copy_mode)
-                        reset_source = getattr(self, "_reset_media_source_folder_if_empty", None)
-                        if callable(reset_source):
-                            reset_source(file_path, not copy_mode)
-                except Exception as e:
-                    logging.info("Paste error for %s: %s", file_path, e)
+                        is_dir = os.path.isdir(file_path)
+                        if not copy_mode:
+                            self.database.update_folder_path(file_path, new_path)
+                        self.perform_move_or_copy(file_path, new_path, copy_mode, moved_sources)
+                        if is_dir:
+                            self.move_cache(file_path, new_path)
+                            sync_dir_cache = getattr(self, "_sync_directory_parent_cache_status", None)
+                            if callable(sync_dir_cache):
+                                sync_dir_cache(file_path, new_path, not copy_mode)
+                            self.refresh_folder_icons_subtree(file_path)
+                            self.refresh_folder_icons_subtree(new_path)
+                        elif os.path.exists(new_path):
+                            marker = getattr(self, "_mark_media_destination_folder_cached", None)
+                            if callable(marker):
+                                marker(file_path, new_path, not copy_mode)
+                            reset_source = getattr(self, "_reset_media_source_folder_if_empty", None)
+                            if callable(reset_source):
+                                reset_source(file_path, not copy_mode)
+                    except Exception as e:
+                        logging.info("Paste error for %s: %s", file_path, e)
 
-            self._finalize_paste_operations(
-                dest_dir, [] if copy_mode else moved_sources, copy_mode
-            )
-            self.resume_directory_watcher(restart=True)
+                self._finalize_paste_operations(
+                    dest_dir, [] if copy_mode else moved_sources, copy_mode
+                )
+            finally:
+                self._dnd_progress_dialog = None
+                if progress is not None:
+                    try:
+                        progress.close()
+                    except Exception:
+                        pass
+                self.resume_directory_watcher(restart=True)
 
         self.after(1, process_paste_main)
 

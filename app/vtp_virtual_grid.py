@@ -1483,7 +1483,7 @@ class VtpVirtualGridMixin:
                      lambda e: self.select_range(_get_path(), _get_idx()))
         canvas.bind("<Double-Button-1>",
                      lambda e: (self.display_thumbnails(_get_path()) if _is_folder()
-                                else self.on_thumbnail_click(e, _get_path())))
+                                else self._handle_thumbnail_double_click(_get_path())))
         canvas.bind("<ButtonRelease-1>",
                      lambda e: None if _is_folder() else self.on_thumbnail_click(e, _get_path()))
         canvas.bind("<Button-3>",

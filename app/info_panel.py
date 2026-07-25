@@ -9,7 +9,7 @@ import tkinter as tk
 from database import Database
 from video_operations import VideoPlayer
 from PIL import Image, ImageTk
-from image_loader import load_pil_image
+from image_loader import load_pil_frames
 import os
 import queue
 import threading
@@ -62,6 +62,10 @@ class InfoPanelFrame(ctk.CTkFrame):
         # Preview: worker may only push file-check results; VLC + Tk stay on the main thread.
         self._preview_ticket = 0
         self._preview_ready_queue = queue.Queue(maxsize=64)
+        self._preview_anim_after_id = None
+        self._preview_anim_photos = []
+        self._preview_anim_durations = []
+        self._preview_anim_index = 0
         
         self.pack_propagate(False)
         self.collapsed = False
@@ -497,7 +501,13 @@ class InfoPanelFrame(ctk.CTkFrame):
             menu.grab_release()
 
     def show_image_preview(self, image_path):
-        """Show a still-image preview. Decode/resize off the UI thread so large PNGs don't freeze."""
+        """Show an image preview (animated GIF/WebP when applicable).
+
+        Decode/resize off the UI thread so large PNGs don't freeze. PhotoImage
+        objects are built on the main thread; animation only swaps the Label image.
+        """
+        self._stop_preview_image_animation()
+
         # Stop video preview
         if self.preview_player is not None:
             try:
@@ -533,29 +543,39 @@ class InfoPanelFrame(ctk.CTkFrame):
 
         def worker():
             err = None
-            pil_image = None
+            pil_frames = None
+            durations = None
             try:
                 if not os.path.isfile(path):
                     err = "File not found."
                 else:
-                    image = load_pil_image(path)
-                    try:
-                        from PIL import ImageOps
-                        image = ImageOps.exif_transpose(image) or image
-                    except Exception:
-                        pass
-                    img_w, img_h = image.size
-                    img_ratio = (img_w / img_h) if img_h else 1.0
-                    panel_ratio = target_width / target_height if target_height else 1.0
-                    if panel_ratio > img_ratio:
-                        new_height = target_height
-                        new_width = max(1, int(new_height * img_ratio))
-                    else:
-                        new_width = target_width
-                        new_height = max(1, int(new_width / img_ratio))
-                    # Faster than full-res resize for huge Flux / ComfyUI PNGs
-                    image.thumbnail((new_width, new_height), Image.LANCZOS)
-                    pil_image = image
+                    frames, durations = load_pil_frames(path)
+                    prepared = []
+                    fit_box = None
+                    for frame in frames:
+                        try:
+                            from PIL import ImageOps
+                            frame = ImageOps.exif_transpose(frame) or frame
+                        except Exception:
+                            pass
+                        if fit_box is None:
+                            img_w, img_h = frame.size
+                            img_ratio = (img_w / img_h) if img_h else 1.0
+                            panel_ratio = (
+                                target_width / target_height if target_height else 1.0
+                            )
+                            if panel_ratio > img_ratio:
+                                new_height = target_height
+                                new_width = max(1, int(new_height * img_ratio))
+                            else:
+                                new_width = target_width
+                                new_height = max(1, int(new_width / img_ratio))
+                            fit_box = (new_width, new_height)
+                        # thumbnail() mutates — copy so animation frames stay independent
+                        scaled = frame.copy()
+                        scaled.thumbnail(fit_box, Image.LANCZOS)
+                        prepared.append(scaled)
+                    pil_frames = prepared
             except Exception as exc:
                 logging.info("[Preview] Image load failed for %s: %s", path, exc)
                 err = "Failed to load image."
@@ -565,13 +585,14 @@ class InfoPanelFrame(ctk.CTkFrame):
                     return
                 if getattr(self, "_pending_preview_path", None) != path:
                     return
-                if err or pil_image is None:
+                if err or not pil_frames:
                     try:
                         self.show_preview_placeholder(err or "Failed to load image.")
                     except Exception:
                         pass
                     return
                 try:
+                    self._stop_preview_image_animation()
                     if getattr(self, "preview_canvas", None) is not None:
                         try:
                             if self.preview_canvas.winfo_exists():
@@ -580,11 +601,17 @@ class InfoPanelFrame(ctk.CTkFrame):
                             pass
                         self.preview_canvas = None
                     # PhotoImage must be created on the Tk main thread
-                    self.preview_image_tk = ImageTk.PhotoImage(pil_image)
+                    photos = [ImageTk.PhotoImage(f) for f in pil_frames]
+                    self._preview_anim_photos = photos
+                    self._preview_anim_durations = list(durations or [0] * len(photos))
+                    self._preview_anim_index = 0
+                    self.preview_image_tk = photos[0]
                     self.preview_canvas = tk.Label(
                         self.tab_preview, image=self.preview_image_tk, bg="black"
                     )
                     self.preview_canvas.pack(padx=10, pady=10, anchor="center")
+                    if len(photos) > 1:
+                        self._schedule_preview_anim_frame()
                 except Exception as apply_exc:
                     logging.info("[Preview] Failed to show image: %s", apply_exc)
 
@@ -595,9 +622,57 @@ class InfoPanelFrame(ctk.CTkFrame):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _stop_preview_image_animation(self):
+        """Cancel GIF/WebP preview playback and drop frame PhotoImage refs."""
+        job = getattr(self, "_preview_anim_after_id", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+            self._preview_anim_after_id = None
+        self._preview_anim_photos = []
+        self._preview_anim_durations = []
+        self._preview_anim_index = 0
 
-                    
-                    
+    def _schedule_preview_anim_frame(self):
+        photos = getattr(self, "_preview_anim_photos", None) or []
+        if len(photos) <= 1:
+            return
+        durs = getattr(self, "_preview_anim_durations", None) or []
+        idx = getattr(self, "_preview_anim_index", 0)
+        delay = 100
+        if durs:
+            try:
+                delay = int(durs[idx % len(durs)])
+            except (TypeError, ValueError):
+                delay = 100
+        if delay <= 0:
+            delay = 100
+        delay = max(20, delay)
+        self._preview_anim_after_id = self.after(delay, self._advance_preview_anim_frame)
+
+    def _advance_preview_anim_frame(self):
+        self._preview_anim_after_id = None
+        photos = getattr(self, "_preview_anim_photos", None) or []
+        if len(photos) <= 1:
+            return
+        canvas = getattr(self, "preview_canvas", None)
+        if canvas is None:
+            return
+        try:
+            if not canvas.winfo_exists():
+                return
+        except Exception:
+            return
+        self._preview_anim_index = (self._preview_anim_index + 1) % len(photos)
+        photo = photos[self._preview_anim_index]
+        self.preview_image_tk = photo
+        try:
+            canvas.configure(image=photo)
+        except Exception:
+            return
+        self._schedule_preview_anim_frame()
 
     def _preview_controller(self):
         pp = getattr(self, "preview_player", None)
@@ -613,6 +688,7 @@ class InfoPanelFrame(ctk.CTkFrame):
 
     def cancel_pending_preview(self) -> None:
         """Invalidate queued/async preview work (e.g. before opening the main player)."""
+        self._stop_preview_image_animation()
         self._pending_preview_path = None
         self._preview_ticket += 1
 
@@ -738,6 +814,7 @@ class InfoPanelFrame(ctk.CTkFrame):
         """
         if self._main_player_open():
             return
+        self._stop_preview_image_animation()
         self._pending_preview_path = video_path
         self._preview_ticket += 1
         ticket = self._preview_ticket

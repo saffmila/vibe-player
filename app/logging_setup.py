@@ -62,6 +62,34 @@ class SafeStreamHandler(logging.StreamHandler):
             pass
 
 
+class SafeRotatingFileHandler(RotatingFileHandler):
+    """
+    RotatingFileHandler that survives WinError 32 during rename.
+
+    On Windows, rollover does ``os.rename(app.log, app.log.1)``. That fails when
+    another process/handle still has ``app.log`` open (second app instance,
+    faulthandler, editor, antivirus). Stdlib then prints a scary Logging error
+    stack; we skip the rename and keep appending instead.
+    """
+
+    def doRollover(self) -> None:
+        try:
+            super().doRollover()
+        except PermissionError:
+            # Keep current stream open; next emit continues appending.
+            try:
+                if self.stream is None:
+                    self.stream = self._open()
+            except Exception:
+                pass
+        except OSError:
+            try:
+                if self.stream is None:
+                    self.stream = self._open()
+            except Exception:
+                pass
+
+
 def setup_logging(debug: bool = False) -> str:
     """
     Configure root logging: rotating file log, optional stderr mirror, and
@@ -77,7 +105,7 @@ def setup_logging(debug: bool = False) -> str:
         "%(asctime)s [%(levelname)s] (%(name)s) %(message)s"
     )
 
-    file_handler = RotatingFileHandler(
+    file_handler = SafeRotatingFileHandler(
         LOG_PATH, maxBytes=2_000_000, backupCount=3, encoding="utf-8"
     )
     file_handler.setFormatter(formatter)

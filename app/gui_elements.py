@@ -394,6 +394,131 @@ def open_conflict_dialog(parent, file_name: str) -> tuple[str, bool]:
     return dialog.show_modal()
 
 
+class FileOpProgressDialog(ctk.CTkToplevel):
+    """Modal progress dialog for multi-item copy/move (DnD / paste)."""
+
+    def __init__(self, parent, title: str, total: int, action_label: str = "Working"):
+        super().__init__(parent)
+        self.title(title)
+        self.geometry("460x190")
+        self.resizable(False, False)
+        self.attributes("-topmost", True)
+        self._cancelled = False
+        self._total = max(1, int(total))
+        self._action_label = action_label
+
+        try:
+            self.transient(parent)
+        except Exception:
+            pass
+
+        self.status_var = tk.StringVar(value=f"{action_label} 0 / {self._total}")
+        self.detail_var = tk.StringVar(value="Preparing…")
+
+        ctk.CTkLabel(
+            self,
+            textvariable=self.status_var,
+            anchor="w",
+            font=ctk.CTkFont(weight="bold"),
+        ).pack(fill="x", padx=16, pady=(16, 6))
+        ctk.CTkLabel(
+            self,
+            textvariable=self.detail_var,
+            anchor="w",
+            wraplength=420,
+        ).pack(fill="x", padx=16, pady=(0, 10))
+
+        self.progress = ctk.CTkProgressBar(self, orientation="horizontal", mode="determinate")
+        self.progress.pack(fill="x", padx=16, pady=(0, 12))
+        self.progress.set(0)
+        self._indeterminate = self._total <= 1
+        if self._indeterminate:
+            try:
+                self.progress.configure(mode="indeterminate")
+                self.progress.start()
+            except Exception:
+                self._indeterminate = False
+
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(fill="x", padx=16, pady=(0, 14))
+        self.cancel_btn = ctk.CTkButton(
+            btn_row,
+            text="Cancel",
+            width=100,
+            command=self._on_cancel,
+        )
+        self.cancel_btn.pack(side="right")
+
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+    def _on_cancel(self):
+        self._cancelled = True
+        self.detail_var.set("Canceling after current item…")
+        try:
+            self.cancel_btn.configure(state="disabled")
+        except Exception:
+            pass
+
+    @property
+    def cancelled(self) -> bool:
+        return bool(self._cancelled)
+
+    def show(self):
+        """Show modal progress UI without blocking the caller (worker updates via after)."""
+        try:
+            self.grab_set()
+        except Exception:
+            pass
+        self.lift()
+        self.focus_force()
+
+    def set_progress(self, current: int, total: int | None = None, detail: str = ""):
+        """Update bar and labels. Call from the Tk main thread only."""
+        if total is not None and total > 0:
+            self._total = int(total)
+        cur = max(0, int(current))
+        tot = max(1, self._total)
+        frac = min(1.0, cur / tot)
+        try:
+            if not self.winfo_exists():
+                return
+            self.status_var.set(f"{self._action_label} {min(cur, tot)} / {tot}")
+            if detail:
+                self.detail_var.set(detail)
+            if not self._indeterminate:
+                self.progress.set(frac)
+        except Exception:
+            pass
+
+    def close(self):
+        try:
+            if self._indeterminate:
+                self.progress.stop()
+        except Exception:
+            pass
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        try:
+            if self.winfo_exists():
+                self.destroy()
+        except Exception:
+            pass
+
+
+def open_file_op_progress_dialog(
+    parent,
+    title: str,
+    total: int,
+    action_label: str = "Working",
+) -> FileOpProgressDialog:
+    """Create and show a modal file-operation progress dialog."""
+    dialog = FileOpProgressDialog(parent, title, total, action_label=action_label)
+    dialog.show()
+    return dialog
+
+
 def get_conflict_rename_path(dst_path: str) -> str:
     """Return a non-existing sibling path for a conflict target."""
     directory = os.path.dirname(dst_path)
@@ -1050,6 +1175,169 @@ def build_edit_menuOld(app):
 
 
 # RATING MENU
+
+RATING_COLORS = ("lightblue", "lightgreen", "yellow", "purple", "red")
+
+# VLC marquee uses 0xBBGGRR
+_RATING_VLC_COLORS = {
+    1: 0xE6D8AD,  # lightblue
+    2: 0x90EE90,  # lightgreen
+    3: 0x00FFFF,  # yellow
+    4: 0x800080,  # purple
+    5: 0x0000FF,  # red
+}
+
+# Pyglet label RGBA
+_RATING_PYGLET_COLORS = {
+    1: (173, 216, 230, 255),
+    2: (144, 238, 144, 255),
+    3: (255, 255, 0, 255),
+    4: (128, 0, 128, 255),
+    5: (255, 0, 0, 255),
+}
+
+
+def _normalize_rating_value(rating) -> int:
+    try:
+        return int(rating or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _current_file_rating(app, file_path) -> int:
+    db = getattr(app, "database", None)
+    if db is None or not file_path:
+        return 0
+    rating = db.get_rating(file_path)
+    return int(rating) if rating else 0
+
+
+def rating_color_name(rating) -> str:
+    """Tk/canvas color for rating 1–5 (same palette as menu circles)."""
+    r = _normalize_rating_value(rating)
+    if 1 <= r <= 5:
+        return RATING_COLORS[r - 1]
+    return "gray70"
+
+
+def rating_vlc_marquee_color(rating) -> int:
+    """VLC marquee BBGGRR; default HUD gray when unrated."""
+    return _RATING_VLC_COLORS.get(_normalize_rating_value(rating), 0xB0B3B8)
+
+
+def rating_pyglet_rgba(rating) -> tuple[int, int, int, int]:
+    """Pyglet label RGBA for the rating suffix."""
+    return _RATING_PYGLET_COLORS.get(_normalize_rating_value(rating), (176, 179, 184, 230))
+
+
+def format_hud_rating_suffix(rating) -> str:
+    """Compact HUD fragment: ``  |  ★3`` or ``  |  ★-`` when cleared."""
+    r = _normalize_rating_value(rating)
+    return f"  |  ★{r}" if r > 0 else "  |  ★-"
+
+
+def hud_rating_suffix_for_path(app, file_path) -> str:
+    return format_hud_rating_suffix(_current_file_rating(app, file_path))
+
+
+def _default_apply_rating(app, file_path, rating) -> None:
+    save_rating = getattr(app, "save_rating", None)
+    if callable(save_rating):
+        save_rating(file_path, rating)
+
+
+def _populate_rating_menu_items(
+    rating_menu,
+    app,
+    file_path,
+    *,
+    current: int | None = None,
+    apply_fn: Callable[[int], Any] | None = None,
+) -> None:
+    """Fill submenu rows. No accelerators — label is already ``1``…``5`` (avoids ``2`` + ``2``)."""
+    if apply_fn is None:
+        if not file_path or not callable(getattr(app, "save_rating", None)):
+            return
+        apply_fn = lambda r, fp=file_path: _default_apply_rating(app, fp, r)
+    if current is None:
+        current = _current_file_rating(app, file_path)
+
+    for i in range(1, 6):
+        prefix = "▶  " if i == current else "      "
+        rating_menu.add_command(
+            label=f"{prefix}{i}",
+            command=lambda i=i: apply_fn(i),
+        )
+
+    rating_menu.add_separator()
+    rating_menu.add_command(
+        label=f"{'▶  ' if current == 0 else '      '}Clear rating",
+        command=lambda: apply_fn(0),
+    )
+
+
+def append_rating_submenu(
+    menu,
+    app,
+    file_path,
+    *,
+    hotkeys_map=None,
+    guard_menu_fn=None,
+    apply_fn: Callable[[int], Any] | None = None,
+) -> None:
+    """Append ``Rating ▶`` cascade (1–5 + Clear). Default: ``app.save_rating(path, n)``."""
+    if not file_path:
+        return
+    if apply_fn is None and not callable(getattr(app, "save_rating", None)):
+        return
+    if apply_fn is None and not os.path.isfile(file_path):
+        return
+
+    current = _current_file_rating(app, file_path)
+    rating_menu = create_menu(app, menu)
+    if guard_menu_fn:
+        guard_menu_fn(rating_menu)
+    _populate_rating_menu_items(
+        rating_menu,
+        app,
+        file_path,
+        current=current,
+        apply_fn=apply_fn,
+    )
+    cascade_label = f"Rating  [{current}]" if current else "Rating"
+    menu.add_cascade(label=cascade_label, menu=rating_menu)
+
+
+def append_rating_cascade_to_flat_menu(
+    flat_menu: CTkFlatContextMenu,
+    app,
+    file_path,
+    *,
+    hotkeys_map=None,
+    apply_fn: Callable[[int], Any] | None = None,
+) -> None:
+    """``CTkFlatContextMenu`` row that opens the same Rating submenu on click."""
+    if not file_path:
+        return
+    if apply_fn is None and not callable(getattr(app, "save_rating", None)):
+        return
+    if apply_fn is None and not os.path.isfile(file_path):
+        return
+
+    current = _current_file_rating(app, file_path)
+    cascade_label = f"Rating  [{current}]" if current else "Rating"
+
+    def populate(sub):
+        _populate_rating_menu_items(
+            sub,
+            app,
+            file_path,
+            current=current,
+            apply_fn=apply_fn,
+        )
+
+    flat_menu.add_tk_cascade(cascade_label, populate)
+
 
 def show_rating_panel_from_menu(app):
     """Same compact window as thumbnail context menu → Edit Rating."""
@@ -2850,6 +3138,57 @@ class CTkFlatContextMenu(ctk.CTkToplevel):
         sep_color = sep_color or "#555555"
         sep = ctk.CTkFrame(self.items_frame, height=1, fg_color=sep_color)
         sep.pack(fill="x", padx=4, pady=0)
+
+    def add_tk_cascade(
+        self,
+        label: str,
+        populate: Callable[[Menu], None],
+    ) -> None:
+        """Row that opens a themed ``tk.Menu`` submenu on click (▶)."""
+        app = self._app
+        hover = getattr(app, "hover_menu_row", None) or "#4a4a4a"
+
+        item_frame = ctk.CTkFrame(self.items_frame, fg_color="transparent", corner_radius=2)
+        item_frame.pack(fill="x", padx=0, pady=0)
+
+        lbl_text = ctk.CTkLabel(
+            item_frame,
+            text=f"{label}  ▶",
+            anchor="w",
+            font=self._menu_font,
+            height=20,
+        )
+        lbl_text.pack(side="left", padx=(5, 2), pady=0)
+
+        widgets: tuple[tk.Misc, ...] = (item_frame, lbl_text)
+
+        def on_enter(_e: tk.Event) -> None:
+            item_frame.configure(fg_color=hover)
+
+        def on_leave(_e: tk.Event) -> None:
+            item_frame.configure(fg_color="transparent")
+
+        def on_click(_e: tk.Event) -> None:
+            if app and hasattr(app, "_mark_menu_interaction"):
+                app._mark_menu_interaction()
+            sub = create_menu(app, self)
+            populate(sub)
+            self.update_idletasks()
+            x = item_frame.winfo_rootx() + item_frame.winfo_width()
+            y = item_frame.winfo_rooty()
+            defer_master = self.master
+            self._dismiss()
+            if defer_master is not None and defer_master.winfo_exists():
+                defer_master.after(0, lambda: sub.tk_popup(int(x), int(y)))
+
+        for w in widgets:
+            w.bind("<Enter>", on_enter)
+            w.bind("<Leave>", on_leave)
+            w.bind("<Button-1>", on_click)
+            try:
+                w.configure(cursor="hand2")
+            except tk.TclError:
+                pass
 
     def tk_popup(self, x: int, y: int) -> None:
         prev = CTkFlatContextMenu._current

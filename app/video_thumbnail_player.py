@@ -154,9 +154,15 @@ from hotkeys import DEFAULT_HOTKEYS, menu_accel, rename_accelerators_label
 # Set the logging level for PIL to WARNING to suppress debug logs
 logging.getLogger("PIL").setLevel(logging.WARNING)
 
+# Keep a process-lifetime handle — faulthandler needs an open file; a ``with``
+# block would close it immediately and break crash dumps.
 _crash_log_path = _INSTALL_ROOT / "crash.log"
-with open(_crash_log_path, "w", encoding="utf-8") as log_file:
-    faulthandler.enable(file=log_file, all_threads=True)
+try:
+    _crash_log_file = open(_crash_log_path, "a", encoding="utf-8")
+    faulthandler.enable(file=_crash_log_file, all_threads=True)
+except Exception:
+    _crash_log_file = None
+    logging.debug("Could not enable module-level faulthandler on crash.log", exc_info=True)
 
 # Enable DPI awareness for accurate resolution detection
 ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -284,6 +290,9 @@ class VideoThumbnailPlayer(
         # 24px is deliberately above the OS ~4px OLE threshold and the previous 12px value —
         # tree clicks (esp. near expanders) were still starting drags too often.
         self._dnd_drag_min_distance_px_tree = 24
+        # Same idea for thumbnails: without a distance gate, micro-moves during a click/double-click
+        # start OLE drag after hold_ms and ButtonRelease is swallowed (_dnd_drag_happened).
+        self._dnd_drag_min_distance_px_thumb = 16
         self._dnd_drag_distance_timeout_ms = 800
         self._dnd_press_ts = 0.0
         self._dnd_press_kind = None   # "thumb" | "tree" | None
@@ -295,6 +304,8 @@ class VideoThumbnailPlayer(
         self._dnd_internal_drag = False
         # Thumbnail drag-out actually began (avoids collapsing multi-select on LMB release).
         self._dnd_drag_happened = False
+        # Set by real double-click open so the following ButtonRelease is not treated as a new click.
+        self._thumb_double_click_consumed = False
         # Confirm dialogs before DnD copy/move (default off — Advanced in preferences)
         self.dnd_confirm_dialogs = False
         self.folder_title_font_base_size = 12
@@ -2894,8 +2905,40 @@ class VideoThumbnailPlayer(
                 # Use grid key so add_rating_circle / thumbnail_rating_widgets stay consistent.
                 self.add_rating_circle(stored_file_path, thumbnail_frame, rating, canvas_width)
                 break
+
+            self._notify_open_media_rating(file_path, rating)
         except Exception as e:
             logging.info(f"Failed to save rating for {file_path}: {e}")
+
+    def _notify_open_media_rating(self, file_path, rating):
+        """Flash/update HUD on open video/image when that file was rated."""
+        try:
+            norm = self.database.normalize_path(file_path)
+        except Exception:
+            return
+
+        player = getattr(self, "current_video_window", None) or getattr(self, "active_player", None)
+        if player is not None:
+            vpath = getattr(player, "video_path", None)
+            if vpath and self.database.normalize_path(vpath) == norm:
+                show_hud = getattr(player, "show_hud", None)
+                if callable(show_hud):
+                    try:
+                        show_hud(force=True)
+                    except TypeError:
+                        show_hud()
+
+        image_viewer = getattr(self, "current_image_window", None)
+        if image_viewer is not None:
+            ipath = getattr(image_viewer, "image_path", None)
+            if ipath and self.database.normalize_path(ipath) == norm:
+                notify = getattr(image_viewer, "notify_rating_changed", None)
+                if callable(notify):
+                    notify(rating)
+                else:
+                    draw = getattr(image_viewer, "draw_info_hud", None)
+                    if callable(draw):
+                        draw()
 
 
                                 
@@ -3883,6 +3926,8 @@ class VideoThumbnailPlayer(
 
         if not os.path.isdir(path):
             logging.info(f"[SKIP] {path} is not a directory.")
+            # Open nodes must not keep a blank dummy row if the path vanished.
+            self._purge_tree_dummy_children(parent)
             return
 
         if path.startswith("virtual_library://"):
@@ -3904,6 +3949,8 @@ class VideoThumbnailPlayer(
             )
         except Exception as e:
             logging.info(f"[ERROR] Cannot list directory: {path} → {e}")
+            # Still drop the placeholder so an open folder does not show a 1-row gap.
+            self._purge_tree_dummy_children(parent)
             return
 
         try:
@@ -3912,10 +3959,7 @@ class VideoThumbnailPlayer(
             }
 
             # Remove stale dummy placeholder rows under the currently opened parent.
-            for child in self.tree.get_children(parent):
-                vals = self.tree.item(child, 'values')
-                if vals and vals[0] == 'dummy':
-                    self.tree.delete(child)
+            self._purge_tree_dummy_children(parent)
 
             # Drop tree nodes for subfolders removed/renamed outside the app.
             for child in list(self.tree.get_children(parent)):
@@ -4154,6 +4198,11 @@ class VideoThumbnailPlayer(
                 # Correctly log any unexpected errors using an f-string.
                 logging.warning(f"An error occurred while destroying the image preview: {e}")
         # Drop PhotoImage / PIL refs so Windows can move/delete the previewed file.
+        if hasattr(self.info_panel, "_stop_preview_image_animation"):
+            try:
+                self.info_panel._stop_preview_image_animation()
+            except Exception:
+                pass
         if hasattr(self.info_panel, "preview_image_tk"):
             self.info_panel.preview_image_tk = None
 
@@ -4225,6 +4274,19 @@ class VideoThumbnailPlayer(
 
         # Guard check: skip if menu was recently interacted with (within 200ms)
         if time.time() - self._last_menu_interaction_time < 0.2:
+            return
+
+        # Double-Button-1 already opened the file; ignore the trailing ButtonRelease-1.
+        if getattr(self, "_thumb_double_click_consumed", False):
+            self._thumb_double_click_consumed = False
+            for attr in ("_preview_timer", "_click_timer"):
+                job = getattr(self, attr, None)
+                if job is not None:
+                    try:
+                        self.after_cancel(job)
+                    except (tk.TclError, ValueError):
+                        pass
+                    setattr(self, attr, None)
             return
 
         # After a real DnD drag, ButtonRelease still fires — must NOT schedule preview
@@ -4463,6 +4525,24 @@ class VideoThumbnailPlayer(
         """
         Note: Handles the logic for a double-click event: opening the file.
         """
+        if not file_path:
+            return
+
+        # Cancel deferred single-click / preview from the first click of the pair.
+        for attr in ("_preview_timer", "_click_timer"):
+            job = getattr(self, attr, None)
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except (tk.TclError, ValueError):
+                    pass
+                setattr(self, attr, None)
+        self._last_click_time = 0
+        # Swallow the ButtonRelease that follows <Double-Button-1>, and block a
+        # same-gesture OLE drag from stealing the click (esp. virtual grid).
+        self._thumb_double_click_consumed = True
+        self._dnd_drag_happened = False
+
         is_video = file_path.lower().endswith(VIDEO_FORMATS)
         is_image = file_path.lower().endswith(IMAGE_FORMATS)
 
@@ -4800,6 +4880,7 @@ class VideoThumbnailPlayer(
 
                 # Repopulate the child nodes if needed
                 self.process_directory(item, target_directory)
+                self._ensure_open_tree_branch_populated(item)
                 self._heal_open_tree_dummy_rows()
             else:
                 logging.info(f"No tree node found for {target_directory}. Attempting to repopulate tree.")
@@ -4857,6 +4938,68 @@ class VideoThumbnailPlayer(
 
         self._heal_open_tree_dummy_rows()
 
+    def _purge_tree_dummy_children(self, parent):
+        """Delete lazy-load dummy placeholder rows under parent (no disk I/O)."""
+        if parent is None:
+            return
+        try:
+            for child in list(self.tree.get_children(parent)):
+                vals = self.tree.item(child, "values")
+                if vals and vals[0] == "dummy":
+                    self.tree.delete(child)
+        except Exception:
+            pass
+
+    def _tree_node_has_dummy_child(self, item_id):
+        try:
+            for ch in self.tree.get_children(item_id):
+                vals = self.tree.item(ch, "values")
+                if vals and vals[0] == "dummy":
+                    return True
+        except Exception:
+            return False
+        return False
+
+    def _populate_open_tree_node_if_dummy(self, item_id):
+        """
+        If an open node still has a lazy-load dummy child, replace it.
+        Programmatic item(open=True) often skips <<TreeviewOpen>>, which leaves
+        a blank one-row gap under the folder.
+        """
+        if not item_id:
+            return False
+        try:
+            if not self.tree.item(item_id, "open"):
+                return False
+            vals = self.tree.item(item_id, "values")
+            if not vals or not vals[0] or vals[0] in ("dummy",):
+                return False
+            path = vals[0]
+            if str(path).startswith("virtual_library://"):
+                return False
+            if not self._tree_node_has_dummy_child(item_id):
+                return False
+            if os.path.isdir(path):
+                self.process_directory(item_id, path)
+            else:
+                self._purge_tree_dummy_children(item_id)
+            return True
+        except Exception:
+            logging.debug("populate_open_tree_node_if_dummy failed for %s", item_id, exc_info=True)
+            return False
+
+    def _ensure_open_tree_branch_populated(self, item_id):
+        """Populate item + open ancestors that still show a dummy gap row."""
+        if not item_id:
+            return
+        node = item_id
+        while node:
+            self._populate_open_tree_node_if_dummy(node)
+            try:
+                node = self.tree.parent(node)
+            except Exception:
+                break
+
     def _heal_open_tree_dummy_rows(self):
         """
         Repair occasional stale 'dummy' placeholders under already-open nodes.
@@ -4864,13 +5007,28 @@ class VideoThumbnailPlayer(
         """
         started = time.perf_counter()
         logging.debug("[TreeHeal] START")
+
+        # Prefer the focused/selected branch so deep trees cannot miss the gap
+        # under the folder the user just opened (BFS max_scan limit).
+        try:
+            for item_id in (self.tree.focus(), *self.tree.selection()):
+                if item_id:
+                    self._ensure_open_tree_branch_populated(item_id)
+                    break
+        except Exception:
+            pass
+
         max_scan = 1000
         scanned = 0
         repaired = 0
+        seen = set()
         queue = list(self.tree.get_children(""))
 
         while queue and scanned < max_scan:
             item_id = queue.pop(0)
+            if item_id in seen:
+                continue
+            seen.add(item_id)
             scanned += 1
 
             try:
@@ -4878,22 +5036,8 @@ class VideoThumbnailPlayer(
             except Exception:
                 continue
 
-            try:
-                if not self.tree.item(item_id, "open"):
-                    continue
-                vals = self.tree.item(item_id, "values")
-                if not vals or not vals[0] or vals[0] in ("dummy",) or vals[0].startswith("virtual_library://"):
-                    continue
-                children = self.tree.get_children(item_id)
-                has_dummy = any(
-                    (self.tree.item(ch, "values") and self.tree.item(ch, "values")[0] == "dummy")
-                    for ch in children
-                )
-                if has_dummy:
-                    repaired += 1
-                    self.process_directory(item_id, vals[0])
-            except Exception:
-                continue
+            if self._populate_open_tree_node_if_dummy(item_id):
+                repaired += 1
 
         elapsed = time.perf_counter() - started
         if elapsed >= 0.20 or repaired:
@@ -5048,6 +5192,16 @@ class VideoThumbnailPlayer(
             element = ""
 
         if item_id and element and "indicator" in str(element):
+            # Expander clicks must not start OLE drag. Returning "break" skips the
+            # add="+" _dnd_mark_tree_press handler, so clear any *stale* press state
+            # from a previous row click — otherwise DragInit sees an old press_ts
+            # (hold already "elapsed") and starts dragging the wrong folder.
+            self._dnd_press_kind = None
+            self._dnd_press_path = None
+            self._dnd_press_ts = 0.0
+            self._dnd_press_x_root = None
+            self._dnd_press_y_root = None
+            self._dnd_tree_press_paths = []
             try:
                 is_open = bool(self.tree.item(item_id, "open"))
                 self.tree.item(item_id, open=not is_open)
@@ -5329,56 +5483,71 @@ class VideoThumbnailPlayer(
     #function to synchronize, if i slect folder in thumb view so will be synced in left tree
     def select_current_folder_in_tree(self):
         self._tree_sync_after_id = None
-        # Ensure the current_directory is a directory
-        if os.path.isdir(self.current_directory):
-            sync_started = time.perf_counter()
-            logging.debug("[TreeSync] START path=%s", self.current_directory)
-            # Block <<TreeviewSelect>> from treating programmatic sync as user navigation.
-            self._suppress_tree_select_navigation = True
-            try:
-                item = self.find_node_by_path(self.current_directory)
-                logging.info(f"SELECT TREE ITEM:  {self.current_directory}: {item}")  # Debug
-                if item:
-                    logging.info(f"Found node for {self.current_directory}: {item}")  # Debug
+        cd = getattr(self, "current_directory", None)
+        if not cd or not isinstance(cd, str):
+            return
+
+        # virtual_library:// is not a real FS path — os.path.isdir() is False, but the
+        # node must stay selected in the left tree (clearing it looks like a deselect bug).
+        is_virtual = cd.startswith("virtual_library://")
+        if not is_virtual and not os.path.isdir(cd):
+            logging.info(
+                "%s is a file, not a directory. Skipping folder synchronization.",
+                cd,
+            )
+            self.tree.selection_remove(self.tree.selection())
+            return
+
+        sync_started = time.perf_counter()
+        logging.debug("[TreeSync] START path=%s", cd)
+        # Block <<TreeviewSelect>> from treating programmatic sync as user navigation.
+        self._suppress_tree_select_navigation = True
+        try:
+            item = self.find_node_by_path(cd)
+            logging.info("SELECT TREE ITEM:  %s: %s", cd, item)
+            if item:
+                if not is_virtual:
                     parent_item = self.tree.parent(item)
                     while parent_item:
                         self.tree.item(parent_item, open=True)
                         parent_item = self.tree.parent(parent_item)
 
-                    self.tree.selection_set(item)
-                    self.tree.focus(item)
-                    self.tree.see(item)
+                self.tree.selection_set(item)
+                self.tree.focus(item)
+                self.tree.see(item)
+                if not is_virtual:
                     # Only expand when collapsed — re-open fires <<TreeviewOpen>> and
                     # process_directory, which is expensive on folders full of media.
                     if not self.tree.item(item, "open"):
                         self.tree.item(item, open=True)
-                else:
-                    logging.info(f"Node for {self.current_directory} not found in tree.")  # Debug
-                    self.expand_tree_to_path(self.current_directory, select_final_node=True)
-                # Programmatic open=True often does not fire <<TreeviewOpen>>, so dummy
-                # placeholder rows (expand chevrons) never get replaced — visible as a gap.
+                    # Programmatic open=True often skips <<TreeviewOpen>>; populate this
+                    # branch immediately so a leftover dummy does not show as a blank row.
+                    self._ensure_open_tree_branch_populated(item)
+            else:
+                logging.info("Node for %s not found in tree.", cd)
+                self.expand_tree_to_path(cd, select_final_node=True)
+            if not is_virtual:
+                # Safety net for any other open nodes that still show a dummy gap.
                 self._heal_open_tree_dummy_rows()
-                elapsed = time.perf_counter() - sync_started
-                if elapsed >= 0.20:
-                    logging.info(
-                        "[TreeSync] SLOW path=%s item=%s elapsed=%.3fs",
-                        self.current_directory,
-                        item,
-                        elapsed,
-                    )
-                else:
-                    logging.debug(
-                        "[TreeSync] DONE path=%s item=%s elapsed=%.3fs",
-                        self.current_directory,
-                        item,
-                        elapsed,
-                    )
-            finally:
-                self.after_idle(lambda: setattr(self, "_suppress_tree_select_navigation", False))
-        else:
-            # If it's a file, avoid processing it as a directory
-            logging.info(f"{self.current_directory} is a file, not a directory. Skipping folder synchronization.")  # Debug
-            self.tree.selection_remove(self.tree.selection())  # Clear any tree selection
+            elapsed = time.perf_counter() - sync_started
+            if elapsed >= 0.20:
+                logging.info(
+                    "[TreeSync] SLOW path=%s item=%s elapsed=%.3fs",
+                    cd,
+                    item,
+                    elapsed,
+                )
+            else:
+                logging.debug(
+                    "[TreeSync] DONE path=%s item=%s elapsed=%.3fs",
+                    cd,
+                    item,
+                    elapsed,
+                )
+        finally:
+            self.after_idle(
+                lambda: setattr(self, "_suppress_tree_select_navigation", False)
+            )
 
 
 def launch_only():
