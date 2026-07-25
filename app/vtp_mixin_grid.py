@@ -21,10 +21,21 @@ import tkinterdnd2 as dnd
 from PIL import Image, ImageDraw, ImageOps, ImageTk
 
 from file_operations import *
-from gui_elements import append_rating_submenu, create_search_window
+from gui_elements import (
+    append_rating_submenu,
+    create_search_window,
+    open_file_op_progress_dialog,
+)
 from image_operations import create_image_viewer
 from image_loader import load_pil_image, get_pil_image_size
 from image_compare_dialog import open_image_compare_dialog
+from image_resize_dialog import (
+    IMAGE_TRANSFORM_LABELS,
+    image_reencode_is_lossy,
+    open_batch_resize_dialog,
+    resize_image_file,
+    transform_image_file,
+)
 from video_operations import VideoPlayer
 from video_merge import open_merge_videos_dialog
 from utils import get_video_size
@@ -2604,6 +2615,290 @@ class VtpGridMixin:
 
         self.after(delay_ms, _start_edit)
 
+    def selected_image_paths_for_edit(self, primary_path):
+        """Image paths for crop/resize from multi-select (selection order).
+
+        When the RMB target is part of a multi-image selection, return all
+        selected images; otherwise return only ``primary_path``.
+        """
+        primary = os.path.normpath(primary_path) if primary_path else None
+        raw = list(getattr(self, "selected_thumbnails", []) or [])
+        paths = []
+        seen = set()
+        for item in raw:
+            p = item[0] if isinstance(item, tuple) and item else item
+            if not p:
+                continue
+            p = os.path.normpath(str(p))
+            key = os.path.normcase(p)
+            if key in seen:
+                continue
+            if not os.path.isfile(p) or not p.lower().endswith(IMAGE_FORMATS):
+                continue
+            seen.add(key)
+            paths.append(p)
+
+        if (
+            primary
+            and len(paths) > 1
+            and os.path.normcase(primary) in {os.path.normcase(p) for p in paths}
+        ):
+            return paths
+        if primary and os.path.isfile(primary) and primary.lower().endswith(IMAGE_FORMATS):
+            return [primary]
+        return paths[:1] if paths else []
+
+    def start_image_crop_from_grid(self, primary_path: str):
+        """Crop from thumbnail RMB — multi-select is not supported yet."""
+        paths = self.selected_image_paths_for_edit(primary_path)
+        if len(paths) <= 1:
+            target = paths[0] if paths else primary_path
+            self.open_image_viewer_edit(target, "crop")
+            return
+
+        def _crop_this():
+            self.open_image_viewer_edit(primary_path, "crop")
+            return True
+
+        self.universal_dialog(
+            title="Crop is single-image only",
+            message=(
+                f"{len(paths)} images are selected.\n\n"
+                "Batch crop is not available yet.\n"
+                "Crop only the clicked file?"
+            ),
+            confirm_callback=_crop_this,
+            confirm_text="Crop this file",
+            cancel_text="Cancel",
+            show_cancel=True,
+        )
+
+    def start_image_resize_from_grid(self, primary_path: str):
+        """Resize from thumbnail RMB — batch when multiple images are selected."""
+        paths = self.selected_image_paths_for_edit(primary_path)
+        if len(paths) <= 1:
+            target = paths[0] if paths else primary_path
+            self.open_image_viewer_edit(target, "resize")
+            return
+        self.open_batch_image_resize(paths)
+
+    def start_image_transform_from_grid(self, primary_path: str, op: str):
+        """
+        Rotate / flip from thumbnail RMB.
+
+        Works with multi-select: same transform applied to every selected image
+        (overwrite on disk). Confirms when multiple files are selected, or when
+        any target would be re-encoded lossily (JPEG / lossy WebP).
+        """
+        if op not in IMAGE_TRANSFORM_LABELS:
+            return
+        paths = self.selected_image_paths_for_edit(primary_path)
+        if not paths:
+            if primary_path and os.path.isfile(primary_path):
+                paths = [primary_path]
+            else:
+                return
+
+        label = IMAGE_TRANSFORM_LABELS[op]
+        lossy_paths = [p for p in paths if image_reencode_is_lossy(p)]
+        needs_confirm = len(paths) > 1 or bool(lossy_paths)
+
+        def _go():
+            self._run_batch_image_transform(paths, op=op, action_label=label)
+            return True
+
+        if not needs_confirm:
+            _go()
+            return
+
+        if len(paths) == 1:
+            message = (
+                f"Apply “{label}” and overwrite this file?\n\n"
+                f"{os.path.basename(paths[0])}\n\n"
+                "This format is re-encoded (not bit-exact lossless)."
+            )
+        elif lossy_paths and len(lossy_paths) == len(paths):
+            message = (
+                f"Apply “{label}” and overwrite {len(paths)} image files?\n"
+                "JPEG / lossy WebP will be re-encoded (quality may change).\n"
+                "This cannot be undone."
+            )
+        elif lossy_paths:
+            message = (
+                f"Apply “{label}” and overwrite {len(paths)} image files?\n"
+                f"{len(lossy_paths)} are JPEG/lossy WebP and will be re-encoded.\n"
+                "This cannot be undone."
+            )
+        else:
+            message = (
+                f"Apply “{label}” and overwrite {len(paths)} image files on disk?\n"
+                "This cannot be undone."
+            )
+
+        self.universal_dialog(
+            title=f"{label}?",
+            message=message,
+            confirm_callback=_go,
+            confirm_text="Overwrite",
+            cancel_text="Cancel",
+            show_cancel=True,
+        )
+
+    def _run_batch_image_transform(self, paths, *, op: str, action_label: str):
+        """Worker + progress UI for rotate/flip overwrite."""
+        progress = open_file_op_progress_dialog(
+            self, action_label, len(paths), action_label=action_label
+        )
+        errors = []
+
+        def _worker():
+            ok = 0
+            for i, path in enumerate(paths, start=1):
+                if progress.cancelled:
+                    break
+                name = os.path.basename(path)
+                self.after(
+                    0,
+                    lambda i=i, name=name: progress.set_progress(i - 1, detail=name),
+                )
+                try:
+                    transform_image_file(path, op)
+                    ok += 1
+                    self.after(
+                        0,
+                        lambda p=path: self.refresh_single_thumbnail(p, overwrite=True),
+                    )
+                except Exception as e:
+                    logging.info("%s failed for %s: %s", action_label, path, e)
+                    errors.append(f"{name}: {e}")
+                self.after(
+                    0,
+                    lambda i=i, name=name: progress.set_progress(i, detail=name),
+                )
+
+            def _done():
+                progress.close()
+                if errors:
+                    shown = "\n".join(errors[:8])
+                    more = f"\n…and {len(errors) - 8} more" if len(errors) > 8 else ""
+                    self.universal_dialog(
+                        title=f"{action_label} finished with errors",
+                        message=f"Updated {ok} / {len(paths)} files.\n\n{shown}{more}",
+                        confirm_callback=lambda: True,
+                        confirm_text="OK",
+                        show_cancel=False,
+                    )
+                elif ok:
+                    logging.info("%s: %s files OK", action_label, ok)
+
+            self.after(0, _done)
+
+        threading.Thread(
+            target=_worker, daemon=True, name=f"batch-{op}"
+        ).start()
+
+    def open_batch_image_resize(self, paths: list):
+        """Show batch resize dialog and overwrite selected image files."""
+        paths = [p for p in (paths or []) if p and os.path.isfile(p)]
+        if not paths:
+            return
+        if len(paths) == 1:
+            self.open_image_viewer_edit(paths[0], "resize")
+            return
+
+        def _on_apply(unit, width_val, height_val, lock_aspect, resample_filter):
+            def _confirmed():
+                self._run_batch_image_resize(
+                    paths,
+                    unit=unit,
+                    width_val=width_val,
+                    height_val=height_val,
+                    lock_aspect=lock_aspect,
+                    resample_filter=resample_filter,
+                )
+                return True
+
+            self.universal_dialog(
+                title="Overwrite files?",
+                message=(
+                    f"Resize and overwrite {len(paths)} image files on disk?\n"
+                    "This cannot be undone."
+                ),
+                confirm_callback=_confirmed,
+                confirm_text="Overwrite",
+                cancel_text="Cancel",
+                show_cancel=True,
+            )
+
+        open_batch_resize_dialog(self, paths, on_apply=_on_apply)
+
+    def _run_batch_image_resize(
+        self,
+        paths,
+        *,
+        unit,
+        width_val,
+        height_val,
+        lock_aspect,
+        resample_filter,
+    ):
+        """Worker + progress UI for batch resize overwrite."""
+        progress = open_file_op_progress_dialog(
+            self, "Resize Images", len(paths), action_label="Resizing"
+        )
+        errors = []
+
+        def _worker():
+            ok = 0
+            for i, path in enumerate(paths, start=1):
+                if progress.cancelled:
+                    break
+                name = os.path.basename(path)
+                self.after(
+                    0,
+                    lambda i=i, name=name: progress.set_progress(i - 1, detail=name),
+                )
+                try:
+                    resize_image_file(
+                        path,
+                        unit=unit,
+                        width_val=width_val,
+                        height_val=height_val,
+                        lock_aspect=lock_aspect,
+                        resample_filter=resample_filter,
+                    )
+                    ok += 1
+                    self.after(
+                        0,
+                        lambda p=path: self.refresh_single_thumbnail(p, overwrite=True),
+                    )
+                except Exception as e:
+                    logging.info("Batch resize failed for %s: %s", path, e)
+                    errors.append(f"{name}: {e}")
+                self.after(
+                    0,
+                    lambda i=i, name=name: progress.set_progress(i, detail=name),
+                )
+
+            def _done():
+                progress.close()
+                if errors:
+                    shown = "\n".join(errors[:8])
+                    more = f"\n…and {len(errors) - 8} more" if len(errors) > 8 else ""
+                    self.universal_dialog(
+                        title="Resize finished with errors",
+                        message=f"Resized {ok} / {len(paths)} files.\n\n{shown}{more}",
+                        confirm_callback=lambda: True,
+                        confirm_text="OK",
+                        show_cancel=False,
+                    )
+                elif ok:
+                    logging.info("Batch resize: %s files OK", ok)
+
+            self.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True, name="batch-resize").start()
+
     def setup_icons(self):
         """
         Load and scale tree/grid icons from the /icons subdirectory and prepare PhotoImage/CTkImage versions.
@@ -3325,23 +3620,74 @@ class VtpGridMixin:
         elif (mimetype and mimetype.startswith("image")) or lower_path.endswith(IMAGE_FORMATS):
             menu.add_command(label="🖼 Show Image", command=lambda: self.open_image_viewer(file_path, os.path.basename(file_path)))
             menu.add_separator()
-            # Image edit tools — open viewer then enter crop / resize.
+            # Image edit tools (multi-select: resize batches; crop is single-image).
+            edit_paths = self.selected_image_paths_for_edit(file_path)
+            n_edit = len(edit_paths)
             _crop_acc = menu_accel(_hk, "image_crop")
             _crop_opts = {
                 "label": "Crop…",
-                "command": lambda fp=file_path: self.open_image_viewer_edit(fp, "crop"),
+                "command": lambda fp=file_path: self.start_image_crop_from_grid(fp),
             }
             if _crop_acc:
                 _crop_opts["accelerator"] = _crop_acc
             menu.add_command(**_crop_opts)
             _rs_acc = menu_accel(_hk, "image_resize")
+            _rs_label = "Resize Image…" if n_edit <= 1 else f"Resize Images… ({n_edit})"
             _rs_opts = {
-                "label": "Resize Image…",
-                "command": lambda fp=file_path: self.open_image_viewer_edit(fp, "resize"),
+                "label": _rs_label,
+                "command": lambda fp=file_path: self.start_image_resize_from_grid(fp),
             }
             if _rs_acc:
                 _rs_opts["accelerator"] = _rs_acc
             menu.add_command(**_rs_opts)
+
+            # Rotate / flip — batch-safe (same transform on all selected images).
+            def _xf_label(base: str) -> str:
+                return base if n_edit <= 1 else f"{base} ({n_edit})"
+
+            _rl_acc = menu_accel(_hk, "image_rotate_left")
+            _rl_opts = {
+                "label": _xf_label("Rotate Left"),
+                "command": lambda fp=file_path: self.start_image_transform_from_grid(
+                    fp, "rotate_left"
+                ),
+            }
+            if _rl_acc:
+                _rl_opts["accelerator"] = _rl_acc
+            menu.add_command(**_rl_opts)
+
+            _rr_acc = menu_accel(_hk, "image_rotate_right")
+            _rr_opts = {
+                "label": _xf_label("Rotate Right"),
+                "command": lambda fp=file_path: self.start_image_transform_from_grid(
+                    fp, "rotate_right"
+                ),
+            }
+            if _rr_acc:
+                _rr_opts["accelerator"] = _rr_acc
+            menu.add_command(**_rr_opts)
+
+            _fh_acc = menu_accel(_hk, "image_flip_h")
+            _fh_opts = {
+                "label": _xf_label("Flip Horizontal"),
+                "command": lambda fp=file_path: self.start_image_transform_from_grid(
+                    fp, "flip_h"
+                ),
+            }
+            if _fh_acc:
+                _fh_opts["accelerator"] = _fh_acc
+            menu.add_command(**_fh_opts)
+
+            _fv_acc = menu_accel(_hk, "image_flip_v")
+            _fv_opts = {
+                "label": _xf_label("Flip Vertical"),
+                "command": lambda fp=file_path: self.start_image_transform_from_grid(
+                    fp, "flip_v"
+                ),
+            }
+            if _fv_acc:
+                _fv_opts["accelerator"] = _fv_acc
+            menu.add_command(**_fv_opts)
 
             compare_paths = self.selected_image_paths_for_compare(file_path)
             if len(compare_paths) >= 2:
