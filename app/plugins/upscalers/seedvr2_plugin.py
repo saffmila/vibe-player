@@ -276,6 +276,7 @@ def prepare_prescaled_input(
 
 
 def _cleanup_temp(path: str | None) -> None:
+    """Best-effort delete of a temporary prescale file."""
     if not path:
         return
     try:
@@ -283,44 +284,20 @@ def _cleanup_temp(path: str | None) -> None:
             os.remove(path)
     except OSError:
         pass
-        return None
-    try:
-        from file_operations import get_ffprobe_path
 
-        ffprobe = get_ffprobe_path()
-        cmd = [
-            ffprobe,
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=width,height",
-            "-of",
-            "csv=p=0:s=x",
-            file_path,
-        ]
-        startupinfo = None
-        if os.name == "nt":
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = subprocess.SW_HIDE
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=60,
-            startupinfo=startupinfo,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            parts = result.stdout.strip().split("x")
-            if len(parts) >= 2:
-                w, h = int(parts[0]), int(parts[1])
-                if w > 0 and h > 0:
-                    return min(w, h)
-    except Exception as exc:
-        logging.debug("[SeedVR2] Could not probe short side: %s", exc)
-    return None
+
+# Back-compat alias matching the Gemini/spec helper name.
+def prepare_prescaled_media(file_path: str, max_dim: int) -> str:
+    """
+    Downscale media when the long edge exceeds ``max_dim``.
+
+    Returns the path to use for inference (original or a temp file).
+    Caller must delete the returned path when it differs from ``file_path``.
+    """
+    work_path, _temp = prepare_prescaled_input(
+        file_path, max_dim if max_dim and max_dim > 0 else None
+    )
+    return work_path
 
 
 class SeedVR2UpscalePlugin(UpscaleBackend):

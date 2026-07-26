@@ -325,7 +325,9 @@ class VtpUpscaleMixin:
                 self.after(
                     0,
                     lambda i=idx, t=total, p=base: self.status_bar.set_action_message(
-                        f"Upscaling {i}/{t}: {p}"
+                        f"[SeedVR 2 Batch] Processing {i}/{t}: {p}"
+                        if t > 1
+                        else f"[SeedVR 2] Processing: {p}"
                     ),
                 )
 

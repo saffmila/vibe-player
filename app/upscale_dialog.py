@@ -76,11 +76,19 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         initial_gpu = self._gpu_label_by_index.get(saved_cuda, self._gpu_labels[0] if self._gpu_labels else "cuda:0")
         self.gpu_var = ctk.StringVar(value=initial_gpu)
 
-        ctk.CTkLabel(self, text="Offline AI upscale", text_color="#00bfff").pack(pady=(12, 4))
         n = len(self.paths)
+        # Single dialog for both modes; header reflects selection size.
+        if n <= 1:
+            header = "SeedVR 2 Upscale — Single File"
+            subtitle = "1 file selected" if n == 1 else "No files selected"
+        else:
+            header = f"SeedVR 2 Upscale — Batch Mode ({n} items selected)"
+            subtitle = f"{n} files selected"
+        self.title(header)
+        ctk.CTkLabel(self, text=header, text_color="#00bfff").pack(pady=(12, 4))
         ctk.CTkLabel(
             self,
-            text=f"{n} file{'s' if n != 1 else ''} selected",
+            text=subtitle,
             text_color="#aaaaaa",
         ).pack(pady=(0, 8))
 
