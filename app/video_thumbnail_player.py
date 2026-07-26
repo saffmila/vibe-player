@@ -145,6 +145,7 @@ from vtp_mixin_grid import VtpGridMixin
 from vtp_mixin_legacy_drag import VtpLegacyDragMixin
 from vtp_mixin_preferences import VtpPreferencesMixin
 from vtp_mixin_tagging import VtpTaggingMixin
+from vtp_mixin_upscale import VtpUpscaleMixin
 from vtp_mixin_window_layout import VtpWindowLayoutMixin
 from vtp_virtual_grid import VtpVirtualGridMixin
 
@@ -229,6 +230,7 @@ class VideoThumbnailPlayer(
     VtpWindowLayoutMixin,
     VtpLegacyDragMixin,
     VtpTaggingMixin,
+    VtpUpscaleMixin,
     VtpPreferencesMixin,
     dnd.TkinterDnD.Tk,
 ):
@@ -1354,8 +1356,7 @@ class VideoThumbnailPlayer(
         dialog_window = ctk.CTkToplevel(self)
         self._active_universal_dialog = dialog_window
         dialog_window.title(title)
-        _dw, _dh = (600, 220) if input_field else (400, 200)
-        self._center_toplevel_window(dialog_window, _dw, _dh)
+        _dw, _dh = (600, 220) if input_field else (440, 200)
         dialog_window.resizable(False, False)
         try:
             dialog_window.transient(self)
@@ -1375,17 +1376,24 @@ class VideoThumbnailPlayer(
 
         dialog_window.bind("<Destroy>", _clear_active_dialog, add="+")
 
-        _msg_wrap = 540 if input_field else 350
+        # Buttons first (bottom) so long messages cannot clip Confirm/Cancel.
+        btn_row = ctk.CTkFrame(dialog_window, fg_color="transparent")
+        btn_row.pack(side="bottom", fill="x", padx=10, pady=(4, 12))
+
+        content = ctk.CTkFrame(dialog_window, fg_color="transparent")
+        content.pack(side="top", fill="both", expand=True, padx=14, pady=(14, 4))
+
+        _msg_wrap = 540 if input_field else 400
         label = ctk.CTkLabel(
-            dialog_window, text=message, wraplength=_msg_wrap, anchor="w", justify="left"
+            content, text=message, wraplength=_msg_wrap, anchor="w", justify="left"
         )
-        label.pack(padx=14, pady=10)
+        label.pack(fill="x", anchor="w")
 
         # Add input field if required
         input_var = ctk.StringVar(value=default_input) if input_field else None
         if input_field:
-            input_entry = ctk.CTkEntry(dialog_window, textvariable=input_var, height=32)
-            input_entry.pack(fill="x", expand=True, padx=14, pady=(4, 8))
+            input_entry = ctk.CTkEntry(content, textvariable=input_var, height=32)
+            input_entry.pack(fill="x", expand=True, pady=(8, 0))
 
         # Confirm button
         confirm_in_progress = False
@@ -1411,8 +1419,8 @@ class VideoThumbnailPlayer(
 
         btn_confirm = None
         if confirm_callback is not None:
-            btn_confirm = ctk.CTkButton(dialog_window, text=confirm_text, command=on_confirm)
-            btn_confirm.pack(side="left", padx=10, pady=10)
+            btn_confirm = ctk.CTkButton(btn_row, text=confirm_text, command=on_confirm)
+            btn_confirm.pack(side="left", padx=(0, 8))
 
         # Third button
         if third_button and third_callback:
@@ -1420,8 +1428,8 @@ class VideoThumbnailPlayer(
                 third_callback()
                 dialog_window.destroy()
 
-            btn_third = ctk.CTkButton(dialog_window, text=third_button, command=on_third)
-            btn_third.pack(side="left", padx=10, pady=10)
+            btn_third = ctk.CTkButton(btn_row, text=third_button, command=on_third)
+            btn_third.pack(side="left", padx=(0, 8))
 
         # Cancel button
         btn_cancel = None
@@ -1431,15 +1439,26 @@ class VideoThumbnailPlayer(
                     cancel_callback()
                     if dialog_window.winfo_exists():
                         dialog_window.destroy()
-                btn_cancel = ctk.CTkButton(dialog_window, text=cancel_text, command=on_cancel)
-                btn_cancel.pack(side="right", padx=10, pady=10)
+                btn_cancel = ctk.CTkButton(btn_row, text=cancel_text, command=on_cancel)
+                btn_cancel.pack(side="right")
             else:
                 btn_cancel = ctk.CTkButton(
-                    dialog_window,
+                    btn_row,
                     text=cancel_text,
                     command=lambda: dialog_window.winfo_exists() and dialog_window.destroy(),
                 )
-                btn_cancel.pack(side="right", padx=10, pady=10)
+                btn_cancel.pack(side="right")
+
+        # Size to content so multi-line delete warnings don't hide buttons.
+        try:
+            dialog_window.update_idletasks()
+            req_h = int(dialog_window.winfo_reqheight())
+            req_w = max(_dw, int(dialog_window.winfo_reqwidth()))
+            max_h = max(280, min(560, int(dialog_window.winfo_screenheight()) - 100))
+            h = max(_dh, min(req_h + 8, max_h))
+            self._center_toplevel_window(dialog_window, req_w, h)
+        except Exception:
+            self._center_toplevel_window(dialog_window, _dw, _dh)
 
         # Keyboard shortcuts for all universal dialogs:
         # Enter = confirm, Escape = cancel
@@ -1708,11 +1727,22 @@ class VideoThumbnailPlayer(
 
         warnings = []
         if non_empty_dirs:
-            warnings.append(
-                f"Warning: {len(non_empty_dirs)} selected folder(s) are not empty.\n"
-                "Their contents will be deleted too:\n"
-                f"{_format_path_names(non_empty_dirs)}"
+            # Avoid repeating the same names already listed under "Delete N item(s)?".
+            listed_already = (
+                len(non_empty_dirs) == n
+                and all(os.path.isdir(p) for p in paths)
             )
+            if listed_already:
+                warnings.append(
+                    f"Warning: {len(non_empty_dirs)} selected folder(s) are not empty.\n"
+                    "Their contents will be deleted too."
+                )
+            else:
+                warnings.append(
+                    f"Warning: {len(non_empty_dirs)} selected folder(s) are not empty.\n"
+                    "Their contents will be deleted too:\n"
+                    f"{_format_path_names(non_empty_dirs)}"
+                )
         if unknown_dirs:
             warnings.append(
                 f"Warning: {len(unknown_dirs)} selected folder(s) could not be inspected.\n"
@@ -4045,6 +4075,12 @@ class VideoThumbnailPlayer(
         save_recent_directories(self.settings_file,self.recent_directories)
         save_folder_favorites(getattr(self, "folder_favorites", []), FAVORITES_FILE)
         self.save_preferences()  # unified save
+        try:
+            from seedvr2_worker_host import shutdown_seedvr2_worker_host
+
+            shutdown_seedvr2_worker_host()
+        except Exception:
+            logging.debug("[SeedVR2] worker shutdown on close failed", exc_info=True)
 
         self.destroy()
 

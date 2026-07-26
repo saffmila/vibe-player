@@ -3784,14 +3784,21 @@ class VtpGridMixin:
         menu.add_command(**_cut_opts)
         self.add_clipboard_paste_cascade(menu, getattr(self, "current_directory", None))
 
-        # Plugin-based auto-tagging (only if plugin is loaded)
-        if hasattr(self, "plugin_manager") and self.plugin_manager.plugins:
+        # Plugin-based auto-tagging / offline AI upscale
+        if hasattr(self, "plugin_manager") and (
+            self.plugin_manager.plugins or getattr(self.plugin_manager, "upscale_plugins", None)
+        ):
             menu.add_separator()
         menu.add_command(
             label="Auto Tag",
             # command=lambda: self.auto_tag_with_plugin_from_file(file_path)
             command=lambda: self.auto_tag_selected_items(file_path)
         )
+        if hasattr(self, "open_upscale_dialog"):
+            menu.add_command(
+                label="Upscale…",
+                command=lambda: self.open_upscale_dialog(file_path),
+            )
 
         # menu.add_command(label="Create New Virtual Library", command=self.create_virtual_library)
         # Add to / Remove from Virtual Library

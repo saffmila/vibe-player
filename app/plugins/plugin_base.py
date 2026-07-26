@@ -2,6 +2,8 @@
 plugin_base.py — Base class for tagging plugins.
 
 TaggingPlugin defines the interface: run(file_path, metadata) returning {'tags': [...]}.
+
+Offline upscalers (SeedVR2, DAT, …) use processing_base.UpscaleBackend instead.
 """
 
 

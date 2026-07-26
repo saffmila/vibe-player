@@ -19,8 +19,12 @@ from PIL import Image as PILImage
 
 
 # Aspect preset label -> width/height ratio (None = free).
-ASPECT_PRESETS: dict[str, Optional[float]] = {
+# "Original" is resolved at runtime from the image size (see CropModeController).
+ASPECT_ORIGINAL = "original"
+
+ASPECT_PRESETS: dict[str, Optional[float | str]] = {
     "Free": None,
+    "Original": ASPECT_ORIGINAL,
     "1:1": 1.0,
     "16:9": 16.0 / 9.0,
     "4:3": 4.0 / 3.0,
@@ -37,7 +41,7 @@ _ASPECT_SWAP_PAIRS = {
 }
 
 _HANDLE_SIZE = 7  # canvas pixels
-_HANDLE_HIT = 8
+_EDGE_HIT = 12  # canvas px — full edge strip (not only handle centers)
 _MIN_CROP_PX = 8
 _CROP_TAG = "crop_overlay"
 
@@ -128,7 +132,7 @@ class CropOverlayHUD(ctk.CTkFrame):
             variable=self.aspect_var,
             values=list(ASPECT_PRESETS.keys()),
             command=self._aspect_chosen,
-            width=96,
+            width=110,
             height=_CTRL_H,
             corner_radius=_CORNER,
             fg_color=_BTN_FG,
@@ -375,6 +379,7 @@ class CropModeController:
         return ix, iy
 
     def _clamp_rect(self, x0, y0, x1, y1):
+        """Clamp a box into the image, preserving size (may shift — for move/center)."""
         iw, ih = self.v.original_image.size
         x0, x1 = sorted((x0, x1))
         y0, y1 = sorted((y0, y1))
@@ -387,8 +392,53 @@ class CropModeController:
         y0 = max(0, min(y0, ih - h))
         return (int(round(x0)), int(round(y0)), int(round(x0 + w)), int(round(y0 + h)))
 
+    def _clamp_resize(self, x0, y0, x1, y1, mode: str):
+        """Clamp a resize so the opposite edge/corner stays pinned when possible."""
+        iw, ih = self.v.original_image.size
+        if x1 < x0:
+            x0, x1 = x1, x0
+        if y1 < y0:
+            y0, y1 = y1, y0
+        w = max(_MIN_CROP_PX, min(x1 - x0, float(iw)))
+        h = max(_MIN_CROP_PX, min(y1 - y0, float(ih)))
+
+        pin_left = mode in ("e", "ne", "se")
+        pin_right = mode in ("w", "nw", "sw")
+        pin_top = mode in ("s", "se", "sw")
+        pin_bottom = mode in ("n", "ne", "nw")
+
+        if pin_left:
+            x0 = max(0.0, min(x0, iw - w))
+            x1 = x0 + w
+        elif pin_right:
+            x1 = max(w, min(x1, float(iw)))
+            x0 = x1 - w
+        else:
+            x0 = max(0.0, min(x0, iw - w))
+            x1 = x0 + w
+
+        if pin_top:
+            y0 = max(0.0, min(y0, ih - h))
+            y1 = y0 + h
+        elif pin_bottom:
+            y1 = max(h, min(y1, float(ih)))
+            y0 = y1 - h
+        else:
+            y0 = max(0.0, min(y0, ih - h))
+            y1 = y0 + h
+
+        return (int(round(x0)), int(round(y0)), int(round(x1)), int(round(y1)))
+
     def _aspect_ratio(self) -> Optional[float]:
-        return ASPECT_PRESETS.get(self.aspect_label)
+        preset = ASPECT_PRESETS.get(self.aspect_label)
+        if preset is None:
+            return None
+        if preset == ASPECT_ORIGINAL:
+            iw, ih = self.v.original_image.size
+            if iw <= 0 or ih <= 0:
+                return None
+            return iw / float(ih)
+        return float(preset)
 
     def _apply_aspect_to_rect(self, x0, y0, x1, y1, *, anchor="center"):
         """Force current aspect onto a box; keep center unless anchor is a handle name."""
@@ -438,7 +488,9 @@ class CropModeController:
         else:
             nx0, ny0 = cx - w / 2, cy - h / 2
 
-        return self._clamp_rect(nx0, ny0, nx0 + w, ny0 + h)
+        if anchor == "center":
+            return self._clamp_rect(nx0, ny0, nx0 + w, ny0 + h)
+        return self._clamp_resize(nx0, ny0, nx0 + w, ny0 + h, anchor)
 
     # ------------------------------------------------------------------ draw
 
@@ -499,15 +551,50 @@ class CropModeController:
         return {k: self.img_to_canvas(*p) for k, p in pts.items()}
 
     def _hit_test(self, cx, cy):
-        """Return 'nw'|...|'move'|None for a canvas-space point."""
+        """Return handle name, ``move``, or None for a canvas-space point.
+
+        Edges/corners win over move: only the inset interior pans the crop.
+        """
         if self.rect is None:
             return None
-        for name, (hx, hy) in self._handle_centers_canvas().items():
-            if abs(cx - hx) <= _HANDLE_HIT and abs(cy - hy) <= _HANDLE_HIT:
-                return name
+
         x0, y0, x1, y1 = self.rect
-        ix, iy = self.canvas_to_img(cx, cy)
-        if x0 <= ix <= x1 and y0 <= iy <= y1:
+        c0x, c0y = self.img_to_canvas(x0, y0)
+        c1x, c1y = self.img_to_canvas(x1, y1)
+        left, right = (c0x, c1x) if c0x <= c1x else (c1x, c0x)
+        top, bottom = (c0y, c1y) if c0y <= c1y else (c1y, c0y)
+        bw = max(1.0, right - left)
+        bh = max(1.0, bottom - top)
+        # Keep a usable interior for move on tiny crops.
+        edge_x = min(_EDGE_HIT, bw / 3.0)
+        edge_y = min(_EDGE_HIT, bh / 3.0)
+
+        near_l = abs(cx - left) <= edge_x
+        near_r = abs(cx - right) <= edge_x
+        near_t = abs(cy - top) <= edge_y
+        near_b = abs(cy - bottom) <= edge_y
+        along_x = (left - edge_x) <= cx <= (right + edge_x)
+        along_y = (top - edge_y) <= cy <= (bottom + edge_y)
+
+        if near_t and near_l and along_x and along_y:
+            return "nw"
+        if near_t and near_r and along_x and along_y:
+            return "ne"
+        if near_b and near_r and along_x and along_y:
+            return "se"
+        if near_b and near_l and along_x and along_y:
+            return "sw"
+        if near_t and left <= cx <= right:
+            return "n"
+        if near_b and left <= cx <= right:
+            return "s"
+        if near_l and top <= cy <= bottom:
+            return "w"
+        if near_r and top <= cy <= bottom:
+            return "e"
+
+        # Interior only (outside the edge strip) → move.
+        if (left + edge_x) < cx < (right - edge_x) and (top + edge_y) < cy < (bottom - edge_y):
             return "move"
         return None
 
@@ -544,6 +631,12 @@ class CropModeController:
         if mode == "move":
             w, h = ox1 - ox0, oy1 - oy0
             self.rect = self._clamp_rect(ox0 + dx, oy0 + dy, ox0 + dx + w, oy0 + dy + h)
+        elif self._aspect_ratio() is not None:
+            # Locked aspect (Original / 16:9 / …): scale about the crop center so
+            # the selection does not translate while resizing (Free keeps opposite-edge pin).
+            self.rect = self._scale_rect_about_center(
+                ox0, oy0, ox1, oy1, mode=mode, ix=ix, iy=iy, dx=dx, dy=dy
+            )
         else:
             x0, y0, x1, y1 = ox0, oy0, ox1, oy1
             if "w" in mode:
@@ -554,37 +647,73 @@ class CropModeController:
                 y0 = oy0 + dy
             if "s" in mode:
                 y1 = oy1 + dy
-            # Edge-only handles: keep opposite side fixed, apply aspect via width or height.
-            if mode in ("n", "s", "e", "w") and self._aspect_ratio() is not None:
-                ratio = self._aspect_ratio()
-                if mode in ("n", "s"):
-                    h = abs(y1 - y0)
-                    w = h * ratio
-                    cx = (ox0 + ox1) / 2.0
-                    x0, x1 = cx - w / 2, cx + w / 2
+            if abs(x1 - x0) < _MIN_CROP_PX:
+                if "w" in mode:
+                    x0 = x1 - _MIN_CROP_PX
                 else:
-                    w = abs(x1 - x0)
-                    h = w / ratio
-                    cy = (oy0 + oy1) / 2.0
-                    y0, y1 = cy - h / 2, cy + h / 2
-                self.rect = self._clamp_rect(x0, y0, x1, y1)
-            elif self._aspect_ratio() is not None:
-                self.rect = self._apply_aspect_to_rect(x0, y0, x1, y1, anchor=mode)
-            else:
-                if abs(x1 - x0) < _MIN_CROP_PX:
-                    if "w" in mode:
-                        x0 = x1 - _MIN_CROP_PX
-                    else:
-                        x1 = x0 + _MIN_CROP_PX
-                if abs(y1 - y0) < _MIN_CROP_PX:
-                    if "n" in mode:
-                        y0 = y1 - _MIN_CROP_PX
-                    else:
-                        y1 = y0 + _MIN_CROP_PX
-                self.rect = self._clamp_rect(x0, y0, x1, y1)
+                    x1 = x0 + _MIN_CROP_PX
+            if abs(y1 - y0) < _MIN_CROP_PX:
+                if "n" in mode:
+                    y0 = y1 - _MIN_CROP_PX
+                else:
+                    y1 = y0 + _MIN_CROP_PX
+            self.rect = self._clamp_resize(x0, y0, x1, y1, mode)
 
         self.redraw()
         return "break"
+
+    def _scale_rect_about_center(
+        self, ox0, oy0, ox1, oy1, *, mode: str, ix: float, iy: float, dx: float, dy: float
+    ):
+        """Resize with locked aspect while keeping the crop center fixed."""
+        ratio = self._aspect_ratio()
+        if ratio is None or ratio <= 0:
+            return self._clamp_rect(ox0, oy0, ox1, oy1)
+
+        iw, ih = self.v.original_image.size
+        cx = (ox0 + ox1) / 2.0
+        cy = (oy0 + oy1) / 2.0
+
+        if mode in ("e", "w"):
+            if mode == "e":
+                half_w = max(_MIN_CROP_PX / 2.0, (ox1 + dx) - cx)
+            else:
+                half_w = max(_MIN_CROP_PX / 2.0, cx - (ox0 + dx))
+            w = half_w * 2.0
+            h = w / ratio
+        elif mode in ("n", "s"):
+            if mode == "s":
+                half_h = max(_MIN_CROP_PX / 2.0, (oy1 + dy) - cy)
+            else:
+                half_h = max(_MIN_CROP_PX / 2.0, cy - (oy0 + dy))
+            h = half_h * 2.0
+            w = h * ratio
+        else:
+            # Corners: scale from the larger axis delta so the handle tracks the pointer.
+            half_w = max(_MIN_CROP_PX / 2.0, abs(ix - cx))
+            half_h = max(_MIN_CROP_PX / 2.0, abs(iy - cy))
+            w_cand = half_w * 2.0
+            h_cand = half_h * 2.0
+            # Pick the candidate that stays outside the pointer along both axes.
+            if w_cand / ratio >= h_cand:
+                w, h = w_cand, w_cand / ratio
+            else:
+                h, w = h_cand, h_cand * ratio
+
+        # Fit inside the image while preserving aspect and center when possible.
+        max_w = float(iw)
+        max_h = float(ih)
+        if w > max_w:
+            w = max_w
+            h = w / ratio
+        if h > max_h:
+            h = max_h
+            w = h * ratio
+        if w > max_w:
+            w = max_w
+            h = w / ratio
+
+        return self._clamp_rect(cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0)
 
     def _on_release(self, event):
         if not self.active:
@@ -654,7 +783,8 @@ class CropModeController:
             new_label = "Free"
         self.aspect_label = new_label
         self.rect = self._clamp_rect(cx - h / 2, cy - w / 2, cx + h / 2, cy + w / 2)
-        if new_label != "Free" and ASPECT_PRESETS.get(new_label) is not None:
+        # Re-lock when the new preset has a fixed ratio (incl. Original).
+        if new_label != "Free" and self._aspect_ratio() is not None:
             self.rect = self._apply_aspect_to_rect(*self.rect, anchor="center")
         if self.hud:
             self.hud.set_aspect(self.aspect_label)
@@ -722,6 +852,9 @@ class CropModeController:
             return
 
         if mode == "copy":
+            src = getattr(v, "image_path", None) or ""
+            initial_dir = os.path.dirname(src) if src else None
+            base = os.path.splitext(os.path.basename(src))[0] if src else "crop"
             save_path = filedialog.asksaveasfilename(
                 parent=v.image_window,
                 defaultextension=".png",
@@ -731,7 +864,8 @@ class CropModeController:
                     ("WebP files", "*.webp"),
                     ("All Files", "*.*"),
                 ],
-                initialfile=os.path.splitext(os.path.basename(v.image_path))[0] + "_crop.png",
+                initialdir=initial_dir or None,
+                initialfile=f"{base}_crop.png",
             )
             if not save_path:
                 return

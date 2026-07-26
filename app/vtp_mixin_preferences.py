@@ -336,6 +336,26 @@ class VtpPreferencesMixin:
                 self.image_viewer_open_fullscreen = bool(
                     settings.get("image_viewer_open_fullscreen", True)
                 )
+                self.seedvr2_weights_dir = str(settings.get("seedvr2_weights_dir") or "").strip()
+                if not self.seedvr2_weights_dir:
+                    try:
+                        from seedvr2_config import default_weights_dir
+
+                        self.seedvr2_weights_dir = default_weights_dir()
+                    except Exception:
+                        self.seedvr2_weights_dir = ""
+                self.seedvr2_runner_dir = str(settings.get("seedvr2_runner_dir") or "").strip()
+                self.seedvr2_python = str(settings.get("seedvr2_python") or "").strip()
+                self.seedvr2_cuda_device = str(settings.get("seedvr2_cuda_device") or "0").strip() or "0"
+                self.seedvr2_dit_model = str(settings.get("seedvr2_dit_model") or "").strip()
+                if not self.seedvr2_dit_model:
+                    try:
+                        from seedvr2_config import DEFAULT_DIT_MODEL
+
+                        self.seedvr2_dit_model = DEFAULT_DIT_MODEL
+                    except Exception:
+                        self.seedvr2_dit_model = "seedvr2_ema_3b_fp8_e4m3fn.safetensors"
+                self.seedvr2_keep_vram = bool(settings.get("seedvr2_keep_vram", False))
                 # Splitter positions (fractions 0-1)
                 self._saved_main_sash_fraction = settings.get("splitter_main_fraction")
                 self._saved_left_sash_fraction = settings.get("splitter_left_fraction")

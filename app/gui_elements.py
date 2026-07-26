@@ -24,6 +24,7 @@ from folder_favorites import build_favorites_menu, rebuild_favorites_menu
 from utils import create_menu
 import logging
 from hotkeys import DEFAULT_HOTKEYS, action_label, format_accelerator_menu, iter_help_sections, menu_accel
+from seedvr2_config import DEFAULT_DIT_MODEL, default_weights_dir
 
 # .app calls video_thumbnail_player, so no need to import it
 
@@ -331,7 +332,7 @@ class ConflictDialog(ctk.CTkToplevel):
     def __init__(self, parent, file_name: str):
         super().__init__(parent)
         self.title("File already exists")
-        self.geometry("540x200")
+        self.geometry("620x200")
         self.resizable(False, False)
         self.attributes("-topmost", True)
         self.result: tuple[str, bool] = ("cancel", False)
@@ -357,10 +358,11 @@ class ConflictDialog(ctk.CTkToplevel):
 
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(fill="x", padx=14, pady=(0, 12))
-        ctk.CTkButton(btn_row, text="Replace", command=self._on_replace).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(btn_row, text="Rename", command=self._on_rename).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(btn_row, text="Skip", command=self._on_skip).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(btn_row, text="Cancel", command=self._on_cancel).pack(side="right")
+        btn_w = 110
+        ctk.CTkButton(btn_row, text="Replace", width=btn_w, command=self._on_replace).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btn_row, text="Rename", width=btn_w, command=self._on_rename).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btn_row, text="Skip", width=btn_w, command=self._on_skip).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btn_row, text="Cancel", width=btn_w, command=self._on_cancel).pack(side="right")
 
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
 
@@ -395,32 +397,83 @@ def open_conflict_dialog(parent, file_name: str) -> tuple[str, bool]:
 
 
 class FileOpProgressDialog(ctk.CTkToplevel):
-    """Modal progress dialog for multi-item copy/move (DnD / paste)."""
+    """Modal progress dialog for multi-item copy/move (DnD / paste) and Upscale."""
 
-    def __init__(self, parent, title: str, total: int, action_label: str = "Working"):
+    # Progress bar fill colors by phase (Upscale: load=blue, run=green).
+    _PHASE_BAR = {
+        "load": "#1f6aa5",
+        "upscale": "#2d6a4f",
+        "done": "#2d6a4f",
+        "error": "#9b2226",
+        "idle": None,  # theme default
+    }
+    _PHASE_STATUS = {
+        "load": "#3a9ef0",
+        "upscale": "#52b788",
+        "done": "#52b788",
+        "error": "#e63946",
+        "idle": None,
+    }
+    _PHASE_LABEL = {
+        "load": "Loading model",
+        "upscale": "Upscaling",
+        "done": "Done",
+        "error": "Error",
+        "idle": "Working",
+    }
+
+    def __init__(
+        self,
+        parent,
+        title: str,
+        total: int,
+        action_label: str = "Working",
+        *,
+        topmost: bool = True,
+    ):
         super().__init__(parent)
         self.title(title)
-        self.geometry("460x190")
+        self.geometry("460x210")
         self.resizable(False, False)
-        self.attributes("-topmost", True)
+        # topmost=True keeps short DnD ops visible; False lets long jobs (Upscale)
+        # sink with the app when the user switches away.
+        self._want_topmost = bool(topmost)
+        try:
+            self.attributes("-topmost", self._want_topmost)
+        except Exception:
+            pass
         self._cancelled = False
         self._total = max(1, int(total))
         self._action_label = action_label
+        self._phase = "idle"
+        self._default_bar_color = None
+        self._default_status_color = None
 
         try:
             self.transient(parent)
         except Exception:
             pass
 
+        self.phase_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value=f"{action_label} 0 / {self._total}")
         self.detail_var = tk.StringVar(value="Preparing…")
 
-        ctk.CTkLabel(
+        self.phase_label = ctk.CTkLabel(
+            self,
+            textvariable=self.phase_var,
+            anchor="w",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        self.phase_label.pack(fill="x", padx=16, pady=(14, 0))
+        self.phase_label.pack_forget()  # shown only when set_phase() is used
+
+        self.status_label = ctk.CTkLabel(
             self,
             textvariable=self.status_var,
             anchor="w",
             font=ctk.CTkFont(weight="bold"),
-        ).pack(fill="x", padx=16, pady=(16, 6))
+        )
+        self.status_label.pack(fill="x", padx=16, pady=(8, 6))
         ctk.CTkLabel(
             self,
             textvariable=self.detail_var,
@@ -431,6 +484,15 @@ class FileOpProgressDialog(ctk.CTkToplevel):
         self.progress = ctk.CTkProgressBar(self, orientation="horizontal", mode="determinate")
         self.progress.pack(fill="x", padx=16, pady=(0, 12))
         self.progress.set(0)
+        try:
+            self._default_bar_color = self.progress.cget("progress_color")
+        except Exception:
+            self._default_bar_color = None
+        try:
+            self._default_status_color = self.status_label.cget("text_color")
+        except Exception:
+            self._default_status_color = None
+
         self._indeterminate = self._total <= 1
         if self._indeterminate:
             try:
@@ -470,10 +532,49 @@ class FileOpProgressDialog(ctk.CTkToplevel):
         except Exception:
             pass
         self.lift()
-        self.focus_force()
+        # Avoid focus_force for non-topmost long jobs — steals focus from other apps.
+        if self._want_topmost:
+            try:
+                self.focus_force()
+            except Exception:
+                pass
 
-    def set_progress(self, current: int, total: int | None = None, detail: str = ""):
+    def set_phase(self, phase: str, label: str | None = None):
+        """
+        Switch visual phase (Upscale): ``load`` (blue) / ``upscale`` (green).
+
+        Safe no-op for DnD callers that never set a phase.
+        """
+        phase = (phase or "idle").lower().strip()
+        if phase not in self._PHASE_BAR:
+            phase = "idle"
+        self._phase = phase
+        try:
+            if not self.winfo_exists():
+                return
+            text = label or self._PHASE_LABEL.get(phase, "")
+            if text:
+                self.phase_var.set(text)
+                if not self.phase_label.winfo_ismapped():
+                    self.phase_label.pack(fill="x", padx=16, pady=(14, 0), before=self.status_label)
+            bar = self._PHASE_BAR.get(phase)
+            if bar:
+                self.progress.configure(progress_color=bar)
+            elif self._default_bar_color is not None:
+                self.progress.configure(progress_color=self._default_bar_color)
+            status_color = self._PHASE_STATUS.get(phase)
+            if status_color:
+                self.phase_label.configure(text_color=status_color)
+                self.status_label.configure(text_color=status_color)
+            elif self._default_status_color is not None:
+                self.status_label.configure(text_color=self._default_status_color)
+        except Exception:
+            pass
+
+    def set_progress(self, current: int, total: int | None = None, detail: str = "", phase: str | None = None):
         """Update bar and labels. Call from the Tk main thread only."""
+        if phase:
+            self.set_phase(phase)
         if total is not None and total > 0:
             self._total = int(total)
         cur = max(0, int(current))
@@ -482,7 +583,12 @@ class FileOpProgressDialog(ctk.CTkToplevel):
         try:
             if not self.winfo_exists():
                 return
-            self.status_var.set(f"{self._action_label} {min(cur, tot)} / {tot}")
+            prefix = self._action_label
+            if self._phase == "load":
+                prefix = "Loading"
+            elif self._phase == "upscale":
+                prefix = self._action_label
+            self.status_var.set(f"{prefix} {min(cur, tot)} / {tot}")
             if detail:
                 self.detail_var.set(detail)
             if not self._indeterminate:
@@ -512,9 +618,13 @@ def open_file_op_progress_dialog(
     title: str,
     total: int,
     action_label: str = "Working",
+    *,
+    topmost: bool = True,
 ) -> FileOpProgressDialog:
     """Create and show a modal file-operation progress dialog."""
-    dialog = FileOpProgressDialog(parent, title, total, action_label=action_label)
+    dialog = FileOpProgressDialog(
+        parent, title, total, action_label=action_label, topmost=topmost
+    )
     dialog.show()
     return dialog
 
@@ -2488,6 +2598,12 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
         "image_viewer_open_fullscreen": bool(
             getattr(app, "image_viewer_open_fullscreen", True)
         ),
+        "seedvr2_weights_dir": getattr(app, "seedvr2_weights_dir", "") or default_weights_dir(),
+        "seedvr2_runner_dir": getattr(app, "seedvr2_runner_dir", "") or "",
+        "seedvr2_python": getattr(app, "seedvr2_python", "") or "",
+        "seedvr2_cuda_device": str(getattr(app, "seedvr2_cuda_device", "0") or "0"),
+        "seedvr2_dit_model": getattr(app, "seedvr2_dit_model", "") or DEFAULT_DIT_MODEL,
+        "seedvr2_keep_vram": bool(getattr(app, "seedvr2_keep_vram", False)),
     }
     # Save splitter positions (fractions 0-1) when panes are visible
     try:

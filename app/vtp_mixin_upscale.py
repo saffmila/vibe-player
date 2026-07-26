@@ -1,0 +1,484 @@
+"""Offline AI upscale orchestration mixin for VideoThumbnailPlayer."""
+
+from __future__ import annotations
+
+import logging
+import os
+import threading
+import time
+from tkinter import messagebox
+
+from gui_elements import get_conflict_rename_path, open_conflict_dialog, open_file_op_progress_dialog
+from upscale_dialog import UpscaleOptionsDialog
+from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS
+
+
+def _format_duration(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    mins = int(seconds // 60)
+    secs = seconds - mins * 60
+    if mins < 60:
+        return f"{mins}m {secs:.0f}s"
+    hours = mins // 60
+    mins = mins % 60
+    return f"{hours}h {mins}m"
+
+
+class VtpUpscaleMixin:
+    """Context-menu driven offline upscale (SeedVR2 and future backends)."""
+
+    def _notify_upscale_issue_once(self, error_code: str | None, message: str):
+        """Show pack/weights warnings without spamming dialogs in a batch."""
+        flag = f"_upscale_issue_shown_{error_code or 'unknown'}"
+        if getattr(self, flag, False):
+            return
+        setattr(self, flag, True)
+        text = message or "Upscale failed."
+        self.after(0, lambda: self.status_bar.set_action_message(text))
+        title = "Upscale"
+        if error_code == "gpu_pack_missing":
+            title = "GPU Pack"
+        self.after(0, lambda: messagebox.showwarning(title, text))
+
+    def selected_paths_for_upscale(self, clicked_path: str | None = None) -> list[str]:
+        """Resolve image/video paths from multi-select or the right-clicked item."""
+        selected_paths: list[str] = []
+        if hasattr(self, "selected_thumbnails") and self.selected_thumbnails:
+            selected_paths = [
+                item[0]
+                for item in self.selected_thumbnails
+                if item and item[0] and not os.path.isdir(item[0])
+            ]
+
+        if not selected_paths and clicked_path and not os.path.isdir(clicked_path):
+            selected_paths = [clicked_path]
+
+        supported = []
+        for path in selected_paths:
+            ext = os.path.splitext(path)[1].lower()
+            if ext in VIDEO_FORMATS or ext in IMAGE_FORMATS:
+                supported.append(path)
+        return supported
+
+    def list_available_upscale_backends(self) -> list:
+        pm = getattr(self, "plugin_manager", None)
+        if not pm or not hasattr(pm, "list_upscale_plugins"):
+            return []
+        try:
+            return pm.list_upscale_plugins()
+        except Exception as exc:
+            logging.error("[Upscale] Failed to list backends: %s", exc)
+            return []
+
+    def open_upscale_dialog(self, clicked_path: str | None = None):
+        """Open upscale options for the current selection."""
+        paths = self.selected_paths_for_upscale(clicked_path)
+        if not paths:
+            messagebox.showinfo("Upscale", "No images or videos selected.")
+            return
+
+        backends = self.list_available_upscale_backends()
+        if not backends:
+            messagebox.showerror(
+                "Upscale",
+                "No upscale plugins loaded. Check app.log for plugin import errors.",
+            )
+            return
+
+        UpscaleOptionsDialog(
+            self,
+            backends=backends,
+            default_paths=paths,
+            on_confirm=self.start_upscale_batch,
+            controller=self,
+        )
+
+    def _upscale_progress_update(
+        self,
+        dialog,
+        current: int,
+        total: int,
+        detail: str,
+        phase: str | None = None,
+    ):
+        """Schedule FileOpProgressDialog update on the Tk thread."""
+        if dialog is None:
+            return
+
+        def _update():
+            try:
+                if dialog.winfo_exists():
+                    dialog.set_progress(current, total, detail=detail, phase=phase)
+            except Exception:
+                pass
+
+        try:
+            self.after(0, _update)
+        except Exception:
+            pass
+
+    def _infer_upscale_phase(self, msg: str) -> str:
+        text = (msg or "").lower()
+        if any(
+            tok in text
+            for tok in (
+                "loading model",
+                "load model",
+                "starting persistent",
+                "vram keep",
+                "worker:",
+                "download",
+                "resolving model",
+                "staging",
+                "preparing",
+            )
+        ):
+            return "load"
+        return "upscale"
+
+    def _resolve_upscale_output_conflict(
+        self,
+        output_path: str,
+        progress_dialog,
+        conflict_policy: dict,
+    ) -> str | None:
+        """
+        If output already exists, ask Replace / Rename / Skip / Cancel.
+
+        Returns the path to write, or None to skip this file.
+        Raises InterruptedError on cancel.
+        """
+        if not output_path or not os.path.exists(output_path):
+            return output_path
+
+        action = conflict_policy.get("action")
+        if action in ("replace", "rename", "skip") and conflict_policy.get("apply_all"):
+            if action == "replace":
+                return output_path
+            if action == "rename":
+                return get_conflict_rename_path(output_path)
+            return None  # skip
+
+        holder: dict = {}
+        done = threading.Event()
+
+        def _ask():
+            try:
+                try:
+                    if progress_dialog is not None:
+                        progress_dialog.grab_release()
+                except Exception:
+                    pass
+                act, apply_all = open_conflict_dialog(self, os.path.basename(output_path))
+                holder["action"] = act
+                holder["apply_all"] = apply_all
+            finally:
+                try:
+                    if progress_dialog is not None and progress_dialog.winfo_exists():
+                        progress_dialog.grab_set()
+                        progress_dialog.lift()
+                except Exception:
+                    pass
+                done.set()
+
+        self.after(0, _ask)
+        done.wait()
+        action = holder.get("action") or "cancel"
+        apply_all = bool(holder.get("apply_all"))
+        if apply_all and action in ("replace", "rename", "skip"):
+            conflict_policy["action"] = action
+            conflict_policy["apply_all"] = True
+
+        if action == "replace":
+            return output_path
+        if action == "rename":
+            return get_conflict_rename_path(output_path)
+        if action == "skip":
+            return None
+        raise InterruptedError("Upscale canceled at conflict dialog")
+
+    def start_upscale_batch(self, job: dict):
+        """Run an offline upscale batch on a background thread."""
+        if not job:
+            return
+        if getattr(self, "_upscale_batch_running", False):
+            messagebox.showinfo("Upscale", "An upscale job is already running.")
+            return
+
+        backend_id = job.get("backend_id") or "seedvr2"
+        paths = [p for p in (job.get("paths") or []) if p and os.path.isfile(p)]
+        options = dict(job.get("options") or {})
+        if not paths:
+            messagebox.showinfo("Upscale", "No valid files to upscale.")
+            return
+
+        pm = getattr(self, "plugin_manager", None)
+        plugin = pm.get_upscale_plugin(backend_id) if pm else None
+        if not plugin:
+            messagebox.showerror("Upscale", f"Upscale backend '{backend_id}' not found.")
+            return
+
+        # Allow a fresh warning per batch.
+        for attr in list(vars(self)):
+            if attr.startswith("_upscale_issue_shown_"):
+                try:
+                    delattr(self, attr)
+                except Exception:
+                    setattr(self, attr, False)
+
+        total = len(paths)
+        progress = open_file_op_progress_dialog(
+            self,
+            title="Upscale",
+            total=total,
+            action_label="Upscaling",
+            # Long job: do not pin above other apps when Vibe is in the background.
+            topmost=False,
+        )
+        self._upscale_progress_dialog = progress
+        self._upscale_batch_running = True
+        self.stop_requested = False
+        try:
+            self.status_bar.set_stop_callback(lambda: setattr(self, "stop_requested", True))
+        except Exception:
+            pass
+
+        def _should_stop() -> bool:
+            if getattr(self, "stop_requested", False):
+                return True
+            dlg = getattr(self, "_upscale_progress_dialog", None)
+            try:
+                if dlg is not None and getattr(dlg, "cancelled", False):
+                    self.stop_requested = True
+                    return True
+            except Exception:
+                pass
+            return False
+
+        def worker():
+            self.after(0, self.status_bar.enable_stop)
+            plugin_name = getattr(plugin, "name", backend_id)
+            self.after(
+                0,
+                lambda: self.status_bar.set_action_message(f"Upscaling with {plugin_name}…"),
+            )
+            done = 0
+            failed = 0
+            skipped = 0
+            aborted = False
+            last_out = None
+            last_elapsed = 0.0
+            batch_t0 = time.perf_counter()
+            conflict_policy: dict = {"action": None, "apply_all": False}
+
+            for idx, file_path in enumerate(paths, start=1):
+                if _should_stop():
+                    aborted = True
+                    self.after(0, lambda: self.status_bar.set_action_message("Upscale aborted."))
+                    self._upscale_progress_update(
+                        progress,
+                        idx - 1,
+                        total,
+                        "Canceled — finishing current file if needed…",
+                    )
+                    break
+
+                base = os.path.basename(file_path)
+                file_opts = dict(options)
+
+                # Resolve destination + conflict before starting heavy work.
+                try:
+                    suggested = plugin.suggested_output_path(file_path, file_opts)
+                    resolved = self._resolve_upscale_output_conflict(
+                        suggested, progress, conflict_policy
+                    )
+                except InterruptedError:
+                    aborted = True
+                    break
+                except Exception as exc:
+                    logging.error("[Upscale] Conflict handling failed: %s", exc)
+                    failed += 1
+                    continue
+
+                if resolved is None:
+                    skipped += 1
+                    self._upscale_progress_update(
+                        progress,
+                        idx,
+                        total,
+                        f"{base}\nSkipped (output exists)",
+                        phase="upscale",
+                    )
+                    continue
+
+                file_opts["output_path"] = resolved
+
+                self._upscale_progress_update(
+                    progress,
+                    idx - 1,
+                    total,
+                    f"{base}\nPreparing…",
+                    phase="load",
+                )
+                self.after(
+                    0,
+                    lambda i=idx, t=total, p=base: self.status_bar.set_action_message(
+                        f"Upscaling {i}/{t}: {p}"
+                    ),
+                )
+
+                def progress_cb(frac: float, msg: str, phase: str | None = None, i=idx, t=total, name=base):
+                    line = (msg or "").strip() or "Working…"
+                    resolved_phase = phase or self._infer_upscale_phase(line)
+                    detail = f"{name}\n{line}"
+                    self._upscale_progress_update(progress, i - 1, t, detail, phase=resolved_phase)
+                    self.after(0, lambda m=line: self.status_bar.set_action_message(m[:120]))
+                    try:
+                        overall = ((i - 1) + max(0.0, min(1.0, float(frac)))) / max(1, t)
+                        self.after(0, lambda v=overall: self.status_bar.set_progress(v))
+                    except Exception:
+                        pass
+
+                t0 = time.perf_counter()
+                try:
+                    result = plugin.process(
+                        file_path,
+                        options=file_opts,
+                        progress_cb=progress_cb,
+                        should_stop=_should_stop,
+                    )
+                except Exception as exc:
+                    logging.error("[Upscale] Failed on %s: %s", file_path, exc)
+                    failed += 1
+                    self._upscale_progress_update(
+                        progress, idx, total, f"{base}\nError: {exc}"
+                    )
+                    continue
+                elapsed = time.perf_counter() - t0
+
+                if not result:
+                    failed += 1
+                    continue
+
+                error = result.get("error")
+                blocking = (
+                    "gpu_pack_missing",
+                    "weights_missing",
+                    "runner_missing",
+                    "not_implemented",
+                )
+                if error in blocking:
+                    self._notify_upscale_issue_once(error, result.get("message") or error)
+                    failed += 1
+                    self._upscale_progress_update(
+                        progress,
+                        idx - 1,
+                        total,
+                        result.get("message") or error or "Blocked",
+                    )
+                    break
+
+                if error == "aborted" or _should_stop():
+                    aborted = True
+                    failed += 1
+                    break
+
+                if result.get("ok") and result.get("output_path"):
+                    done += 1
+                    out = result["output_path"]
+                    last_out = out
+                    last_elapsed = elapsed
+                    logging.info(
+                        "[Upscale] OK %s → %s (%.1fs)",
+                        file_path,
+                        out,
+                        elapsed,
+                    )
+                    self._upscale_progress_update(
+                        progress,
+                        idx,
+                        total,
+                        f"{base}\nDone → {os.path.basename(out)} ({_format_duration(elapsed)})",
+                        phase="upscale",
+                    )
+                    ok_msg = (
+                        f"Upscale OK: {os.path.basename(out)} → {out} "
+                        f"({_format_duration(elapsed)})"
+                    )
+                    self.after(0, lambda m=ok_msg: self.status_bar.set_action_message(m))
+                    try:
+                        out_dir = os.path.dirname(out)
+                        cur = getattr(self, "current_directory", None)
+                        if cur and os.path.normcase(os.path.normpath(out_dir)) == os.path.normcase(
+                            os.path.normpath(cur)
+                        ):
+                            self.after(0, lambda: self.display_thumbnails(cur))
+                    except Exception:
+                        pass
+                else:
+                    failed += 1
+                    msg = result.get("message")
+                    if msg:
+                        logging.warning("[Upscale] %s: %s", file_path, msg)
+                        self._notify_upscale_issue_once(error or "failed", msg)
+                    self._upscale_progress_update(
+                        progress,
+                        idx,
+                        total,
+                        f"{base}\nFailed: {(msg or error or 'error')[:160]}",
+                    )
+
+            batch_elapsed = time.perf_counter() - batch_t0
+            parts = [f"{done} ok"]
+            if failed:
+                parts.append(f"{failed} failed")
+            if skipped:
+                parts.append(f"{skipped} skipped")
+            counts = ", ".join(parts)
+            if aborted:
+                summary = f"Upscale aborted: {counts} ({_format_duration(batch_elapsed)})"
+            else:
+                summary = f"Upscale finished: {counts} ({_format_duration(batch_elapsed)})"
+
+            if done == 1 and last_out:
+                status_line = (
+                    f"Upscale successful → {last_out} "
+                    f"({_format_duration(last_elapsed)})"
+                )
+            elif done > 1 and last_out:
+                status_line = (
+                    f"Upscale successful ({done} files, {_format_duration(batch_elapsed)}) "
+                    f"— last: {last_out}"
+                )
+            else:
+                status_line = summary
+
+            self.after(0, lambda m=status_line: self.status_bar.set_action_message(m))
+            self._upscale_progress_update(
+                progress,
+                total if not aborted else done,
+                total,
+                summary,
+                phase="done" if done and not aborted else "upscale",
+            )
+
+            def _finish():
+                try:
+                    if progress is not None:
+                        progress.close()
+                except Exception:
+                    pass
+                self._upscale_progress_dialog = None
+                self._upscale_batch_running = False
+                if done or failed or skipped or aborted:
+                    messagebox.showinfo("Upscale", summary)
+
+            self.after(0, _finish)
+            # Keep success path visible longer on the status bar.
+            self.after(12000, self.status_bar.clear_action_message)
+            self.after(0, lambda: self.status_bar.set_progress(0))
+            self.after(0, self.status_bar.disable_stop)
+
+        threading.Thread(target=worker, daemon=True).start()
