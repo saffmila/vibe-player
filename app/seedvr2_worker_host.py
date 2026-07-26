@@ -225,6 +225,11 @@ class SeedVR2WorkerHost:
                         phase = evt.get("phase") or "upscale"
                         progress_cb(0.5, str(evt.get("msg") or "Working…"), phase)
                     continue
+                if kind == "preview":
+                    # UI polls the file; optional nudge via progress text.
+                    if progress_cb:
+                        progress_cb(0.5, "Live preview ready…", "upscale")
+                    continue
                 if kind == "result":
                     if evt.get("ok"):
                         return {

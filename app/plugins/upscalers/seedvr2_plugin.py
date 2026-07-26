@@ -50,6 +50,40 @@ RUNNER_MISSING_MESSAGE = (
     "Clone it, create .venv, then set Runner folder to the directory that contains "
     "inference_cli.py."
 )
+OOM_HELP_MESSAGE = (
+    "GPU out of memory (VRAM) during SeedVR 2.\n\n"
+    "Try:\n"
+    "• Enable “Low VRAM (tiled VAE)” in the Upscale dialog\n"
+    "• Use Prescale → Optimal / Aggressive (smaller input)\n"
+    "• Lower Scale (2× instead of 4×)\n"
+    "• Pick a freer GPU, or turn off Keep-in-VRAM and retry\n"
+    "• Close other GPU apps (training, games, browsers)"
+)
+
+
+def _is_oom_text(text: str) -> bool:
+    low = (text or "").lower()
+    return any(
+        tok in low
+        for tok in (
+            "out of memory",
+            "outofmemory",
+            "cuda out of memory",
+            "allocation on device",
+            "cudnn_status_alloc_failed",
+            "hip out of memory",
+        )
+    )
+
+
+def _format_runner_failure(tail: str) -> tuple[str, str]:
+    """Return (error_code, user_message) for a failed runner log tail."""
+    if _is_oom_text(tail):
+        return "oom", OOM_HELP_MESSAGE
+    short = (tail or "").strip()
+    if len(short) > 900:
+        short = short[-900:]
+    return "runner_failed", f"SeedVR 2 failed:\n{short}"
 
 
 def _is_gpu_pack_missing_error(exc: BaseException) -> bool:
@@ -322,8 +356,9 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
         self.keep_vram = bool(cfg.get(KEY_KEEP_VRAM))
 
     def supports(self, file_path: str) -> bool:
+        # Video upscale is temporarily disabled (long jobs / freeze risk).
         ext = os.path.splitext(file_path)[1].lower()
-        return ext in VIDEO_FORMATS or ext in IMAGE_FORMATS
+        return ext in IMAGE_FORMATS
 
     def runtime_status(self) -> dict[str, Any]:
         try:
@@ -387,6 +422,8 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
             "cuda_device": None,  # None = use saved setting
             "dit_model": None,  # None = use saved setting
             "keep_vram": None,  # None = use saved setting
+            "vae_tiled": True,  # tiled VAE encode/decode — much lower VRAM
+            "output_format": "png",  # images: png|jpg (never keep webp/source)
             "prescale_mode": "off",
             "prescale_long_edge": None,  # int when custom / resolved
         }
@@ -399,9 +436,16 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
         suffix = str(opts.get("suffix") or "_seedvr2")
         out_dir = opts.get("output_dir") or os.path.dirname(input_path)
         stem, ext = os.path.splitext(os.path.basename(input_path))
-        # CLI video output prefers .mp4; keep image extension for stills.
         ext_l = ext.lower()
-        if ext_l in VIDEO_FORMATS and ext_l not in (".mp4", ".png"):
+        # Images: never keep source container (webp/jfif/…). Default PNG.
+        if ext_l in IMAGE_FORMATS:
+            fmt = str(opts.get("output_format") or "png").strip().lower()
+            if fmt in ("jpg", "jpeg"):
+                ext = ".jpg"
+            else:
+                ext = ".png"
+        elif ext_l in VIDEO_FORMATS and ext_l not in (".mp4", ".png"):
+            # Video path kept for a future re-enable; force mp4.
             ext = ".mp4"
         return os.path.join(out_dir, f"{stem}{suffix}{ext}")
 
@@ -548,6 +592,15 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
         else:
             keep_vram = bool(keep_vram)
 
+        vae_tiled = opts.get("vae_tiled")
+        if vae_tiled is None:
+            vae_tiled = True
+        else:
+            vae_tiled = bool(vae_tiled)
+        # High output short-side → force tiling even if user left it off.
+        if resolution >= 1440:
+            vae_tiled = True
+
         staged = ensure_model_visible_to_runner(self.runner_dir, self.weights_dir, dit_model)
         if staged is None and not (Path(self.weights_dir) / dit_model).is_file():
             return {
@@ -583,6 +636,7 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
                 resolution=resolution,
                 batch_size=batch_size,
                 video_backend=video_backend,
+                vae_tiled=vae_tiled,
                 progress_cb=progress_cb,
                 should_stop=should_stop,
             )
@@ -606,6 +660,18 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
         ]
         if video_backend == "ffmpeg":
             cmd.extend(["--video_backend", "ffmpeg"])
+        if vae_tiled:
+            cmd.extend(["--vae_encode_tiled", "--vae_decode_tiled"])
+            # Slightly smaller tiles help stubborn OOMs on large stills.
+            if resolution >= 1440:
+                cmd.extend(
+                    [
+                        "--vae_encode_tile_size",
+                        "768",
+                        "--vae_decode_tile_size",
+                        "768",
+                    ]
+                )
 
         # Prefer ffmpeg backend when available (bundled with Vibe Player).
         env = os.environ.copy()
@@ -680,12 +746,13 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
 
         code = proc.wait()
         if code != 0:
-            tail = "\n".join(log_lines[-12:]) if log_lines else f"exit code {code}"
+            tail = "\n".join(log_lines[-20:]) if log_lines else f"exit code {code}"
+            err, msg = _format_runner_failure(tail)
             return {
                 "ok": False,
                 "output_path": None,
-                "error": "runner_failed",
-                "message": f"SeedVR 2 failed:\n{tail}",
+                "error": err,
+                "message": msg,
             }
 
         # CLI may write a slightly different name; accept nearby matches.
@@ -737,6 +804,7 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
         resolution: int,
         batch_size: int,
         video_backend: str,
+        vae_tiled: bool = True,
         progress_cb: Callable[[float, str], None] | None,
         should_stop: Callable[[], bool] | None,
     ) -> dict[str, Any]:
@@ -772,17 +840,23 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
                 "load",
             )
 
+        job_opts = {
+            "resolution": resolution,
+            "batch_size": batch_size,
+            "video_backend": video_backend,
+            "vae_tiled": bool(vae_tiled),
+        }
+        if vae_tiled and resolution >= 1440:
+            job_opts["vae_encode_tile_size"] = 768
+            job_opts["vae_decode_tile_size"] = 768
+
         result = host.upscale(
             input_path=os.path.abspath(input_path),
             output_path=os.path.abspath(output_path),
             model_dir=str(self.weights_dir),
             dit_model=dit_model,
             cuda_device=cuda_device,
-            options={
-                "resolution": resolution,
-                "batch_size": batch_size,
-                "video_backend": video_backend,
-            },
+            options=job_opts,
             progress_cb=progress_cb,
             should_stop=should_stop,
         )
@@ -795,11 +869,15 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
                 "error": None,
                 "message": None,
             }
+        err = result.get("error") or "runner_failed"
+        msg = result.get("message") or "Persistent worker failed"
+        if _is_oom_text(msg):
+            err, msg = "oom", OOM_HELP_MESSAGE
         return {
             "ok": False,
             "output_path": None,
-            "error": result.get("error") or "runner_failed",
-            "message": result.get("message") or "Persistent worker failed",
+            "error": err,
+            "message": msg,
         }
 
 

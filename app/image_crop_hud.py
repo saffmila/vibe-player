@@ -31,17 +31,24 @@ ASPECT_PRESETS: dict[str, Optional[float | str]] = {
     "Original": ASPECT_ORIGINAL,
     "1:1": 1.0,
     "16:9": 16.0 / 9.0,
-    "4:3": 4.0 / 3.0,
     "9:16": 9.0 / 16.0,
+    "4:3": 4.0 / 3.0,
+    "3:4": 3.0 / 4.0,
     "3:2": 3.0 / 2.0,
+    "2:3": 2.0 / 3.0,
 }
 
-# Known landscape/portrait pairs for the swap button.
+# Landscape ↔ portrait pairs for the ↔ swap button.
 _ASPECT_SWAP_PAIRS = {
+    "Free": "Free",
+    "Original": "Free",  # no inverted-original preset
+    "1:1": "1:1",
     "16:9": "9:16",
     "9:16": "16:9",
-    "1:1": "1:1",
-    "Free": "Free",
+    "4:3": "3:4",
+    "3:4": "4:3",
+    "3:2": "2:3",
+    "2:3": "3:2",
 }
 
 _HANDLE_SIZE = 7  # canvas pixels
@@ -1177,14 +1184,11 @@ class CropModeController:
         x0, y0, x1, y1 = self.rect
         w, h = x1 - x0, y1 - y0
         cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
-        # Swap W↔H around center; flip known aspect pairs (16:9 ↔ 9:16).
-        new_label = _ASPECT_SWAP_PAIRS.get(self.aspect_label)
-        if new_label is None:
-            # No inverse preset (e.g. 4:3 / 3:2) — keep swapped box, unlock aspect.
-            new_label = "Free"
+        # Swap W↔H around center; flip known aspect pairs (4:3 ↔ 3:4, …).
+        new_label = _ASPECT_SWAP_PAIRS.get(self.aspect_label, "Free")
         self.aspect_label = new_label
         self.rect = self._clamp_rect(cx - h / 2, cy - w / 2, cx + h / 2, cy + w / 2)
-        # Re-lock when the new preset has a fixed ratio (incl. Original).
+        # Re-lock to the swapped preset ratio.
         if new_label != "Free" and self._aspect_ratio() is not None:
             self.rect = self._apply_aspect_to_rect(*self.rect, anchor="center")
         if self.hud:

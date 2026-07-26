@@ -59,11 +59,11 @@ def _build_args(job: dict) -> SimpleNamespace:
         tensor_offload_device="none",
         blocks_to_swap=0,
         swap_io_components=False,
-        vae_encode_tiled=False,
-        vae_encode_tile_size=1024,
+        vae_encode_tiled=bool(opts.get("vae_tiled", True)),
+        vae_encode_tile_size=int(opts.get("vae_encode_tile_size") or 1024),
         vae_encode_tile_overlap=128,
-        vae_decode_tiled=False,
-        vae_decode_tile_size=1024,
+        vae_decode_tiled=bool(opts.get("vae_tiled", True)),
+        vae_decode_tile_size=int(opts.get("vae_decode_tile_size") or 1024),
         vae_decode_tile_overlap=128,
         tile_debug="false",
         allow_vram_overflow=False,
@@ -205,6 +205,7 @@ def main() -> int:
                 args.output_format = "mp4" if itype == "video" else "png"
 
             _emit({"event": "progress", "phase": "upscale", "msg": f"Upscaling {Path(input_path).name}…"})
+
             frames = seedvr_cli.process_single_file(
                 input_path,
                 args,

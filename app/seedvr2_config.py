@@ -22,8 +22,11 @@ KEY_PYTHON = "seedvr2_python"
 KEY_CUDA_DEVICE = "seedvr2_cuda_device"
 KEY_DIT_MODEL = "seedvr2_dit_model"
 KEY_KEEP_VRAM = "seedvr2_keep_vram"
+KEY_VAE_TILED = "seedvr2_vae_tiled"
+KEY_OUTPUT_FORMAT = "seedvr2_output_format"
 KEY_PRESCALE_MODE = "seedvr2_prescale_mode"
 KEY_PRESCALE_CUSTOM = "seedvr2_prescale_custom"
+KEY_ADVANCED_OPEN = "seedvr2_advanced_open"
 
 # Long-edge presets (px). Downscale-only before SeedVR to clear soft/compressed detail.
 PRESCALE_MODE_OFF = "off"
@@ -33,6 +36,12 @@ PRESCALE_MODE_CUSTOM = "custom"
 PRESCALE_OPTIMAL_LONG_EDGE = 1280
 PRESCALE_AGGRESSIVE_LONG_EDGE = 960
 PRESCALE_CUSTOM_DEFAULT = 1280
+OUTPUT_FORMAT_PNG = "png"
+OUTPUT_FORMAT_JPEG = "jpg"
+OUTPUT_FORMAT_LABELS = (
+    ("PNG (lossless)", OUTPUT_FORMAT_PNG),
+    ("JPEG", OUTPUT_FORMAT_JPEG),
+)
 PRESCALE_MODE_LABELS = (
     ("Off (original)", PRESCALE_MODE_OFF),
     ("Optimal (~1280 long edge)", PRESCALE_MODE_OPTIMAL),
@@ -81,8 +90,11 @@ def load_seedvr2_settings() -> dict:
         KEY_CUDA_DEVICE: "0",
         KEY_DIT_MODEL: DEFAULT_DIT_MODEL,
         KEY_KEEP_VRAM: False,
+        KEY_VAE_TILED: True,
+        KEY_OUTPUT_FORMAT: OUTPUT_FORMAT_PNG,
         KEY_PRESCALE_MODE: PRESCALE_MODE_OFF,
         KEY_PRESCALE_CUSTOM: PRESCALE_CUSTOM_DEFAULT,
+        KEY_ADVANCED_OPEN: False,
     }
     path = settings_path()
     if not path.is_file():
@@ -102,6 +114,19 @@ def load_seedvr2_settings() -> dict:
                 data[key] = str(val).strip()
         if KEY_KEEP_VRAM in raw:
             data[KEY_KEEP_VRAM] = bool(raw.get(KEY_KEEP_VRAM))
+        if KEY_VAE_TILED in raw:
+            data[KEY_VAE_TILED] = bool(raw.get(KEY_VAE_TILED))
+        fmt = raw.get(KEY_OUTPUT_FORMAT)
+        if isinstance(fmt, str) and fmt.strip().lower() in {
+            OUTPUT_FORMAT_PNG,
+            OUTPUT_FORMAT_JPEG,
+            "jpeg",
+        }:
+            data[KEY_OUTPUT_FORMAT] = (
+                OUTPUT_FORMAT_JPEG
+                if fmt.strip().lower() in (OUTPUT_FORMAT_JPEG, "jpeg")
+                else OUTPUT_FORMAT_PNG
+            )
         mode = raw.get(KEY_PRESCALE_MODE)
         if isinstance(mode, str) and mode.strip().lower() in {
             PRESCALE_MODE_OFF,
@@ -116,6 +141,8 @@ def load_seedvr2_settings() -> dict:
                 data[KEY_PRESCALE_CUSTOM] = max(256, min(8192, int(custom)))
             except (TypeError, ValueError):
                 pass
+        if KEY_ADVANCED_OPEN in raw:
+            data[KEY_ADVANCED_OPEN] = bool(raw.get(KEY_ADVANCED_OPEN))
         if not data.get(KEY_RUNNER_DIR):
             data[KEY_RUNNER_DIR] = default_runner_dir()
     except Exception as exc:
@@ -157,8 +184,11 @@ def save_seedvr2_settings(
     cuda_device: str | None = None,
     dit_model: str | None = None,
     keep_vram: bool | None = None,
+    vae_tiled: bool | None = None,
+    output_format: str | None = None,
     prescale_mode: str | None = None,
     prescale_custom: int | None = None,
+    advanced_open: bool | None = None,
 ) -> dict:
     """Merge SeedVR2 keys into settings.json and return the updated seedvr subset."""
     path = settings_path()
@@ -186,6 +216,14 @@ def save_seedvr2_settings(
         current[KEY_DIT_MODEL] = str(dit_model).strip() or DEFAULT_DIT_MODEL
     if keep_vram is not None:
         current[KEY_KEEP_VRAM] = bool(keep_vram)
+    if vae_tiled is not None:
+        current[KEY_VAE_TILED] = bool(vae_tiled)
+    if output_format is not None:
+        f = str(output_format).strip().lower()
+        if f in ("jpeg", OUTPUT_FORMAT_JPEG):
+            current[KEY_OUTPUT_FORMAT] = OUTPUT_FORMAT_JPEG
+        else:
+            current[KEY_OUTPUT_FORMAT] = OUTPUT_FORMAT_PNG
     if prescale_mode is not None:
         m = str(prescale_mode).strip().lower()
         if m not in {
@@ -201,6 +239,8 @@ def save_seedvr2_settings(
             current[KEY_PRESCALE_CUSTOM] = max(256, min(8192, int(prescale_custom)))
         except (TypeError, ValueError):
             current[KEY_PRESCALE_CUSTOM] = PRESCALE_CUSTOM_DEFAULT
+    if advanced_open is not None:
+        current[KEY_ADVANCED_OPEN] = bool(advanced_open)
 
     settings.update(current)
     try:

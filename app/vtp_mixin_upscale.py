@@ -43,7 +43,7 @@ class VtpUpscaleMixin:
         self.after(0, lambda: messagebox.showwarning(title, text))
 
     def selected_paths_for_upscale(self, clicked_path: str | None = None) -> list[str]:
-        """Resolve image/video paths from multi-select or the right-clicked item."""
+        """Resolve image paths from multi-select or the right-clicked item (images only)."""
         selected_paths: list[str] = []
         if hasattr(self, "selected_thumbnails") and self.selected_thumbnails:
             selected_paths = [
@@ -56,10 +56,14 @@ class VtpUpscaleMixin:
             selected_paths = [clicked_path]
 
         supported = []
+        skipped_video = 0
         for path in selected_paths:
             ext = os.path.splitext(path)[1].lower()
-            if ext in VIDEO_FORMATS or ext in IMAGE_FORMATS:
+            if ext in IMAGE_FORMATS:
                 supported.append(path)
+            elif ext in VIDEO_FORMATS:
+                skipped_video += 1
+        self._upscale_skipped_video_count = skipped_video
         return supported
 
     def list_available_upscale_backends(self) -> list:
@@ -75,9 +79,24 @@ class VtpUpscaleMixin:
     def open_upscale_dialog(self, clicked_path: str | None = None):
         """Open upscale options for the current selection."""
         paths = self.selected_paths_for_upscale(clicked_path)
+        skipped_video = int(getattr(self, "_upscale_skipped_video_count", 0) or 0)
         if not paths:
-            messagebox.showinfo("Upscale", "No images or videos selected.")
+            if skipped_video:
+                messagebox.showinfo(
+                    "Upscale",
+                    "Video upscale is not enabled yet.\n\n"
+                    "Please select one or more images.",
+                )
+            else:
+                messagebox.showinfo("Upscale", "No images selected.")
             return
+        if skipped_video:
+            # Selection mixed: continue with images only, warn once.
+            messagebox.showinfo(
+                "Upscale",
+                f"Skipping {skipped_video} video(s) — video upscale is not enabled yet.\n"
+                f"Continuing with {len(paths)} image(s).",
+            )
 
         backends = self.list_available_upscale_backends()
         if not backends:
@@ -229,6 +248,15 @@ class VtpUpscaleMixin:
                     setattr(self, attr, False)
 
         total = len(paths)
+        import tempfile
+
+        preview_fd, preview_path = tempfile.mkstemp(prefix="vibe_seedvr2_preview_", suffix=".jpg")
+        try:
+            os.close(preview_fd)
+            os.remove(preview_path)
+        except OSError:
+            pass
+
         progress = open_file_op_progress_dialog(
             self,
             title="Upscale",
@@ -236,8 +264,14 @@ class VtpUpscaleMixin:
             action_label="Upscaling",
             # Long job: do not pin above other apps when Vibe is in the background.
             topmost=False,
+            show_preview=True,
         )
+        try:
+            progress.set_preview_path(preview_path)
+        except Exception:
+            pass
         self._upscale_progress_dialog = progress
+        self._upscale_preview_path = preview_path
         self._upscale_batch_running = True
         self.stop_requested = False
         try:
@@ -314,6 +348,26 @@ class VtpUpscaleMixin:
                     continue
 
                 file_opts["output_path"] = resolved
+                preview_path = getattr(self, "_upscale_preview_path", None)
+                if preview_path and progress is not None:
+                    try:
+                        from seedvr2_preview_hook import write_source_preview
+
+                        write_source_preview(file_path, preview_path)
+                        name = base
+
+                        def _show_source(p=preview_path, n=name):
+                            try:
+                                progress.set_preview_path(p)
+                                progress.set_preview_caption(
+                                    f"Working on: {n}  ·  1:1 center crop"
+                                )
+                            except Exception:
+                                pass
+
+                        self.after(0, _show_source)
+                    except Exception:
+                        pass
 
                 self._upscale_progress_update(
                     progress,
@@ -370,6 +424,7 @@ class VtpUpscaleMixin:
                     "weights_missing",
                     "runner_missing",
                     "not_implemented",
+                    "oom",
                 )
                 if error in blocking:
                     self._notify_upscale_issue_once(error, result.get("message") or error)
@@ -474,6 +529,13 @@ class VtpUpscaleMixin:
                     pass
                 self._upscale_progress_dialog = None
                 self._upscale_batch_running = False
+                try:
+                    p = getattr(self, "_upscale_preview_path", None)
+                    if p and os.path.isfile(p):
+                        os.remove(p)
+                except OSError:
+                    pass
+                self._upscale_preview_path = None
                 if done or failed or skipped or aborted:
                     messagebox.showinfo("Upscale", summary)
 

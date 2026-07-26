@@ -430,10 +430,12 @@ class FileOpProgressDialog(ctk.CTkToplevel):
         action_label: str = "Working",
         *,
         topmost: bool = True,
+        show_preview: bool = False,
     ):
         super().__init__(parent)
         self.title(title)
-        self.geometry("460x210")
+        self._show_preview = bool(show_preview)
+        self.geometry("520x520" if self._show_preview else "460x210")
         self.resizable(False, False)
         # topmost=True keeps short DnD ops visible; False lets long jobs (Upscale)
         # sink with the app when the user switches away.
@@ -448,6 +450,11 @@ class FileOpProgressDialog(ctk.CTkToplevel):
         self._phase = "idle"
         self._default_bar_color = None
         self._default_status_color = None
+        self._preview_path = None
+        self._preview_mtime = 0.0
+        self._preview_poll_after = None
+        self._preview_image = None
+        self._preview_polling = False
 
         try:
             self.transient(parent)
@@ -478,7 +485,7 @@ class FileOpProgressDialog(ctk.CTkToplevel):
             self,
             textvariable=self.detail_var,
             anchor="w",
-            wraplength=420,
+            wraplength=480,
         ).pack(fill="x", padx=16, pady=(0, 10))
 
         self.progress = ctk.CTkProgressBar(self, orientation="horizontal", mode="determinate")
@@ -500,6 +507,28 @@ class FileOpProgressDialog(ctk.CTkToplevel):
                 self.progress.start()
             except Exception:
                 self._indeterminate = False
+
+        self.preview_label = None
+        self.preview_caption = None
+        if self._show_preview:
+            preview_frame = ctk.CTkFrame(self, fg_color="#1a1a1a", corner_radius=8)
+            preview_frame.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+            self.preview_label = ctk.CTkLabel(
+                preview_frame,
+                text="Current input preview…",
+                text_color="#777777",
+                width=480,
+                height=270,
+            )
+            self.preview_label.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+            self.preview_caption = ctk.CTkLabel(
+                preview_frame,
+                text="Shows the current input (1:1 center crop)",
+                text_color="#888888",
+                font=ctk.CTkFont(size=11),
+                anchor="w",
+            )
+            self.preview_caption.pack(fill="x", padx=10, pady=(0, 8))
 
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(fill="x", padx=16, pady=(0, 14))
@@ -596,7 +625,113 @@ class FileOpProgressDialog(ctk.CTkToplevel):
         except Exception:
             pass
 
+    def set_preview_caption(self, text: str):
+        """Update the small caption under the preview image."""
+        if self.preview_caption is None:
+            return
+        try:
+            if self.winfo_exists():
+                self.preview_caption.configure(text=text or "")
+        except Exception:
+            pass
+
+    def set_preview_path(self, path: str | None):
+        """Start or retarget preview JPEG polling (source image for current file)."""
+        if not self._show_preview or self.preview_label is None:
+            return
+        self._preview_path = path
+        self._preview_mtime = 0.0
+        if path and not self._preview_polling:
+            self._preview_polling = True
+            self._poll_preview()
+        # Immediate load when the host just rewrote the same path.
+        if path:
+            try:
+                self._preview_mtime = 0.0
+                self._load_preview_image(path)
+                if os.path.isfile(path):
+                    self._preview_mtime = os.path.getmtime(path)
+            except OSError:
+                pass
+
+    def stop_preview_polling(self):
+        self._preview_polling = False
+        aid = self._preview_poll_after
+        self._preview_poll_after = None
+        if aid is not None:
+            try:
+                self.after_cancel(aid)
+            except Exception:
+                pass
+
+    def _poll_preview(self):
+        if not self._preview_polling:
+            return
+        try:
+            if not self.winfo_exists():
+                self._preview_polling = False
+                return
+        except Exception:
+            self._preview_polling = False
+            return
+
+        path = self._preview_path
+        try:
+            if path and os.path.isfile(path):
+                mtime = os.path.getmtime(path)
+                if mtime > self._preview_mtime:
+                    self._preview_mtime = mtime
+                    self._load_preview_image(path)
+        except OSError:
+            pass
+
+        try:
+            self._preview_poll_after = self.after(500, self._poll_preview)
+        except Exception:
+            self._preview_polling = False
+
+    def _load_preview_image(self, path: str):
+        """
+        Display the preview JPEG at native pixel size (1:1).
+
+        The runner already writes a center crop matching the preview pane;
+        do not thumbnail/downscale here — that would destroy AI detail.
+        """
+        if self.preview_label is None:
+            return
+        try:
+            from PIL import Image
+
+            with open(path, "rb") as f:
+                with Image.open(f) as img:
+                    img_copy = img.convert("RGB").copy()
+
+            # Pane target (same as seedvr2_preview_hook.PREVIEW_CROP_*).
+            pane_w, pane_h = 480, 270
+            w, h = img_copy.size
+
+            # If somehow larger than the pane, take a 1:1 center crop (no scale).
+            if w > pane_w or h > pane_h:
+                x0 = max(0, (w - pane_w) // 2)
+                y0 = max(0, (h - pane_h) // 2)
+                img_copy = img_copy.crop(
+                    (x0, y0, min(w, x0 + pane_w), min(h, y0 + pane_h))
+                )
+                w, h = img_copy.size
+
+            # Smaller than pane: show as-is (centered by the label), never stretch.
+            photo = ctk.CTkImage(
+                light_image=img_copy,
+                dark_image=img_copy,
+                size=(w, h),
+            )
+            self._preview_image = photo  # keep ref
+            self.preview_label.configure(image=photo, text="")
+        except Exception:
+            pass
+
     def close(self):
+        self.stop_preview_polling()
         try:
             if self._indeterminate:
                 self.progress.stop()
@@ -620,10 +755,16 @@ def open_file_op_progress_dialog(
     action_label: str = "Working",
     *,
     topmost: bool = True,
+    show_preview: bool = False,
 ) -> FileOpProgressDialog:
     """Create and show a modal file-operation progress dialog."""
     dialog = FileOpProgressDialog(
-        parent, title, total, action_label=action_label, topmost=topmost
+        parent,
+        title,
+        total,
+        action_label=action_label,
+        topmost=topmost,
+        show_preview=show_preview,
     )
     dialog.show()
     return dialog
