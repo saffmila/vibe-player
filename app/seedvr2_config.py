@@ -22,6 +22,23 @@ KEY_PYTHON = "seedvr2_python"
 KEY_CUDA_DEVICE = "seedvr2_cuda_device"
 KEY_DIT_MODEL = "seedvr2_dit_model"
 KEY_KEEP_VRAM = "seedvr2_keep_vram"
+KEY_PRESCALE_MODE = "seedvr2_prescale_mode"
+KEY_PRESCALE_CUSTOM = "seedvr2_prescale_custom"
+
+# Long-edge presets (px). Downscale-only before SeedVR to clear soft/compressed detail.
+PRESCALE_MODE_OFF = "off"
+PRESCALE_MODE_OPTIMAL = "optimal"
+PRESCALE_MODE_AGGRESSIVE = "aggressive"
+PRESCALE_MODE_CUSTOM = "custom"
+PRESCALE_OPTIMAL_LONG_EDGE = 1280
+PRESCALE_AGGRESSIVE_LONG_EDGE = 960
+PRESCALE_CUSTOM_DEFAULT = 1280
+PRESCALE_MODE_LABELS = (
+    ("Off (original)", PRESCALE_MODE_OFF),
+    ("Optimal (~1280 long edge)", PRESCALE_MODE_OPTIMAL),
+    ("Aggressive (~960 long edge)", PRESCALE_MODE_AGGRESSIVE),
+    ("Custom…", PRESCALE_MODE_CUSTOM),
+)
 
 BYTEDANCE_REPO_URL = "https://github.com/ByteDance-Seed/SeedVR"
 COMFY_REPO_URL = "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler"
@@ -64,6 +81,8 @@ def load_seedvr2_settings() -> dict:
         KEY_CUDA_DEVICE: "0",
         KEY_DIT_MODEL: DEFAULT_DIT_MODEL,
         KEY_KEEP_VRAM: False,
+        KEY_PRESCALE_MODE: PRESCALE_MODE_OFF,
+        KEY_PRESCALE_CUSTOM: PRESCALE_CUSTOM_DEFAULT,
     }
     path = settings_path()
     if not path.is_file():
@@ -83,11 +102,51 @@ def load_seedvr2_settings() -> dict:
                 data[key] = str(val).strip()
         if KEY_KEEP_VRAM in raw:
             data[KEY_KEEP_VRAM] = bool(raw.get(KEY_KEEP_VRAM))
+        mode = raw.get(KEY_PRESCALE_MODE)
+        if isinstance(mode, str) and mode.strip().lower() in {
+            PRESCALE_MODE_OFF,
+            PRESCALE_MODE_OPTIMAL,
+            PRESCALE_MODE_AGGRESSIVE,
+            PRESCALE_MODE_CUSTOM,
+        }:
+            data[KEY_PRESCALE_MODE] = mode.strip().lower()
+        custom = raw.get(KEY_PRESCALE_CUSTOM)
+        if custom is not None:
+            try:
+                data[KEY_PRESCALE_CUSTOM] = max(256, min(8192, int(custom)))
+            except (TypeError, ValueError):
+                pass
         if not data.get(KEY_RUNNER_DIR):
             data[KEY_RUNNER_DIR] = default_runner_dir()
     except Exception as exc:
         logging.warning("[SeedVR2] Could not load settings: %s", exc)
     return data
+
+
+def resolve_prescale_long_edge(
+    mode: str | None,
+    custom: int | str | None = None,
+) -> int | None:
+    """
+    Return max long-edge px for downscale-before-SeedVR, or None when disabled.
+    """
+    m = (mode or PRESCALE_MODE_OFF).strip().lower()
+    if m in ("", PRESCALE_MODE_OFF, "disabled", "none", "original"):
+        return None
+    if m == PRESCALE_MODE_OPTIMAL:
+        return PRESCALE_OPTIMAL_LONG_EDGE
+    if m == PRESCALE_MODE_AGGRESSIVE:
+        return PRESCALE_AGGRESSIVE_LONG_EDGE
+    if m == PRESCALE_MODE_CUSTOM:
+        try:
+            return max(256, min(8192, int(custom if custom is not None else PRESCALE_CUSTOM_DEFAULT)))
+        except (TypeError, ValueError):
+            return PRESCALE_CUSTOM_DEFAULT
+    # Allow raw integer mode for convenience.
+    try:
+        return max(256, min(8192, int(m)))
+    except (TypeError, ValueError):
+        return None
 
 
 def save_seedvr2_settings(
@@ -98,6 +157,8 @@ def save_seedvr2_settings(
     cuda_device: str | None = None,
     dit_model: str | None = None,
     keep_vram: bool | None = None,
+    prescale_mode: str | None = None,
+    prescale_custom: int | None = None,
 ) -> dict:
     """Merge SeedVR2 keys into settings.json and return the updated seedvr subset."""
     path = settings_path()
@@ -125,6 +186,21 @@ def save_seedvr2_settings(
         current[KEY_DIT_MODEL] = str(dit_model).strip() or DEFAULT_DIT_MODEL
     if keep_vram is not None:
         current[KEY_KEEP_VRAM] = bool(keep_vram)
+    if prescale_mode is not None:
+        m = str(prescale_mode).strip().lower()
+        if m not in {
+            PRESCALE_MODE_OFF,
+            PRESCALE_MODE_OPTIMAL,
+            PRESCALE_MODE_AGGRESSIVE,
+            PRESCALE_MODE_CUSTOM,
+        }:
+            m = PRESCALE_MODE_OFF
+        current[KEY_PRESCALE_MODE] = m
+    if prescale_custom is not None:
+        try:
+            current[KEY_PRESCALE_CUSTOM] = max(256, min(8192, int(prescale_custom)))
+        except (TypeError, ValueError):
+            current[KEY_PRESCALE_CUSTOM] = PRESCALE_CUSTOM_DEFAULT
 
     settings.update(current)
     try:

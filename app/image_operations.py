@@ -466,7 +466,7 @@ class ImageViewerLegacy:
         """Labels for the leave-edit confirmation (Crop / Resize)."""
         names = []
         if self._crop_active():
-            names.append("Crop")
+            names.append("Crop / Rotate")
         if self._resize_dialog_open() or getattr(self, "_image_dirty", False):
             # Dialog open, or resize already applied but not saved.
             if "Resize" not in names:

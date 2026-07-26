@@ -16,18 +16,24 @@ from seedvr2_config import (
     KEY_CUDA_DEVICE,
     KEY_DIT_MODEL,
     KEY_KEEP_VRAM,
+    KEY_PRESCALE_CUSTOM,
+    KEY_PRESCALE_MODE,
     KEY_RUNNER_DIR,
     KEY_WEIGHTS_DIR,
+    PRESCALE_MODE_CUSTOM,
+    PRESCALE_MODE_LABELS,
+    PRESCALE_MODE_OFF,
     default_weights_dir,
     list_cuda_gpus,
     list_dit_models,
     load_seedvr2_settings,
+    resolve_prescale_long_edge,
     save_seedvr2_settings,
 )
 
 
 UPSCALE_DIALOG_WIDTH = 620
-UPSCALE_DIALOG_HEIGHT = 600
+UPSCALE_DIALOG_HEIGHT = 680
 
 
 class UpscaleOptionsDialog(ctk.CTkToplevel):
@@ -130,18 +136,59 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             width=320,
         ).grid(row=3, column=1, sticky="ew", pady=4, padx=(8, 0))
 
-        _path_row(4, "Output folder", self.output_dir_var, self._browse_output)
-        _path_row(5, "Weights folder", self.weights_dir_var, self._browse_weights)
-        _path_row(6, "Runner folder", self.runner_dir_var, self._browse_runner)
+        # Prescale: downscale long edge before SeedVR (clears soft/compressed detail).
+        saved_mode = str(cfg.get(KEY_PRESCALE_MODE) or PRESCALE_MODE_OFF).lower()
+        label_by_mode = {mode: label for label, mode in PRESCALE_MODE_LABELS}
+        mode_by_label = {label: mode for label, mode in PRESCALE_MODE_LABELS}
+        self._prescale_mode_by_label = mode_by_label
+        self._prescale_label_by_mode = label_by_mode
+        initial_prescale = label_by_mode.get(
+            saved_mode, label_by_mode[PRESCALE_MODE_OFF]
+        )
+        self.prescale_var = ctk.StringVar(value=initial_prescale)
+        self.prescale_custom_var = ctk.StringVar(
+            value=str(int(cfg.get(KEY_PRESCALE_CUSTOM) or 1280))
+        )
+
+        ctk.CTkLabel(form, text="Prescale").grid(row=4, column=0, sticky="w", pady=4)
+        ctk.CTkOptionMenu(
+            form,
+            variable=self.prescale_var,
+            values=[label for label, _mode in PRESCALE_MODE_LABELS],
+            command=lambda _v: self._on_prescale_mode_changed(),
+            width=320,
+        ).grid(row=4, column=1, sticky="ew", pady=4, padx=(8, 0))
+
+        self.prescale_custom_row = ctk.CTkFrame(form, fg_color="transparent")
+        self.prescale_custom_row.grid(row=5, column=0, columnspan=2, sticky="ew", pady=2)
+        ctk.CTkLabel(self.prescale_custom_row, text="Long edge (px)").pack(
+            side="left", padx=(0, 8)
+        )
+        self.prescale_custom_entry = ctk.CTkEntry(
+            self.prescale_custom_row,
+            textvariable=self.prescale_custom_var,
+            width=100,
+        )
+        self.prescale_custom_entry.pack(side="left")
+        ctk.CTkLabel(
+            self.prescale_custom_row,
+            text="Downscale only if larger",
+            text_color="#888888",
+        ).pack(side="left", padx=(10, 0))
+
+        _path_row(6, "Output folder", self.output_dir_var, self._browse_output)
+        _path_row(7, "Weights folder", self.weights_dir_var, self._browse_weights)
+        _path_row(8, "Runner folder", self.runner_dir_var, self._browse_runner)
 
         self.keep_vram_var = ctk.BooleanVar(value=bool(cfg.get(KEY_KEEP_VRAM)))
         ctk.CTkCheckBox(
             form,
             text="Keep model in VRAM (until app exit)",
             variable=self.keep_vram_var,
-        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 4))
+        ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(8, 4))
 
         form.grid_columnconfigure(1, weight=1)
+        self._on_prescale_mode_changed()
 
         ctk.CTkLabel(
             self,
@@ -188,6 +235,26 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         self.runner_dir_var.trace_add("write", lambda *_: self._on_paths_changed())
         self._refresh_status()
         self.after(50, self._center_on_parent)
+
+    def _selected_prescale_mode(self) -> str:
+        label = (self.prescale_var.get() or "").strip()
+        return self._prescale_mode_by_label.get(label, PRESCALE_MODE_OFF)
+
+    def _selected_prescale_custom(self) -> int:
+        try:
+            return max(256, min(8192, int(float(self.prescale_custom_var.get().strip()))))
+        except (TypeError, ValueError):
+            return 1280
+
+    def _on_prescale_mode_changed(self, *_args):
+        is_custom = self._selected_prescale_mode() == PRESCALE_MODE_CUSTOM
+        try:
+            if is_custom:
+                self.prescale_custom_row.grid()
+            else:
+                self.prescale_custom_row.grid_remove()
+        except Exception:
+            pass
 
     def _selected_backend(self):
         label = self.backend_var.get()
@@ -311,6 +378,8 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             cuda_device=cuda,
             dit_model=dit,
             keep_vram=bool(self.keep_vram_var.get()),
+            prescale_mode=self._selected_prescale_mode(),
+            prescale_custom=self._selected_prescale_custom(),
         )
         if self.controller is not None:
             setattr(self.controller, "seedvr2_weights_dir", weights)
@@ -318,6 +387,8 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             setattr(self.controller, "seedvr2_cuda_device", cuda)
             setattr(self.controller, "seedvr2_dit_model", dit)
             setattr(self.controller, "seedvr2_keep_vram", bool(self.keep_vram_var.get()))
+            setattr(self.controller, "seedvr2_prescale_mode", self._selected_prescale_mode())
+            setattr(self.controller, "seedvr2_prescale_custom", self._selected_prescale_custom())
             # Turning keep-VRAM off → stop persistent worker and free GPU memory.
             if not self.keep_vram_var.get():
                 try:
@@ -398,6 +469,21 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             scale = int(self.scale_var.get())
         except ValueError:
             scale = 2
+        mode = self._selected_prescale_mode()
+        custom_px = self._selected_prescale_custom()
+        if mode == PRESCALE_MODE_CUSTOM:
+            raw = (self.prescale_custom_var.get() or "").strip()
+            try:
+                custom_px = max(256, min(8192, int(float(raw))))
+            except (TypeError, ValueError):
+                messagebox.showwarning(
+                    "Upscale",
+                    "Custom prescale long edge must be a number (256–8192).",
+                    parent=self,
+                )
+                return
+            self.prescale_custom_var.set(str(custom_px))
+        long_edge = resolve_prescale_long_edge(mode, custom_px)
         out_dir = (self.output_dir_var.get() or "").strip() or None
         cuda = self._selected_cuda_index()
         self.result = {
@@ -410,6 +496,9 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
                 "cuda_device": cuda,
                 "dit_model": dit,
                 "keep_vram": bool(self.keep_vram_var.get()),
+                "prescale_mode": mode,
+                "prescale_custom": custom_px,
+                "prescale_long_edge": long_edge,
             },
         }
         if callable(self.on_confirm):

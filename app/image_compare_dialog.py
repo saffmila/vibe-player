@@ -4,6 +4,9 @@ Dual-mode image comparison dialog (Side-by-Side / Split Slider).
 Opens borderless fullscreen (like the image viewer) with a compact bottom HUD.
 Navigation is Lightroom-style: left = Reference (fixed), right = Target
 (Prev/Next Target). ``Set as Reference`` promotes the target to the left pane.
+
+Both images always share one display frame sized to the larger image (the
+smaller is scaled up to match), so Split Slider is pixel-aligned.
 """
 
 from __future__ import annotations
@@ -112,6 +115,7 @@ class ImageCompareDialog(ctk.CTkToplevel):
         self._scaled_right: Optional[PILImage.Image] = None
         self._scaled_zoom_left: Optional[float] = None
         self._scaled_zoom_right: Optional[float] = None
+        self._scaled_size: Optional[tuple[int, int]] = None
         self._hq_after: Optional[str] = None
         self._fit_pending = True
         self._fit_retries = 0
@@ -647,6 +651,7 @@ class ImageCompareDialog(ctk.CTkToplevel):
         self._apply_zoom_factor(None, 1.0 / _ZOOM_STEP, center=True)
 
     def _actual_size(self) -> None:
+        """1:1 relative to the larger image (smaller is upscaled to match)."""
         pane = "split" if self._mode == _MODE_SPLIT else "left"
         view = _ViewState(1.0, 0, 0)
         self._center_view(pane, view)
@@ -655,57 +660,49 @@ class ImageCompareDialog(ctk.CTkToplevel):
         self._schedule_redraw(fast=False)
 
     def _fit_window(self) -> None:
+        """Fit the matched (larger) frame into the pane; never upscale past 1:1."""
         if self._mode == _MODE_SPLIT:
-            self._fit_canvas(self._split_canvas, "split", self._left_pil, self._right_pil)
-        elif self._sync:
-            z1 = self._fit_zoom(self._left_canvas, self._left_pil)
-            z2 = self._fit_zoom(self._right_canvas, self._right_pil)
-            z = min(z1, z2) if z1 and z2 else (z1 or z2 or 1.0)
-            self._center_view("left", _ViewState(z, 0, 0))
-            # Re-center shared transform using left pane size (both panes equal in SBS).
-            self._center_view("left", self._shared)
+            widget = self._split_area
+            pane = "split"
         else:
-            self._fit_canvas(self._left_canvas, "left", self._left_pil)
-            self._fit_canvas(self._right_canvas, "right", self._right_pil)
-        self._schedule_redraw(fast=False)
-
-    def _fit_zoom(self, widget, image: Optional[PILImage.Image]) -> float:
-        if image is None:
-            return 1.0
+            widget = self._left_canvas
+            pane = "left"
+        if widget is None or self._left_pil is None or self._right_pil is None:
+            return
+        bw, bh = self._match_native_size()
         cw = max(1, widget.winfo_width())
         ch = max(1, widget.winfo_height())
-        iw, ih = image.size
-        if iw < 1 or ih < 1:
-            return 1.0
-        return max(_MIN_ZOOM, min(_MAX_ZOOM, min(cw / float(iw), ch / float(ih))))
-
-    def _fit_canvas(
-        self,
-        widget,
-        pane: str,
-        image: Optional[PILImage.Image],
-        image2: Optional[PILImage.Image] = None,
-    ) -> None:
-        if image is None:
-            return
-        z = self._fit_zoom(widget, image)
-        if image2 is not None:
-            z = min(z, self._fit_zoom(widget, image2))
+        z = min(1.0, cw / float(bw), ch / float(bh))
+        z = max(_MIN_ZOOM, min(_MAX_ZOOM, z))
         self._center_view(pane, _ViewState(z, 0, 0))
+        if not self._sync and self._mode == _MODE_SIDE:
+            self._center_view("right", _ViewState(z, 0, 0))
+        self._schedule_redraw(fast=False)
+
+    def _match_native_size(self) -> tuple[int, int]:
+        """Native size of the larger image (by pixel area) — common compare frame."""
+        lw, lh = self._left_pil.size
+        rw, rh = self._right_pil.size
+        if lw * lh >= rw * rh:
+            return lw, lh
+        return rw, rh
+
+    def _display_size_for_zoom(self, zoom: float) -> tuple[int, int]:
+        """Exact on-screen size for both images at ``zoom`` (1.0 = larger native)."""
+        bw, bh = self._match_native_size()
+        return (
+            max(1, int(round(bw * zoom))),
+            max(1, int(round(bh * zoom))),
+        )
 
     def _center_view(self, pane: str, view: _ViewState) -> None:
         widget = self._canvas_for(pane)
-        if pane == "right":
-            image = self._right_pil
-        else:
-            image = self._left_pil
-        if widget is None or image is None:
+        if widget is None or self._left_pil is None or self._right_pil is None:
             self._set_view(pane, view)
             return
         cw = max(1, widget.winfo_width())
         ch = max(1, widget.winfo_height())
-        dw = image.size[0] * view.zoom
-        dh = image.size[1] * view.zoom
+        dw, dh = self._display_size_for_zoom(view.zoom)
         view.pan_x = (cw - dw) / 2.0
         view.pan_y = (ch - dh) / 2.0
         self._set_view(pane, view)
@@ -740,9 +737,12 @@ class ImageCompareDialog(ctk.CTkToplevel):
         else:
             cx = widget.winfo_width() / 2
             cy = widget.winfo_height() / 2
-        img_x = (cx - view.pan_x) / old_z
-        img_y = (cy - view.pan_y) / old_z
-        new_view = _ViewState(new_z, cx - img_x * new_z, cy - img_y * new_z)
+        old_dw, old_dh = self._display_size_for_zoom(old_z)
+        new_dw, new_dh = self._display_size_for_zoom(new_z)
+        # Keep the matched-frame point under the cursor stable.
+        u = (cx - view.pan_x) / float(old_dw) if old_dw else 0.5
+        v = (cy - view.pan_y) / float(old_dh) if old_dh else 0.5
+        new_view = _ViewState(new_z, cx - u * new_dw, cy - v * new_dh)
         self._set_view(pane, new_view)
         self._schedule_redraw(fast=True)
 
@@ -899,6 +899,7 @@ class ImageCompareDialog(ctk.CTkToplevel):
         self._scaled_right = None
         self._scaled_zoom_left = None
         self._scaled_zoom_right = None
+        self._scaled_size = None
 
     def _schedule_redraw(self, *, fast: bool) -> None:
         if self._hq_after is not None:
@@ -927,10 +928,12 @@ class ImageCompareDialog(ctk.CTkToplevel):
             self._redraw_pane(self._left_canvas, self._left_pil, "left", resample)
             self._redraw_pane(self._right_canvas, self._right_pil, "right", resample)
 
-    def _scaled(self, image: PILImage.Image, zoom: float, resample) -> PILImage.Image:
-        w = max(1, int(round(image.size[0] * zoom)))
-        h = max(1, int(round(image.size[1] * zoom)))
-        if w == image.size[0] and h == image.size[1]:
+    def _scaled_to_match(
+        self, image: PILImage.Image, size: tuple[int, int], resample
+    ) -> PILImage.Image:
+        """Resize ``image`` to the shared compare frame (exact W×H for overlay)."""
+        w, h = size
+        if image.size == (w, h):
             return image
         return image.resize((w, h), resample)
 
@@ -939,8 +942,9 @@ class ImageCompareDialog(ctk.CTkToplevel):
     ) -> None:
         view = self._view_for(pane)
         canvas.delete("all")
+        size = self._display_size_for_zoom(view.zoom)
         try:
-            scaled = self._scaled(image, view.zoom, resample)
+            scaled = self._scaled_to_match(image, size, resample)
             photo = ImageTk.PhotoImage(scaled)
         except Exception:
             logging.exception("Compare pane render failed")
@@ -949,6 +953,7 @@ class ImageCompareDialog(ctk.CTkToplevel):
             self._photo_left = photo
             self._scaled_left = scaled
             self._scaled_zoom_left = view.zoom
+            self._scaled_size = size
             self._item_left = canvas.create_image(
                 view.pan_x, view.pan_y, anchor="nw", image=photo
             )
@@ -956,12 +961,13 @@ class ImageCompareDialog(ctk.CTkToplevel):
             self._photo_right = photo
             self._scaled_right = scaled
             self._scaled_zoom_right = view.zoom
+            self._scaled_size = size
             self._item_right = canvas.create_image(
                 view.pan_x, view.pan_y, anchor="nw", image=photo
             )
 
     def _redraw_split(self, *, resample=PILImage.BILINEAR) -> None:
-        """Build PhotoImages once; clip frames handle the slider at 60fps cheaply."""
+        """Build matched PhotoImages once; clip frames handle the slider cheaply."""
         try:
             cw = max(1, self._split_area.winfo_width())
             ch = max(1, self._split_area.winfo_height())
@@ -970,9 +976,10 @@ class ImageCompareDialog(ctk.CTkToplevel):
         if cw < _MIN_CANVAS_PX or ch < _MIN_CANVAS_PX:
             return
         view = self._shared
+        size = self._display_size_for_zoom(view.zoom)
         try:
-            left_s = self._scaled(self._left_pil, view.zoom, resample)
-            right_s = self._scaled(self._right_pil, view.zoom, resample)
+            left_s = self._scaled_to_match(self._left_pil, size, resample)
+            right_s = self._scaled_to_match(self._right_pil, size, resample)
             photo_l = ImageTk.PhotoImage(left_s)
             photo_r = ImageTk.PhotoImage(right_s)
         except Exception:
@@ -985,6 +992,7 @@ class ImageCompareDialog(ctk.CTkToplevel):
         self._scaled_right = right_s
         self._scaled_zoom_left = view.zoom
         self._scaled_zoom_right = view.zoom
+        self._scaled_size = size
 
         self._split_left_cv.delete("all")
         self._split_right_cv.delete("all")

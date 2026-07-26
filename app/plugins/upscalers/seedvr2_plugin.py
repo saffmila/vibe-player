@@ -30,6 +30,7 @@ from seedvr2_config import (
     detect_runner,
     ensure_model_visible_to_runner,
     load_seedvr2_settings,
+    resolve_prescale_long_edge,
     resolve_runner_python,
 )
 from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS
@@ -87,6 +88,21 @@ def _has_weight_files(path: Path) -> bool:
 
 def _probe_short_side(file_path: str) -> int | None:
     """Best-effort short-side pixels for scale→resolution mapping."""
+    size = _probe_size(file_path)
+    if not size:
+        return None
+    return min(size)
+
+
+def _probe_long_side(file_path: str) -> int | None:
+    size = _probe_size(file_path)
+    if not size:
+        return None
+    return max(size)
+
+
+def _probe_size(file_path: str) -> tuple[int, int] | None:
+    """Return (width, height) when possible."""
     ext = os.path.splitext(file_path)[1].lower()
     if ext in IMAGE_FORMATS:
         try:
@@ -95,9 +111,178 @@ def _probe_short_side(file_path: str) -> int | None:
             with Image.open(file_path) as im:
                 w, h = im.size
             if w > 0 and h > 0:
-                return min(w, h)
+                return int(w), int(h)
         except Exception:
             pass
+    try:
+        from file_operations import get_ffprobe_path
+
+        ffprobe = get_ffprobe_path()
+        cmd = [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0:s=x",
+            file_path,
+        ]
+        out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True).strip()
+        if "x" in out:
+            w_s, h_s = out.split("x", 1)
+            w, h = int(w_s), int(h_s)
+            if w > 0 and h > 0:
+                return w, h
+    except Exception:
+        pass
+    return None
+
+
+def prepare_prescaled_input(
+    input_path: str,
+    max_long_edge: int | None,
+    progress_cb: Callable[[float, str], None] | None = None,
+) -> tuple[str, str | None]:
+    """
+    Downscale so the longest side is at most ``max_long_edge`` (Lanczos / FFmpeg).
+
+    Returns ``(path_for_inference, temp_path_or_None)``. Temp must be deleted by caller.
+    Skips when disabled, already small enough, or on failure (falls back to original).
+    """
+    if not max_long_edge or max_long_edge <= 0:
+        return input_path, None
+
+    long_side = _probe_long_side(input_path)
+    if long_side is not None and long_side <= max_long_edge:
+        logging.info(
+            "[SeedVR2 Prescale] Skip — long edge %spx ≤ %spx",
+            long_side,
+            max_long_edge,
+        )
+        return input_path, None
+
+    import tempfile
+
+    ext = os.path.splitext(input_path)[1].lower()
+    stem = Path(input_path).stem
+    if progress_cb:
+        progress_cb(0.02, f"Prescale → max {max_long_edge}px long edge…", "load")
+
+    try:
+        if ext in IMAGE_FORMATS:
+            from PIL import Image
+
+            with Image.open(input_path) as im:
+                if im.mode != "RGB":
+                    im = im.convert("RGB")
+                w, h = im.size
+                if max(w, h) <= max_long_edge:
+                    return input_path, None
+                if w >= h:
+                    new_w = max_long_edge
+                    new_h = max(1, int(round(h * (max_long_edge / float(w)))))
+                else:
+                    new_h = max_long_edge
+                    new_w = max(1, int(round(w * (max_long_edge / float(h)))))
+                # Keep even dims for video-ish pipelines; harmless for stills.
+                new_w -= new_w % 2
+                new_h -= new_h % 2
+                new_w = max(2, new_w)
+                new_h = max(2, new_h)
+                try:
+                    resample = Image.Resampling.LANCZOS
+                except AttributeError:
+                    resample = Image.LANCZOS
+                resized = im.resize((new_w, new_h), resample)
+                out_ext = ".png" if ext in (".png", ".webp") else ".jpg"
+                fd, temp_path = tempfile.mkstemp(
+                    prefix=f"{stem}_prescale_", suffix=out_ext
+                )
+                os.close(fd)
+                save_kw: dict[str, Any] = {}
+                if out_ext == ".jpg":
+                    save_kw.update({"quality": 95, "optimize": True})
+                resized.save(temp_path, **save_kw)
+            logging.info(
+                "[SeedVR2 Prescale] Image %s → %s (%dx%d)",
+                input_path,
+                temp_path,
+                new_w,
+                new_h,
+            )
+            return temp_path, temp_path
+
+        # Video (and unknown): FFmpeg long-edge downscale.
+        from file_operations import get_ffmpeg_path
+
+        ffmpeg = get_ffmpeg_path()
+        fd, temp_path = tempfile.mkstemp(prefix=f"{stem}_prescale_", suffix=".mp4")
+        os.close(fd)
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+
+        # Downscale only when longer side exceeds max; keep aspect; even dims.
+        m = int(max_long_edge)
+        scale_filter = (
+            f"scale="
+            f"'if(gt(iw,ih),min(iw,{m}),-2)':"
+            f"'if(gt(ih,iw),min(ih,{m}),-2)':"
+            f"flags=lanczos"
+        )
+        cmd = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            input_path,
+            "-vf",
+            scale_filter,
+            "-c:v",
+            "libx264",
+            "-crf",
+            "17",
+            "-preset",
+            "veryfast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "copy",
+            temp_path,
+        ]
+        logging.info("[SeedVR2 Prescale] %s", " ".join(cmd))
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0 or not os.path.isfile(temp_path):
+            logging.error(
+                "[SeedVR2 Prescale] FFmpeg failed: %s",
+                (result.stderr or result.stdout or "")[:500],
+            )
+            try:
+                if os.path.isfile(temp_path):
+                    os.remove(temp_path)
+            except OSError:
+                pass
+            return input_path, None
+        return temp_path, temp_path
+    except Exception as exc:
+        logging.error("[SeedVR2 Prescale] Failed: %s", exc)
+        return input_path, None
+
+
+def _cleanup_temp(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+    except OSError:
+        pass
         return None
     try:
         from file_operations import get_ffprobe_path
@@ -225,6 +410,8 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
             "cuda_device": None,  # None = use saved setting
             "dit_model": None,  # None = use saved setting
             "keep_vram": None,  # None = use saved setting
+            "prescale_mode": "off",
+            "prescale_long_edge": None,  # int when custom / resolved
         }
 
     def suggested_output_path(self, input_path: str, options: dict[str, Any] | None = None) -> str:
@@ -322,7 +509,53 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
         python_exe = resolve_runner_python(self.runner_dir, self.python_path)
         output_path = self.suggested_output_path(input_path, opts)
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        resolution = self._target_resolution(input_path, opts)
+
+        max_long = opts.get("prescale_long_edge")
+        if max_long is None:
+            max_long = resolve_prescale_long_edge(
+                opts.get("prescale_mode"),
+                opts.get("prescale_custom"),
+            )
+        else:
+            try:
+                max_long = int(max_long)
+            except (TypeError, ValueError):
+                max_long = resolve_prescale_long_edge(
+                    opts.get("prescale_mode"),
+                    opts.get("prescale_custom"),
+                )
+
+        work_path, temp_prescale = prepare_prescaled_input(
+            input_path, max_long, progress_cb=progress_cb
+        )
+        try:
+            return self._process_after_prescale(
+                input_path=input_path,
+                work_path=work_path,
+                output_path=output_path,
+                opts=opts,
+                cli_path=cli_path,
+                python_exe=python_exe,
+                progress_cb=progress_cb,
+                should_stop=should_stop,
+            )
+        finally:
+            _cleanup_temp(temp_prescale)
+
+    def _process_after_prescale(
+        self,
+        *,
+        input_path: str,
+        work_path: str,
+        output_path: str,
+        opts: dict[str, Any],
+        cli_path: Path,
+        python_exe: str,
+        progress_cb: Callable[[float, str], None] | None,
+        should_stop: Callable[[], bool] | None,
+    ) -> dict[str, Any]:
+        # Resolution is based on the (possibly prescaled) work input.
+        resolution = self._target_resolution(work_path, opts)
         try:
             batch_size = int(opts.get("batch_size") or 5)
         except (TypeError, ValueError):
@@ -364,7 +597,7 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
 
         if keep_vram:
             return self._process_persistent(
-                input_path=input_path,
+                input_path=work_path,
                 output_path=output_path,
                 python_exe=python_exe,
                 cli_path=cli_path,
@@ -380,7 +613,7 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
         cmd = [
             python_exe,
             str(cli_path),
-            os.path.abspath(input_path),
+            os.path.abspath(work_path),
             "--model_dir",
             str(self.weights_dir),
             "--output",
