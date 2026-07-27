@@ -176,12 +176,18 @@ class VtpPreferencesMixin:
         # Get the desired state from settings, default to True if not found
         desired_timeline_state = settings.get("timeline_widget_expanded", True)
         saved_timeline_restore_height = settings.get("timeline_widget_restore_height", 150)
+        # Peek mode early so ShowTWidget is not wrongly True while Captions is active.
+        _peek_mode = settings.get("bottom_panel_mode", "Timeline")
+        if _peek_mode not in ("Timeline", "Captions"):
+            _peek_mode = "Timeline"
+        if not bool(settings.get("captions_mode_enabled", False)):
+            _peek_mode = "Timeline"
 
         # Check if the container exists before accessing it
         if hasattr(self, "timeline_container") and self.timeline_container:
             if hasattr(self.timeline_container, "set_restore_height"):
                 self.timeline_container.set_restore_height(saved_timeline_restore_height)
-            self.ShowTWidget = desired_timeline_state
+            self.ShowTWidget = bool(desired_timeline_state and _peek_mode == "Timeline")
             logging.info(f"[ApplySettings][Timeline] Set ShowTWidget = {self.ShowTWidget} based on settings.")
 
 
@@ -219,6 +225,12 @@ class VtpPreferencesMixin:
             if hasattr(self, "timeline_container") and self.timeline_container:
                 expanded = self.timeline_container.expanded
                 self.ShowTWidget = bool(expanded and desired_mode == "Timeline")
+
+        # Final ShowTWidget sync after mode restore (collapse/captions can disagree with raw setting)
+        if hasattr(self, "timeline_container") and self.timeline_container:
+            expanded = self.timeline_container.expanded
+            mode = getattr(self, "bottom_panel_mode", desired_mode)
+            self.ShowTWidget = bool(expanded and mode == "Timeline")
 
     def load_preferences(self):
         settings = {}  # Initialize as an empty dictionary in case the file doesn't exist

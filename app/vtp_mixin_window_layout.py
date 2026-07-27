@@ -457,25 +457,30 @@ class VtpWindowLayoutMixin:
             try:
                 left_panes = self.left_split.panes()
                 if len(left_panes) > 1:
-                    frac = frac_left if frac_left is not None else top_fraction
                     info_panel = getattr(self, "info_panel_container", None)
-                    if (
-                        info_panel is not None
-                        and getattr(info_panel, "expanded", True)
-                        and hasattr(info_panel, "get_restore_height")
-                    ):
-                        restore_h = int(info_panel.get_restore_height(prefer_current=False))
-                        y_sash_left = max(24, min(eff_left_h - 24, eff_left_h - restore_h))
+                    if info_panel is not None and not getattr(info_panel, "expanded", True):
                         logging.info(
-                            f"[SPLITTER APPLY] left: using restore_height={restore_h} -> y_sash={y_sash_left} (eff_h={eff_left_h})"
+                            "[SPLITTER APPLY] left: info panel collapsed — skip frac sash, enforce header height"
                         )
                     else:
-                        y_sash_left = int(eff_left_h * frac)
-                    self.left_split.sash_place(0, 0, y_sash_left)
-                    logging.info(f"[SPLITTER APPLY] left: frac={frac} -> y_sash={y_sash_left} (eff_h={eff_left_h})")
-                    # Verify: read back actual sash coord after placement
-                    actual_coord = self.left_split.sash_coord(0)
-                    logging.info(f"[SPLITTER APPLY] left: sash_coord after set = {actual_coord}")
+                        frac = frac_left if frac_left is not None else top_fraction
+                        if (
+                            info_panel is not None
+                            and getattr(info_panel, "expanded", True)
+                            and hasattr(info_panel, "get_restore_height")
+                        ):
+                            restore_h = int(info_panel.get_restore_height(prefer_current=False))
+                            y_sash_left = max(24, min(eff_left_h - 24, eff_left_h - restore_h))
+                            logging.info(
+                                f"[SPLITTER APPLY] left: using restore_height={restore_h} -> y_sash={y_sash_left} (eff_h={eff_left_h})"
+                            )
+                        else:
+                            y_sash_left = int(eff_left_h * frac)
+                        self.left_split.sash_place(0, 0, y_sash_left)
+                        logging.info(f"[SPLITTER APPLY] left: frac={frac} -> y_sash={y_sash_left} (eff_h={eff_left_h})")
+                        # Verify: read back actual sash coord after placement
+                        actual_coord = self.left_split.sash_coord(0)
+                        logging.info(f"[SPLITTER APPLY] left: sash_coord after set = {actual_coord}")
                 else:
                     logging.info("[SPLITTER APPLY] left: skipping (only 1 panel)")
             except Exception as e:
@@ -485,25 +490,33 @@ class VtpWindowLayoutMixin:
             try:
                 right_panes = self.right_split.panes()
                 if len(right_panes) > 1:
-                    frac = frac_right if frac_right is not None else top_fraction
                     timeline_panel = getattr(self, "timeline_container", None)
-                    if (
-                        timeline_panel is not None
-                        and getattr(timeline_panel, "expanded", True)
-                        and hasattr(timeline_panel, "get_restore_height")
-                    ):
-                        restore_h = int(timeline_panel.get_restore_height(prefer_current=False))
-                        y_sash_right = max(24, min(eff_right_h - 24, eff_right_h - restore_h))
+                    if timeline_panel is not None and not getattr(timeline_panel, "expanded", True):
+                        # Never apply a saved/expanded fraction onto the collapsed proxy —
+                        # that briefly (or permanently, if enforce races) leaves a tall empty bar
+                        # with only the title / ▲ and no Captions content.
                         logging.info(
-                            f"[SPLITTER APPLY] right: using restore_height={restore_h} -> y_sash={y_sash_right} (eff_h={eff_right_h})"
+                            "[SPLITTER APPLY] right: timeline collapsed — skip frac sash, enforce header height"
                         )
                     else:
-                        y_sash_right = int(eff_right_h * frac)
-                    self.right_split.sash_place(0, 0, y_sash_right)
-                    logging.info(f"[SPLITTER APPLY] right: frac={frac} -> y_sash={y_sash_right} (eff_h={eff_right_h})")
-                    # Verify: read back actual sash coord after placement
-                    actual_coord = self.right_split.sash_coord(0)
-                    logging.info(f"[SPLITTER APPLY] right: sash_coord after set = {actual_coord}")
+                        frac = frac_right if frac_right is not None else top_fraction
+                        if (
+                            timeline_panel is not None
+                            and getattr(timeline_panel, "expanded", True)
+                            and hasattr(timeline_panel, "get_restore_height")
+                        ):
+                            restore_h = int(timeline_panel.get_restore_height(prefer_current=False))
+                            y_sash_right = max(24, min(eff_right_h - 24, eff_right_h - restore_h))
+                            logging.info(
+                                f"[SPLITTER APPLY] right: using restore_height={restore_h} -> y_sash={y_sash_right} (eff_h={eff_right_h})"
+                            )
+                        else:
+                            y_sash_right = int(eff_right_h * frac)
+                        self.right_split.sash_place(0, 0, y_sash_right)
+                        logging.info(f"[SPLITTER APPLY] right: frac={frac} -> y_sash={y_sash_right} (eff_h={eff_right_h})")
+                        # Verify: read back actual sash coord after placement
+                        actual_coord = self.right_split.sash_coord(0)
+                        logging.info(f"[SPLITTER APPLY] right: sash_coord after set = {actual_coord}")
                 else:
                     logging.info("[SPLITTER APPLY] right: skipping (only 1 panel)")
             except Exception as e:

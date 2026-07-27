@@ -3607,6 +3607,9 @@ class VideoThumbnailPlayer(
         """
         Selects all thumbnails currently displayed in the grid.
         """
+        # Ctrl+A in toolbar path / any Entry must select text only, not thumbs.
+        if self._skip_file_clipboard_hotkey():
+            return
         try:
             self.selected_thumbnails = []
             # Every item in the current grid (virtual or classic), not only thumbnail_labels keys,
@@ -3684,11 +3687,56 @@ class VideoThumbnailPlayer(
             logging.info(
                 f"[TOGGLE][Timeline] expanded={expanded} mode={mode} ShowTWidget={self.ShowTWidget}"
             )
-            if expanded and mode == "Captions" and hasattr(self, "caption_editor"):
-                self.caption_editor.load_for_path(
-                    getattr(self, "selected_file_path", None),
-                    commit_previous=False,
-                )
+            if expanded:
+                # Remap content after proxy swap — CTk textboxes packed while the
+                # real panel was unmapped can otherwise stay blank until a re-pack.
+                self._remount_bottom_panel_content()
+                if mode == "Captions" and hasattr(self, "caption_editor"):
+                    self.caption_editor.load_for_path(
+                        getattr(self, "selected_file_path", None),
+                        commit_previous=False,
+                    )
+
+    def _remount_bottom_panel_content(self):
+        """Re-pack active bottom content + header chrome after expand/layout recovery."""
+        mode = getattr(self, "bottom_panel_mode", "Timeline")
+        captions_on = False
+        if hasattr(self, "captions_mode_enabled_var"):
+            try:
+                captions_on = bool(self.captions_mode_enabled_var.get())
+            except Exception:
+                captions_on = False
+
+        switch = getattr(self, "bottom_panel_switch", None)
+        if switch is not None:
+            try:
+                if captions_on:
+                    switch.pack(side="left", padx=(10, 0), pady=1)
+                else:
+                    switch.pack_forget()
+            except tk.TclError:
+                pass
+
+        if mode == "Captions" and hasattr(self, "caption_editor"):
+            try:
+                if hasattr(self, "timeline_widget"):
+                    self.timeline_widget.pack_forget()
+                self.caption_editor.pack_forget()
+                self.caption_editor.pack(fill="both", expand=True)
+                self.timeline_container.content_widget = self.caption_editor
+            except tk.TclError:
+                pass
+            self._set_caption_autosave_visible(True)
+        elif hasattr(self, "timeline_widget"):
+            try:
+                if hasattr(self, "caption_editor"):
+                    self.caption_editor.pack_forget()
+                self.timeline_widget.pack_forget()
+                self.timeline_widget.pack(fill="both", expand=True)
+                self.timeline_container.content_widget = self.timeline_widget
+            except tk.TclError:
+                pass
+            self._set_caption_autosave_visible(False)
 
     def _on_caption_autosave_toggled(self):
         if hasattr(self, "save_preferences"):
@@ -3742,6 +3790,12 @@ class VideoThumbnailPlayer(
             self.set_bottom_panel_mode(mode, save_prefs=False)
 
         logging.info("[Captions] mode enabled=%s", enabled)
+        tc = getattr(self, "timeline_container", None)
+        if tc is not None and hasattr(tc, "sync_collapsed_proxy_chrome"):
+            try:
+                tc.sync_collapsed_proxy_chrome()
+            except Exception:
+                logging.debug("[Captions] proxy chrome sync failed", exc_info=True)
         if save_prefs and hasattr(self, "save_preferences"):
             try:
                 self.save_preferences()
@@ -3828,6 +3882,13 @@ class VideoThumbnailPlayer(
                 self.timeline_container.title_label.configure(text=mode)
             except Exception:
                 pass
+        # Collapsed proxy has its own title/switch chrome
+        tc = getattr(self, "timeline_container", None)
+        if tc is not None and hasattr(tc, "sync_collapsed_proxy_chrome"):
+            try:
+                tc.sync_collapsed_proxy_chrome()
+            except Exception:
+                logging.debug("[BottomPanel] proxy chrome sync failed", exc_info=True)
         if save_prefs and hasattr(self, "save_preferences"):
             try:
                 self.save_preferences()
@@ -3842,8 +3903,7 @@ class VideoThumbnailPlayer(
             return
         if not hasattr(self, "caption_editor") or self.caption_editor is None:
             return
-        if not (getattr(self, "timeline_container", None) and self.timeline_container.expanded):
-            return
+        # Load even while collapsed so expand / remount shows the right text immediately.
         self.caption_editor.load_for_path(file_path)
 
 

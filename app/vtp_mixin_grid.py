@@ -2494,10 +2494,12 @@ class VtpGridMixin:
                     if ni < total:
                         new_indices.add(ni)
                 elif direction == "left":
-                    if idx % cols != 0:
+                    # Wrap to previous row's last item at left edge
+                    if idx > 0:
                         new_indices.add(idx - 1)
                 elif direction == "right":
-                    if (idx % cols != cols - 1) and (idx < total - 1):
+                    # Wrap to next row's first item at right edge
+                    if idx < total - 1:
                         new_indices.add(idx + 1)
             for ni in new_indices:
                 file_data = self.video_files[ni]
@@ -2522,11 +2524,13 @@ class VtpGridMixin:
             if new_idx >= total:
                 return
         elif direction == "left":
-            if idx % cols == 0:
+            # Wrap to previous row's last item at left edge
+            if idx <= 0:
                 return
             new_idx = idx - 1
         elif direction == "right":
-            if (idx % cols == cols - 1) or (idx == total - 1):
+            # Wrap to next row's first item at right edge
+            if idx >= total - 1:
                 return
             new_idx = idx + 1
         else:
@@ -2550,12 +2554,14 @@ class VtpGridMixin:
             if new_idx >= total:
                 return
         elif direction == "left":
-            if idx % cols == 0:
-                return  # already left column
+            # Wrap to previous row's last item at left edge
+            if idx <= 0:
+                return
             new_idx = idx - 1
         elif direction == "right":
-            if (idx % cols == cols - 1) or (idx == total - 1):
-                return  # right column or last thumb
+            # Wrap to next row's first item at right edge
+            if idx >= total - 1:
+                return
             new_idx = idx + 1
         else:
             return

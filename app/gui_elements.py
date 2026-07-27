@@ -163,18 +163,57 @@ class TogglePanelFrame(ctk.CTkFrame):
         except (tk.TclError, ValueError) as e:
             logging.info("Error placing sash for %s/%s: %s", self.title, widget_path, e)
 
+    def _collapsed_proxy_title(self):
+        """Title on the thin collapsed bar — prefer Timeline/Captions mode when set."""
+        app = self.app
+        if app is not None and self.title == "Timeline":
+            mode = getattr(app, "bottom_panel_mode", None)
+            if mode in ("Timeline", "Captions"):
+                return mode
+        return self.title
+
     def _create_collapsed_proxy(self):
         proxy = ctk.CTkFrame(self.parent_paned, height=self.collapsed_height, fg_color=self.cget("fg_color"))
         proxy.pack_propagate(False)
         header = ctk.CTkFrame(proxy, fg_color="transparent")
         header.pack(side="top", fill="x", pady=(0, 0), padx=3)
+        proxy._proxy_header = header  # noqa: SLF001 — used to refresh title/switch
         label = ctk.CTkLabel(
             header,
-            text=self.title,
+            text=self._collapsed_proxy_title(),
             font=ctk.CTkFont(size=10, weight="bold"),
             height=16,
         )
         label.pack(side="left", padx=(5, 0), pady=1)
+        proxy._proxy_title_label = label  # noqa: SLF001
+
+        # Mirror Timeline/Captions switch on the proxy (real header is unmapped while collapsed).
+        app = self.app
+        captions_on = False
+        if app is not None:
+            var = getattr(app, "captions_mode_enabled_var", None)
+            try:
+                captions_on = bool(var.get()) if var is not None else False
+            except Exception:
+                captions_on = False
+        if (
+            captions_on
+            and app is not None
+            and getattr(app, "bottom_panel_mode_var", None) is not None
+            and callable(getattr(app, "set_bottom_panel_mode", None))
+        ):
+            switch = ctk.CTkSegmentedButton(
+                header,
+                values=["Timeline", "Captions"],
+                variable=app.bottom_panel_mode_var,
+                width=160,
+                height=18,
+                font=ctk.CTkFont(size=10),
+                command=app.set_bottom_panel_mode,
+            )
+            switch.pack(side="left", padx=(10, 0), pady=1)
+            proxy._proxy_mode_switch = switch  # noqa: SLF001
+
         btn = ctk.CTkButton(
             header,
             text="▲",
@@ -185,6 +224,51 @@ class TogglePanelFrame(ctk.CTkFrame):
         )
         btn.pack(side="right", padx=2, pady=1)
         return proxy
+
+    def sync_collapsed_proxy_chrome(self):
+        """Keep collapsed bar title / mode switch in sync with app state."""
+        proxy = self._collapsed_proxy
+        if self.expanded or proxy is None:
+            return
+        try:
+            if not proxy.winfo_exists():
+                return
+        except tk.TclError:
+            return
+
+        app = self.app
+        captions_on = False
+        if app is not None:
+            var = getattr(app, "captions_mode_enabled_var", None)
+            try:
+                captions_on = bool(var.get()) if var is not None else False
+            except Exception:
+                captions_on = False
+        has_switch = getattr(proxy, "_proxy_mode_switch", None) is not None
+        if captions_on != has_switch:
+            # Switch presence changed — rebuild proxy chrome in place.
+            try:
+                before, after = self._pane_neighbors(str(proxy))
+                self.parent_paned.forget(proxy)
+                proxy.destroy()
+                self._collapsed_proxy = self._create_collapsed_proxy()
+                self._add_pane_at_saved_position(
+                    self._collapsed_proxy,
+                    self.collapsed_height,
+                    self.collapsed_height,
+                    before=before,
+                    after=after,
+                )
+            except (tk.TclError, ValueError) as e:
+                logging.info("Error rebuilding collapsed proxy for %s: %s", self.title, e)
+            return
+
+        label = getattr(proxy, "_proxy_title_label", None)
+        if label is not None:
+            try:
+                label.configure(text=self._collapsed_proxy_title())
+            except tk.TclError:
+                pass
 
     def enforce_collapsed_height(self):
         """Reapply collapsed pane height after startup/splitter layout recalculations."""
@@ -288,10 +372,15 @@ class TogglePanelFrame(ctk.CTkFrame):
                     before=before,
                     after=after,
                 )
+                self.expanded = False
                 self._log_paned_state("after_collapse_proxy_add")
             except (tk.TclError, ValueError) as e:
                 logging.info("Error collapsing panel '%s': %s", self.title, e)
-            self.expanded = False
+                # Best-effort: keep flag consistent with what is still mapped.
+                try:
+                    self.expanded = str(self) in self._pane_paths()
+                except Exception:
+                    pass
         else:
             logging.info(f"[TOGGLE] Expanding panel '{self.title}'")
             self._log_paned_state("before_expand")
@@ -312,10 +401,14 @@ class TogglePanelFrame(ctk.CTkFrame):
                     before=before,
                     after=after,
                 )
+                self.expanded = True
                 self._log_paned_state("after_expand_panel_add")
             except (tk.TclError, ValueError) as e:
                 logging.info("Error expanding panel '%s': %s", self.title, e)
-            self.expanded = True
+                try:
+                    self.expanded = str(self) in self._pane_paths()
+                except Exception:
+                    pass
 
         if hasattr(self, "app"):
             try:
@@ -323,7 +416,10 @@ class TogglePanelFrame(ctk.CTkFrame):
             except Exception as e:
                 logging.info("Error calling update_panel_flags via self.app: %s", e)
 
-        self.toggle_button.configure(text="▼" if self.expanded else "▲")
+        try:
+            self.toggle_button.configure(text="▼" if self.expanded else "▲")
+        except tk.TclError:
+            pass
 
 
 class ConflictDialog(ctk.CTkToplevel):
@@ -2756,19 +2852,26 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
                     preferences["splitter_main_fraction"] = coord[0] / pw
                     logging.info(f"[SPLITTER SAVE] main: coord={coord}, width={pw} -> fraction={preferences['splitter_main_fraction']:.4f}")
         if hasattr(app, "left_split") and app.left_split.winfo_exists() and len(app.left_split.panes()) > 1:
-            lh = app.left_split.winfo_height()
-            if lh > 10:
-                coord = app.left_split.sash_coord(0)
-                if coord:
-                    preferences["splitter_left_fraction"] = coord[1] / lh
-                    logging.info(f"[SPLITTER SAVE] left: coord={coord}, height={lh} -> fraction={preferences['splitter_left_fraction']:.4f}")
+            # Collapsed proxy sash (~0.98) must not overwrite the real expanded fraction.
+            info_panel = getattr(app, "info_panel_container", None)
+            if info_panel is None or getattr(info_panel, "expanded", True):
+                lh = app.left_split.winfo_height()
+                if lh > 10:
+                    coord = app.left_split.sash_coord(0)
+                    if coord:
+                        preferences["splitter_left_fraction"] = coord[1] / lh
+                        logging.info(f"[SPLITTER SAVE] left: coord={coord}, height={lh} -> fraction={preferences['splitter_left_fraction']:.4f}")
         if hasattr(app, "right_split") and app.right_split.winfo_exists() and len(app.right_split.panes()) > 1:
-            rh = app.right_split.winfo_height()
-            if rh > 10:
-                coord = app.right_split.sash_coord(0)
-                if coord:
-                    preferences["splitter_right_fraction"] = coord[1] / rh
-                    logging.info(f"[SPLITTER SAVE] right: coord={coord}, height={rh} -> fraction={preferences['splitter_right_fraction']:.4f}")
+            timeline_panel = getattr(app, "timeline_container", None)
+            if timeline_panel is None or getattr(timeline_panel, "expanded", True):
+                rh = app.right_split.winfo_height()
+                if rh > 10:
+                    coord = app.right_split.sash_coord(0)
+                    if coord:
+                        preferences["splitter_right_fraction"] = coord[1] / rh
+                        logging.info(f"[SPLITTER SAVE] right: coord={coord}, height={rh} -> fraction={preferences['splitter_right_fraction']:.4f}")
+            else:
+                logging.info("[SPLITTER SAVE] right: skipped (timeline collapsed)")
     except Exception as e:
         logging.info(f"[SPLITTER SAVE] Exception: {e}")
 
