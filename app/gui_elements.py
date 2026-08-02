@@ -1135,6 +1135,11 @@ def show_menu_popup(app, menu, widget):
 
 def build_file_menu(app, *_):
     file_menu = create_menu(app, app)
+    file_menu.add_command(
+        label="Batch Convert / Rename...",
+        command=app.open_batch_convert_dialog,
+    )
+    file_menu.add_separator()
     file_menu.add_command(label="Exit program", command=app.exit_program)
     return file_menu
 

@@ -25,6 +25,8 @@ from file_operations import *
 from gui_elements import (
     append_rating_submenu,
     create_search_window,
+    get_conflict_rename_path,
+    open_conflict_dialog,
     open_file_op_progress_dialog,
 )
 from image_operations import create_image_viewer
@@ -36,6 +38,11 @@ from image_resize_dialog import (
     open_batch_resize_dialog,
     resize_image_file,
     transform_image_file,
+)
+from batch_processing_dialog import (
+    build_output_path,
+    open_batch_process_dialog,
+    process_one_image,
 )
 from video_operations import VideoPlayer
 from video_merge import open_merge_videos_dialog
@@ -2909,6 +2916,306 @@ class VtpGridMixin:
 
         threading.Thread(target=_worker, daemon=True, name="batch-resize").start()
 
+    def open_batch_convert_dialog(self, primary_path: str | None = None):
+        """Open Batch Convert / Rename for selected images (File menu or RMB)."""
+        if primary_path:
+            paths = self.selected_image_paths_for_edit(primary_path)
+        else:
+            paths = self.selected_image_paths_for_edit(
+                getattr(self, "selected_file_path", None)
+                or (self.selected_thumbnails[0][0] if self.selected_thumbnails else None)
+            )
+            if not paths:
+                # Fall back: collect all selected images even if primary is missing.
+                raw = list(getattr(self, "selected_thumbnails", []) or [])
+                seen = set()
+                paths = []
+                for item in raw:
+                    p = item[0] if isinstance(item, tuple) and item else item
+                    if not p:
+                        continue
+                    p = os.path.normpath(str(p))
+                    key = os.path.normcase(p)
+                    if key in seen:
+                        continue
+                    if os.path.isfile(p) and p.lower().endswith(IMAGE_FORMATS):
+                        seen.add(key)
+                        paths.append(p)
+
+        if not paths:
+            messagebox.showinfo(
+                "Batch Convert",
+                "No images selected.\n\nSelect one or more image thumbnails first.",
+            )
+            return
+
+        open_batch_process_dialog(self, paths, on_start=self.start_batch_image_process)
+
+    def _resolve_batch_convert_conflict(
+        self,
+        output_path: str,
+        src_path: str,
+        progress_dialog,
+        conflict_policy: dict,
+        *,
+        ask_before_overwrite: bool = True,
+    ) -> str | None:
+        """
+        Resolve destination conflicts (Replace / Rename / Skip / Cancel).
+
+        Same-path in-place overwrite is allowed without prompting.
+        When ``ask_before_overwrite`` is False, existing targets are replaced.
+        Returns path to write, None to skip, or raises InterruptedError on cancel.
+        """
+        if not output_path:
+            return None
+        try:
+            same = os.path.normcase(os.path.abspath(output_path)) == os.path.normcase(
+                os.path.abspath(src_path)
+            )
+        except Exception:
+            same = False
+        if same:
+            return output_path
+        if not os.path.exists(output_path):
+            return output_path
+
+        # FastStone-style: unchecked "Ask before overwrite" → silent replace.
+        if not ask_before_overwrite:
+            return output_path
+
+        action = conflict_policy.get("action")
+        if action in ("replace", "rename", "skip") and conflict_policy.get("apply_all"):
+            if action == "replace":
+                return output_path
+            if action == "rename":
+                return get_conflict_rename_path(output_path)
+            return None
+
+        holder: dict = {}
+        done = threading.Event()
+
+        def _ask():
+            try:
+                try:
+                    if progress_dialog is not None:
+                        progress_dialog.grab_release()
+                except Exception:
+                    pass
+                act, apply_all = open_conflict_dialog(
+                    self, os.path.basename(output_path)
+                )
+                holder["action"] = act
+                holder["apply_all"] = apply_all
+            finally:
+                try:
+                    if progress_dialog is not None and progress_dialog.winfo_exists():
+                        progress_dialog.grab_set()
+                        progress_dialog.lift()
+                except Exception:
+                    pass
+                done.set()
+
+        self.after(0, _ask)
+        done.wait()
+        action = holder.get("action") or "cancel"
+        apply_all = bool(holder.get("apply_all"))
+        if apply_all and action in ("replace", "rename", "skip"):
+            conflict_policy["action"] = action
+            conflict_policy["apply_all"] = True
+
+        if action == "replace":
+            return output_path
+        if action == "rename":
+            return get_conflict_rename_path(output_path)
+        if action == "skip":
+            return None
+        raise InterruptedError("Batch convert canceled at conflict dialog")
+
+    def start_batch_image_process(self, job: dict):
+        """Run batch convert / rename on a background thread with progress UI."""
+        if not job:
+            return
+        if getattr(self, "_batch_convert_running", False):
+            messagebox.showinfo("Batch Convert", "A batch conversion is already running.")
+            return
+
+        paths = [p for p in (job.get("paths") or []) if p and os.path.isfile(p)]
+        if not paths:
+            messagebox.showinfo("Batch Convert", "No valid image files to process.")
+            return
+
+        out_ext = job.get("out_ext") or ".jpg"
+        output_dir = job.get("output_dir")
+        rename_enabled = bool(job.get("rename_enabled"))
+        rename_pattern = job.get("rename_pattern") or "image_###"
+        rotate_op = job.get("rotate_op")
+        flip_h = bool(job.get("flip_h"))
+        flip_v = bool(job.get("flip_v"))
+        crop_settings = job.get("crop_settings")
+        resize_settings = job.get("resize_settings")
+        canvas_settings = job.get("canvas_settings")
+        quality = int(job.get("quality") or 90)
+        png_compress = int(job.get("png_compress") if job.get("png_compress") is not None else 6)
+        ask_before_overwrite = bool(job.get("ask_before_overwrite", True))
+
+        self._batch_convert_running = True
+        progress = open_file_op_progress_dialog(
+            self, "Batch Convert", len(paths), action_label="Converting"
+        )
+        conflict_policy: dict = {"action": None, "apply_all": False}
+        errors: list[str] = []
+        written: list[str] = []
+
+        def _worker():
+            ok = 0
+            skipped = 0
+            aborted = False
+            try:
+                for i, src in enumerate(paths, start=1):
+                    if progress.cancelled:
+                        aborted = True
+                        break
+                    name = os.path.basename(src)
+                    self.after(
+                        0,
+                        lambda i=i, name=name: progress.set_progress(
+                            i - 1, detail=name
+                        ),
+                    )
+                    try:
+                        suggested = build_output_path(
+                            src,
+                            index=i,
+                            out_ext=out_ext,
+                            output_dir=output_dir,
+                            rename_enabled=rename_enabled,
+                            rename_pattern=rename_pattern,
+                        )
+                        dest = self._resolve_batch_convert_conflict(
+                            suggested,
+                            src,
+                            progress,
+                            conflict_policy,
+                            ask_before_overwrite=ask_before_overwrite,
+                        )
+                    except InterruptedError:
+                        aborted = True
+                        break
+                    except Exception as e:
+                        logging.info("Batch convert conflict failed for %s: %s", src, e)
+                        errors.append(f"{name}: {e}")
+                        self.after(
+                            0,
+                            lambda i=i, name=name: progress.set_progress(
+                                i, detail=name
+                            ),
+                        )
+                        continue
+
+                    if dest is None:
+                        skipped += 1
+                        self.after(
+                            0,
+                            lambda i=i, name=name: progress.set_progress(
+                                i, detail=f"{name} (skipped)"
+                            ),
+                        )
+                        continue
+
+                    try:
+                        process_one_image(
+                            src,
+                            dest,
+                            rotate_op=rotate_op,
+                            flip_h=flip_h,
+                            flip_v=flip_v,
+                            crop_settings=crop_settings,
+                            resize_settings=resize_settings,
+                            canvas_settings=canvas_settings,
+                            quality=quality,
+                            png_compress=png_compress,
+                        )
+                        ok += 1
+                        written.append(dest)
+                    except Exception as e:
+                        logging.info("Batch convert failed for %s: %s", src, e)
+                        errors.append(f"{name}: {e}")
+
+                    self.after(
+                        0,
+                        lambda i=i, name=name: progress.set_progress(i, detail=name),
+                    )
+            finally:
+                self.after(
+                    0,
+                    lambda: self._batch_convert_done(
+                        progress,
+                        ok=ok,
+                        skipped=skipped,
+                        total=len(paths),
+                        errors=errors,
+                        written=written,
+                        aborted=aborted,
+                        output_dir=output_dir,
+                    ),
+                )
+
+        threading.Thread(target=_worker, daemon=True, name="batch-convert").start()
+
+    def _batch_convert_done(
+        self,
+        progress,
+        *,
+        ok: int,
+        skipped: int,
+        total: int,
+        errors: list,
+        written: list,
+        aborted: bool,
+        output_dir: str | None,
+    ):
+        self._batch_convert_running = False
+        try:
+            progress.close()
+        except Exception:
+            pass
+
+        # Reload grid so new/converted files appear (same folder as current view).
+        if ok and written:
+            try:
+                cur = getattr(self, "current_directory", None)
+                if cur:
+                    cur_key = os.path.normcase(os.path.normpath(cur))
+                    wrote_here = any(
+                        os.path.normcase(os.path.normpath(os.path.dirname(p))) == cur_key
+                        for p in written
+                    )
+                    if wrote_here:
+                        self.display_thumbnails(
+                            cur, force_refresh=True, preserve_scroll=True
+                        )
+            except Exception as e:
+                logging.info("Batch convert folder refresh failed: %s", e)
+
+        parts = [f"Batch Convert: {ok}/{total}"]
+        if skipped:
+            parts.append(f"skipped {skipped}")
+        if aborted:
+            parts.append("aborted")
+        if errors:
+            parts.append(f"{len(errors)} error(s)")
+            for err in errors[:8]:
+                logging.info("Batch convert error: %s", err)
+        summary = ", ".join(parts)
+
+        try:
+            if hasattr(self, "status_bar") and self.status_bar is not None:
+                color = "#ff6b6b" if errors or aborted else None
+                self.status_bar.set_action_message(summary, color=color)
+        except Exception as e:
+            logging.info("Batch convert status message failed: %s", e)
+
     def setup_icons(self):
         """
         Load and scale tree/grid icons from the /icons subdirectory and prepare PhotoImage/CTkImage versions.
@@ -3777,6 +4084,16 @@ class VtpGridMixin:
                 if _cmp_acc:
                     _cmp_opts["accelerator"] = _cmp_acc
                 menu.add_command(**_cmp_opts)
+
+            _bc_label = (
+                "Batch Convert / Rename…"
+                if n_edit <= 1
+                else f"Batch Convert / Rename… ({n_edit})"
+            )
+            menu.add_command(
+                label=_bc_label,
+                command=lambda fp=file_path: self.open_batch_convert_dialog(fp),
+            )
 
         else:
             menu.add_command(label="Open", command=lambda: os.startfile(file_path))  # fallback
