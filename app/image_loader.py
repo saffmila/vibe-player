@@ -26,6 +26,11 @@ PSD_FORMATS = (".psd", ".psb")
 # Affinity Photo/Designer/Publisher (+ Affinity 2 unified ``.af``).
 AFFINITY_FORMATS = (".af", ".afphoto", ".afdesign", ".afpub")
 
+# Real frame timelines. MPO / multi-resolution JPEG also report ``is_animated``
+# with ``n_frames > 1``, but the extra "frames" are just smaller previews
+# (DJI 8K + 960×540) — playing them looks like flicker + HUD size jumps.
+_ANIMATION_FORMATS = frozenset({"GIF", "WEBP", "PNG"})
+
 _AFFINITY_MAGIC = b"\x00\xffKA"
 _PNG_SIG = b"\x89PNG\r\n\x1a\n"
 _PNG_IEND = b"IEND"
@@ -96,8 +101,11 @@ def load_pil_frames(path: str) -> tuple[list[Image.Image], list[int]]:
     """Load display frames for the image viewer.
 
     Returns ``(frames, durations_ms)``. Static images (PSD/Affinity) yield one
-    frame and duration ``0`` (caller should not animate). Animated GIF/WebP
+    frame and duration ``0`` (caller should not animate). Animated GIF/WebP/PNG
     yield every frame; durations are clamped to a usable playback range.
+
+    Multi-picture containers such as MPO (common for DJI JPEGs) report multiple
+    frames but are not animations — only the largest still is returned.
 
     Detaches from the filesystem handle after load (same Windows lock concern as
     ``load_pil_image``).
@@ -109,28 +117,56 @@ def load_pil_frames(path: str) -> tuple[list[Image.Image], list[int]]:
 
     with Image.open(path) as image:
         n_frames = int(getattr(image, "n_frames", 1) or 1)
-        animated = bool(getattr(image, "is_animated", False)) and n_frames > 1
-        if not animated:
-            image.load()
-            return [image.copy()], [0]
+        fmt = (image.format or "").upper()
+        is_timeline = (
+            bool(getattr(image, "is_animated", False))
+            and n_frames > 1
+            and fmt in _ANIMATION_FORMATS
+        )
 
-        frames: list[Image.Image] = []
-        durations: list[int] = []
-        for i in range(n_frames):
-            image.seek(i)
-            # RGBA keeps transparency stable across frames for Tk PhotoImage.
-            frame = image.convert("RGBA")
-            frames.append(frame.copy())
-            raw_ms = image.info.get("duration", 100)
-            try:
-                ms = int(raw_ms)
-            except (TypeError, ValueError):
-                ms = 100
-            # 0 often means "default"; very low values thrash the UI timer.
-            if ms <= 0:
-                ms = 100
-            durations.append(max(20, ms))
-        return frames, durations
+        if is_timeline:
+            frames: list[Image.Image] = []
+            durations: list[int] = []
+            for i in range(n_frames):
+                image.seek(i)
+                # RGBA keeps transparency stable across frames for Tk PhotoImage.
+                frame = image.convert("RGBA")
+                frames.append(frame.copy())
+                raw_ms = image.info.get("duration", 100)
+                try:
+                    ms = int(raw_ms)
+                except (TypeError, ValueError):
+                    ms = 100
+                # 0 often means "default"; very low values thrash the UI timer.
+                if ms <= 0:
+                    ms = 100
+                durations.append(max(20, ms))
+            return frames, durations
+
+        if n_frames > 1:
+            # MPO / multi-res still: keep the highest-resolution picture only.
+            best: Image.Image | None = None
+            best_area = -1
+            for i in range(n_frames):
+                image.seek(i)
+                image.load()
+                area = int(image.size[0]) * int(image.size[1])
+                if area > best_area:
+                    best_area = area
+                    best = image.copy()
+            if best is not None:
+                logging.info(
+                    "[image_loader] %s has %d still(s) (format=%s); using %dx%d",
+                    os.path.basename(path),
+                    n_frames,
+                    fmt or "?",
+                    best.size[0],
+                    best.size[1],
+                )
+                return [best], [0]
+
+        image.load()
+        return [image.copy()], [0]
 
 
 def _load_psd(path: str) -> Image.Image:

@@ -2577,7 +2577,7 @@ def create_preferences_window(app):
 
     # Tree font label + slider
     ctk.CTkLabel(interface_frame, text="Left panel font size").pack(anchor="w", padx=10, pady=(10, 0))
-    tree_slider = ctk.CTkSlider(interface_frame, from_=10, to=30, number_of_steps=20)
+    tree_slider = ctk.CTkSlider(interface_frame, from_=8, to=30, number_of_steps=22)
     tree_slider.set(app.base_font_size)
     tree_slider.configure(command=lambda val: app.set_tree_font_size(int(float(val))))
     tree_slider.pack(fill="x", padx=10)

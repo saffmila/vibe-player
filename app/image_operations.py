@@ -120,7 +120,9 @@ class ImageViewerLegacy:
 
         frames, durations = load_pil_frames(self.image_path)
         self._apply_loaded_frames(frames, durations, reset_title=False)
-        self.photo = ImageTk.PhotoImage(self.original_image)
+        # Never upload full-res PhotoImage here — 8K DJI (~8064×4536) would flash
+        # a huge bitmap before the first scaled paint and can stall Tk for seconds.
+        self.photo = ImageTk.PhotoImage(PILImage.new("RGB", (1, 1), "black"))
 
         self.canvas_image = self.canvas.create_image(0, 0, image=self.photo, anchor=tk.NW)
 
@@ -129,6 +131,9 @@ class ImageViewerLegacy:
         # dokud uživatel nezmění zoom (manual) nebo nezvolí jiný režim.
         self._view_fit_mode = "none"  # none | best_fit | fit_width | actual | manual
         self._windowed_geometry = None  # restored when leaving fullscreen
+        self._pending_initial_fit = False
+        self._settle_open_fit = False
+        self._open_fit_settle_after = None
 
         # Proměnná pro časovač HQ renderu
         self._hq_timer = None
@@ -257,6 +262,10 @@ class ImageViewerLegacy:
         so a naive image-sized geometry leaves the client smaller than the photo.
         We measure chrome and grow the outer size accordingly; if the image is
         larger than the work area, we best-fit and size the window to that.
+
+        When ``open_fullscreen`` is True, map borderless fullscreen first, then run
+        a single best-fit from the *real* Tk canvas size (never paint using
+        withdrawn/unmapped sizes — that left 8K images tiny in the top-left).
         """
         try:
             px = self.parent.winfo_rootx() + max(1, self.parent.winfo_width()) // 2
@@ -279,24 +288,47 @@ class ImageViewerLegacy:
             return
 
         if iw <= max_w and ih <= max_h:
-            self.zoom_factor = 1.0
-            self._view_fit_mode = "actual"
+            win_zoom = 1.0
+            win_mode = "actual"
             client_w, client_h = iw, ih
         else:
-            scale = min(max_w / iw, max_h / ih)
-            self.zoom_factor = scale
-            self._view_fit_mode = "best_fit"
-            client_w = max(1, int(round(iw * scale)))
-            client_h = max(1, int(round(ih * scale)))
+            win_zoom = min(max_w / iw, max_h / ih)
+            win_mode = "best_fit"
+            client_w = max(1, int(round(iw * win_zoom)))
+            client_h = max(1, int(round(ih * win_zoom)))
 
-        # First pass — place roughly, then correct for window chrome.
-        x = mon_x + max(0, (mon_w - client_w) // 2)
-        y = mon_y + max(0, (mon_h - client_h) // 2)
-        self.image_window.geometry(f"{client_w}x{client_h}+{x}+{y}")
-        self.image_window.update_idletasks()
+        # Approximate chrome for restore-from-fullscreen (avoid a visible windowed pass).
+        chrome_w, chrome_h = 16, 40
+        outer_w = min(mon_w, client_w + chrome_w)
+        outer_h = min(mon_h, client_h + chrome_h)
+        wx = mon_x + max(0, (mon_w - outer_w) // 2)
+        wy = mon_y + max(0, (mon_h - outer_h) // 2)
+        self._windowed_geometry = f"{outer_w}x{outer_h}+{wx}+{wy}"
 
         self.hbar.grid_remove()
         self.vbar.grid_remove()
+
+        if open_fullscreen:
+            self.is_fullscreen = True
+            self._view_fit_mode = "best_fit"
+            self.image_window.overrideredirect(True)
+            self.image_window.geometry(f"{mon_w}x{mon_h}+{mon_x}+{mon_y}")
+            try:
+                self.image_window.deiconify()
+                self.image_window.lift()
+                self.image_window.focus_force()
+            except tk.TclError:
+                pass
+            # Wait for Configure to settle — painting before the canvas has its final
+            # Tk size puts the image in the top-left at the wrong zoom (esp. HiDPI / 8K).
+            self._settle_open_fit = True
+            self._schedule_open_fit_settle(delay_ms=50)
+            return
+
+        # Windowed open — measure chrome against a real mapped size.
+        x = mon_x + max(0, (mon_w - client_w) // 2)
+        y = mon_y + max(0, (mon_h - client_h) // 2)
+        self.image_window.geometry(f"{client_w}x{client_h}+{x}+{y}")
         self.image_window.update_idletasks()
 
         cw = max(1, self.canvas.winfo_width())
@@ -311,14 +343,55 @@ class ImageViewerLegacy:
         x = mon_x + max(0, (mon_w - outer_w) // 2)
         y = mon_y + max(0, (mon_h - outer_h) // 2)
         geom = f"{outer_w}x{outer_h}+{x}+{y}"
-        self.image_window.geometry(geom)
         self._windowed_geometry = geom
-
+        self.zoom_factor = win_zoom
+        self._view_fit_mode = win_mode
+        self.image_window.geometry(geom)
         self.update_image(center=True, high_quality=True)
 
-        if open_fullscreen:
-            # Defer until the window is mapped so monitor detection is stable.
-            self.image_window.after(30, self._enter_fullscreen_initial)
+    def _schedule_open_fit_settle(self, delay_ms=50):
+        """Debounce initial best-fit until canvas Configure events stop."""
+        job = getattr(self, "_open_fit_settle_after", None)
+        if job is not None:
+            try:
+                self.image_window.after_cancel(job)
+            except Exception:
+                pass
+        self._open_fit_settle_after = self.image_window.after(
+            delay_ms, self._settle_open_fit_cb
+        )
+
+    def _settle_open_fit_cb(self):
+        """Single first paint after fullscreen open — correct zoom + center."""
+        self._open_fit_settle_after = None
+        if not getattr(self, "_settle_open_fit", False):
+            return
+        if not getattr(self, "_running", False):
+            self._settle_open_fit = False
+            return
+        try:
+            if not self.image_window.winfo_exists():
+                self._settle_open_fit = False
+                return
+        except tk.TclError:
+            self._settle_open_fit = False
+            return
+
+        self.image_window.update_idletasks()
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+        if cw < 64 or ch < 64:
+            # Still not mapped — try once more shortly.
+            self._schedule_open_fit_settle(delay_ms=50)
+            return
+
+        self._settle_open_fit = False
+        self.best_fit(high_quality=True)
+
+    def _deferred_initial_best_fit(self):
+        """Back-compat alias — same as settle callback."""
+        self._pending_initial_fit = False
+        self._settle_open_fit_cb()
 
     def _enter_fullscreen_initial(self):
         if not getattr(self, "_running", False) or self.is_fullscreen:
@@ -726,6 +799,9 @@ class ImageViewerLegacy:
         self.update_scrollbars()
         self._set_image_scrollregion_only()
         self._refresh_overlays()
+        # During fullscreen open, keep debouncing until the canvas size is stable.
+        if getattr(self, "_settle_open_fit", False) and event.width >= 64 and event.height >= 64:
+            self._schedule_open_fit_settle(delay_ms=40)
         # self.canvas.update_idletasks() # Není nutné volat při každém pohybu, zpomaluje resize
 
     def zoom(self, event):
@@ -749,18 +825,23 @@ class ImageViewerLegacy:
         self.zoom_factor = 1.0
         self.update_image(center=True)
 
-    def best_fit(self):
+    def best_fit(self, high_quality=False):
         self._view_fit_mode = "best_fit"
-        self.image_window.update_idletasks() # Update to get real dims
+        self.image_window.update_idletasks()  # Update to get real dims
         canvas_width = self.canvas.winfo_width()
         canvas_height = self.canvas.winfo_height()
+        # Unmapped / mid-layout canvases report 1×1 — fall back to the window size.
+        if canvas_width < 64 or canvas_height < 64:
+            canvas_width = max(canvas_width, self.image_window.winfo_width(), 1)
+            canvas_height = max(canvas_height, self.image_window.winfo_height(), 1)
         img_width, img_height = self.original_image.size
-        if img_width == 0 or img_height == 0: return
-        
+        if img_width == 0 or img_height == 0:
+            return
+
         scale_w = canvas_width / img_width
         scale_h = canvas_height / img_height
         self.zoom_factor = min(scale_w, scale_h)
-        self.update_image(center=True)
+        self.update_image(center=True, high_quality=high_quality)
 
     def fit_width(self):
         self._view_fit_mode = "fit_width"
@@ -951,10 +1032,20 @@ class ImageViewerLegacy:
                 )
             else:
                 self.image_window.attributes("-fullscreen", True)
-            # Fit the image to the fullscreen canvas.
+            # Fit immediately from the real canvas size (same Tk coords as PhotoImage).
             if self._view_fit_mode in ("none", "actual", "manual"):
                 self._view_fit_mode = "best_fit"
-            self.image_window.after(80, self.best_fit)
+            self.image_window.update_idletasks()
+            try:
+                self.image_window.update()
+            except tk.TclError:
+                pass
+            if self._view_fit_mode == "best_fit":
+                self.best_fit(high_quality=True)
+            elif self._view_fit_mode == "fit_width":
+                self.fit_width()
+            else:
+                self.update_image(center=True, high_quality=True)
         else:
             self.is_fullscreen = False
             self.image_window.overrideredirect(False)
@@ -964,10 +1055,16 @@ class ImageViewerLegacy:
                 self.image_window.geometry(geom)
             else:
                 self._layout_initial_window(open_fullscreen=False)
+            self.image_window.update_idletasks()
+            if self._view_fit_mode == "best_fit":
+                self.best_fit()
+            elif self._view_fit_mode == "fit_width":
+                self.fit_width()
+            else:
+                self.update_image(center=True, high_quality=True)
 
         self.update_scrollbars()
         self._set_image_scrollregion_only()
-        self.image_window.after(100, self.center_image)
         self._refresh_overlays()
 
     def debug_print_monitor(self):

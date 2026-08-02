@@ -14,6 +14,7 @@ import time
 
 import customtkinter as ctk
 import tkinter as tk
+import tkinter.font as tkfont
 import tkinter.ttk as ttk
 from tkinter import messagebox
 import tkinterdnd2 as dnd
@@ -2935,7 +2936,8 @@ class VtpGridMixin:
             try:
                 rh = int(getattr(self, "row_height", 0) or 0)
                 if rh > 0:
-                    max_by_row = max(22, min(int(rh * 0.90), rh - 4))
+                    # Leave a couple px margin; floor soft enough for compact tree rows.
+                    max_by_row = max(14, min(int(rh * 0.90), rh - 2))
                     icon_size = min(icon_size, max_by_row)
             except (TypeError, ValueError):
                 pass
@@ -3270,7 +3272,8 @@ class VtpGridMixin:
                     "window_scale": 1.1,
                     "tree_font_multiplier": 1.2,
                     "thumb_font_multiplier": 1.15,
-                    "tree_row_base": 58,
+                    # ~25% tighter than prior 48; default font 11 (effective ~13).
+                    "tree_row_base": 36,
                     "tree_indent_base": 22,
                 }
             # 100–125 % displays only (scale_factor < 1.5)
@@ -3279,7 +3282,8 @@ class VtpGridMixin:
                 "window_scale": 1.0,
                 "tree_font_multiplier": 1.0,
                 "thumb_font_multiplier": 1.0,
-                "tree_row_base": 34,
+                # ~25% tighter than prior 30 → ~20 px row at default font 11.
+                "tree_row_base": 22,
                 "tree_indent_base": 16,
             }
 
@@ -3546,9 +3550,34 @@ class VtpGridMixin:
         current_widget_scale = self._get_scaling_profile(self.current_dpi_scale)["widget_scale"]
             
         # 2. Call the function with the required argument
+        # Do NOT reload tree icons here: ttk.Treeview grows rows to fit images, and
+        # re-creating PhotoImages mid-session can permanently inflate row spacing.
         self.update_treeview_scaling(current_widget_scale)
 
 
+    def _tree_icon_pixel_height(self) -> int:
+        """Tallest currently loaded tree PhotoImage, or 0 if none yet."""
+        tallest = 0
+        for attr in (
+            "folder_treeicon",
+            "folder_treeicon_green",
+            "folder_virtual_icon",
+            "hdd_icon",
+            "google_icon",
+            "desktop_icon",
+            "downloads_icon",
+            "documents_icon",
+            "pictures_icon",
+            "videos_icon",
+        ):
+            img = getattr(self, attr, None)
+            if img is None:
+                continue
+            try:
+                tallest = max(tallest, int(img.height()))
+            except Exception:
+                pass
+        return tallest
 
 
     def set_thumb_font_size(self, size):
@@ -3576,30 +3605,70 @@ class VtpGridMixin:
         profile = self._get_scaling_profile(scale_for_profile)
         hi = "hi-dpi" if float(scale_for_profile) >= 1.5 else "std"
 
-        # Keep row height and tree indentation tied to the same profile.
-        self.row_height = max(20, int(round(profile["tree_row_base"] * widget_scale)))
         tree_indent = max(10, int(round(profile["tree_indent_base"] * widget_scale)))
-        new_font_size = max(8, int(round(self.base_font_size * profile["tree_font_multiplier"])))
+        new_font_size = max(7, int(round(self.base_font_size * profile["tree_font_multiplier"])))
 
-        style = ttk.Style(self)
-        style.layout("NoBorder.Treeview", [('Treeview.treearea', {'sticky': 'nswe'})])
+        # Measure with a real Font (tk scaling), but apply size as a plain tuple —
+        # that is what used to update Treeview text live. Named/anonymous Font
+        # objects were changing metrics (rowheight) without repainting glyphs.
+        measure_font = tkfont.Font(self, family="Helvetica", size=new_font_size)
+        linespace = int(measure_font.metrics("linespace"))
+
+        default_tree_font = 11
+        font_ratio = max(7, int(self.base_font_size)) / float(default_tree_font)
+        base_row = max(16, int(round(profile["tree_row_base"] * widget_scale)))
+        default_font_px = max(7, int(round(default_tree_font * profile["tree_font_multiplier"])))
+        default_linespace = int(
+            tkfont.Font(self, family="Helvetica", size=default_font_px).metrics("linespace")
+        )
+        default_pad = max(2, base_row - default_linespace)
+        pad = max(2, int(round(default_pad * font_ratio)))
+        desired_row = max(16, linespace + pad)
+        # Treeview will not shrink below image size — never ask for a shorter row
+        # than the glyphs already attached to items.
+        icon_h = self._tree_icon_pixel_height()
+        self.row_height = max(desired_row, icon_h + 2) if icon_h else desired_row
+
+        # Prefer the same Style instance used when the tree was created.
+        style = getattr(self, "tree_style", None) or ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
         style.configure(
             "NoBorder.Treeview",
             background=self.LTreeBGColor,
             fieldbackground=self.LTreeBGColor,
             foreground=self.tree_TextColor,
-            rowheight=self.row_height, 
+            rowheight=self.row_height,
             font=("Helvetica", new_font_size),
-            indent=tree_indent
+            indent=tree_indent,
         )
+        # Windows/clam often keeps the old glyph cache until the style is rebound.
+        tree = getattr(self, "tree", None)
+        if tree is not None:
+            try:
+                tree.configure(style="NoBorder.Treeview")
+            except tk.TclError:
+                pass
+
+        applied = None
+        try:
+            applied = style.lookup("NoBorder.Treeview", "font")
+        except tk.TclError:
+            pass
         logging.info(
             "[update_treeview_scaling] Applied profile=%s dpi_scale=%.4f widget_scale=%s "
-            "row_height=%s font_px=%s indent=%s",
+            "row_height=%s font_px=%s style_font=%r linespace=%s pad=%s icon_h=%s indent=%s",
             hi,
             float(scale_for_profile),
             widget_scale,
             self.row_height,
             new_font_size,
+            applied,
+            linespace,
+            pad,
+            icon_h,
             tree_indent,
         )
 
