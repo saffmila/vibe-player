@@ -1987,6 +1987,8 @@ class VtpGridMixin:
     
     
     def create_file_thumbnail(self, file_path, file_name, row, col, index, thumbnail_time=None, overwrite=False, target_frame=None, is_refresh=False, render_id=None):
+        if not file_name:
+            file_name = os.path.basename(file_path or "") or "unknown"
         def worker():
             if render_id is not None and render_id != self._render_id:
                 return
@@ -7421,13 +7423,21 @@ class VtpGridMixin:
         # render here overwrote user-refreshed thumbnails on the next app start.
         self._start_search_progressive_render(formatted_data, force_refresh=False)
 
-    def _describe_search_query(self, search_param, keyword, and_or, operator=None):
+    def _describe_search_query(self, search_param, keyword, and_or, operator=None, path_prefix=None):
         field = search_param or "all_fields"
         term = (keyword or "").strip()
         joiner = operator or and_or or "AND"
         if operator:
-            return f"{field} {operator} {term}"
-        return f"{field} {joiner} {term}"
+            text = f"{field} {operator} {term}"
+        else:
+            text = f"{field} {joiner} {term}"
+        if path_prefix:
+            try:
+                short = os.path.basename(path_prefix.rstrip("\\/")) or path_prefix
+            except Exception:
+                short = path_prefix
+            text = f"{text} [in {short}]"
+        return text
 
     def _normalize_search_media_scope(self, media_scope):
         scope = (media_scope or "All").strip().lower()
@@ -7453,29 +7463,85 @@ class VtpGridMixin:
                 filtered.append(row)
         return filtered
 
-    def open_search_window(self):
+    def _update_search_scope_ui(self):
+        """Refresh the search-window scope checkbox label from current settings."""
+        label = getattr(self, "search_scope_path_label", None)
+        if label is None:
+            return
+        try:
+            if not label.winfo_exists():
+                return
+        except Exception:
+            return
+
+        enabled = False
+        try:
+            enabled = bool(self.search_scope_only_var.get())
+        except Exception:
+            enabled = False
+
+        if not enabled:
+            try:
+                label.configure(text="")
+            except Exception:
+                pass
+            return
+
+        if getattr(self, "search_scope_pinned", False):
+            scope = getattr(self, "search_scope_path", None) or getattr(self, "current_directory", None) or ""
+            prefix = "Folder"
+        else:
+            scope = getattr(self, "current_directory", None) or ""
+            prefix = "Scope"
+        display = scope
+        if len(display) > 90:
+            display = "…" + display[-89:]
+        try:
+            label.configure(text=f"{prefix}: {display}" if display else f"{prefix}: (no folder)")
+        except Exception:
+            pass
+
+    def open_search_window(self, scope_directory=None):
         """
         Opens the search window. If it's already open, brings it to the front.
-        Uses the factory function from gui_elements.
+
+        Optional *scope_directory* enables folder-limited search (e.g. tree
+        ``Search folder``) without changing ``current_directory``.
         """
-        # If the window exists and is not destroyed, just focus it
+        if scope_directory:
+            # Pin to the RMB folder until the user clears/toggles the checkbox.
+            self.search_scope_path = scope_directory
+            self.search_scope_pinned = True
+            try:
+                self.search_scope_only_var.set(True)
+            except Exception:
+                pass
+        else:
+            # Hotkey / toolbar: never keep a stale pinned folder as "current".
+            self.search_scope_pinned = False
+            self.search_scope_path = None
+
+        # If the window exists and is not destroyed, just focus it (and refresh scope UI).
         if self.search_window is not None and self.search_window.winfo_exists():
+            self._update_search_scope_ui()
             self.search_window.lift()
             self.search_window.focus_force()
             return
 
         self._demo_toast("demo_search")
         # Create and store the new window object
-        self.search_window = create_search_window(self)    
-            
- 
+        self.search_window = create_search_window(self)
+        self._update_search_scope_ui()
 
-    def search_database(self, search_param, keyword, and_or, operator=None, media_scope="All"):
+
+    def search_database(self, search_param, keyword, and_or, operator=None, media_scope="All", path_prefix=None):
             """
             Executes a search query and formats results for the progressive renderer.
             Ensures that results are split into folders and files to prevent UI crashes.
             """
-            query_text = self._describe_search_query(search_param, keyword, and_or, operator)
+            query_text = self._describe_search_query(
+                search_param, keyword, and_or, operator, path_prefix=path_prefix
+            )
             media_scope = self._normalize_search_media_scope(media_scope)
             if media_scope != "All":
                 query_text = f"{query_text} [{media_scope}]"
@@ -7511,15 +7577,22 @@ class VtpGridMixin:
                 try:
                     started = time.perf_counter()
                     raw_results = list(
-                        self.database.search_entries(search_param, keyword, and_or, operator)
+                        self.database.search_entries(
+                            search_param,
+                            keyword,
+                            and_or,
+                            operator,
+                            path_prefix=path_prefix,
+                        )
                     )
                     new_results = self._filter_search_results_by_media_scope(raw_results, media_scope)
                     logging.info(
-                        "Search found %d/%d new results in %.3fs (scope=%s).",
+                        "Search found %d/%d new results in %.3fs (scope=%s, path_prefix=%s).",
                         len(new_results),
                         len(raw_results),
                         time.perf_counter() - started,
                         media_scope,
+                        path_prefix,
                     )
                     self.after(
                         0,
@@ -7594,10 +7667,25 @@ class VtpGridMixin:
                 return
 
             # Convert the new database results into the format expected by the renderer.
-            all_new_files = [
-                {'path': r['file_path'], 'name': r['filename'], 'is_folder': False}
-                for r in new_results
-            ]
+            # Many catalog rows have filename NULL — fall back to path basename so
+            # thumbnail code (file_name.lower()…) does not crash and skip the tile.
+            all_new_files = []
+            for r in new_results:
+                try:
+                    path = r.get("file_path") if hasattr(r, "get") else r["file_path"]
+                except Exception:
+                    path = None
+                try:
+                    name = r.get("filename") if hasattr(r, "get") else r["filename"]
+                except Exception:
+                    name = None
+                if not name:
+                    name = os.path.basename(path) if path else ""
+                if not path:
+                    continue
+                all_new_files.append(
+                    {"path": path, "name": name, "is_folder": False}
+                )
             if not clear_previous:
                 seen_paths = {
                     os.path.normcase(os.path.normpath(f.get('path', '')))

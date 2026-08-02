@@ -778,7 +778,221 @@ class Database:
             return left != right
         return False
 
-    def _search_by_file_size(self, keyword, operator):
+    @staticmethod
+    def _escape_like_literal(text: str) -> str:
+        """Escape ``\\``, ``%`` and ``_`` so they are literal in SQL LIKE."""
+        return (
+            str(text)
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+
+    @staticmethod
+    def _media_extension_set():
+        return {ext.lower() for ext in IMAGE_FORMATS + VIDEO_FORMATS}
+
+    def _looks_like_filename_with_extension(self, term: str) -> bool:
+        """True when *term* looks like a media filename (basename + known extension)."""
+        base = os.path.basename(str(term or "").strip())
+        if not base or base in (".", ".."):
+            return False
+        _, ext = os.path.splitext(base)
+        return bool(ext) and ext.lower() in self._media_extension_set()
+
+    def _normalize_search_path_prefix(self, path_prefix):
+        """
+        Normalize a folder scope for ``file_path LIKE`` prefix matching.
+
+        Returns a trailing-separator path so ``...\\foo`` does not match ``...\\foobar``.
+        """
+        if not path_prefix:
+            return None
+        try:
+            norm = self.normalize_path(path_prefix)
+        except Exception:
+            return None
+        if not norm:
+            return None
+        if not norm.endswith(os.sep):
+            norm = norm + os.sep
+        return norm
+
+    def _path_prefix_sql(self, path_prefix, params: dict):
+        """
+        Build ``AND file_path LIKE :path_prefix ESCAPE '\\'`` when a scope is set.
+
+        Returns (sql_fragment, updated_params). Fragment is '' when scope is unused.
+        """
+        prefix = self._normalize_search_path_prefix(path_prefix)
+        if not prefix:
+            return "", params
+        params = dict(params)
+        params["path_prefix"] = self._escape_like_literal(prefix) + "%"
+        return " AND file_path LIKE :path_prefix ESCAPE '\\'", params
+
+    def _text_search_columns(self, search_param: str, valid_columns: list) -> list:
+        """Columns used for text search. ``all_fields`` is limited to text-ish fields."""
+        text_cols = [
+            c
+            for c in ("filename", "file_path", "keywords", "media_title")
+            if c in valid_columns
+        ]
+        if search_param == "all_fields":
+            return text_cols or list(valid_columns)
+        if search_param == "file_size":
+            return []
+        if search_param in valid_columns:
+            return [search_param]
+        return []
+
+    def _path_basename_like_patterns(self, name_pattern: str) -> list:
+        """
+        LIKE patterns that match *name_pattern* as the path basename.
+
+        ``name_pattern`` may already contain ``%`` from glob conversion and must
+        already have literal ``%`` / ``_`` / ``\\`` escaped.
+        """
+        win = self._escape_like_literal("\\")
+        nix = self._escape_like_literal("/")
+        return [
+            f"%{win}{name_pattern}",
+            f"%{nix}{name_pattern}",
+            name_pattern,
+        ]
+
+    def _compile_text_search_term(self, raw_term: str, search_param: str) -> dict:
+        """
+        Compile one whitespace-separated search token.
+
+        Rules:
+        - Contains ``*``: glob → escape LIKE specials, then ``*`` → ``%``.
+        - Looks like ``name.ext`` (known media extension), no ``*``: exact basename.
+        - Otherwise: substring ``%term%``.
+
+        Filename-oriented modes also match ``file_path`` basenames because many
+        catalog rows have ``filename`` NULL and only populate ``file_path``.
+        """
+        term = (raw_term or "").strip()
+        has_glob = "*" in term
+        exact_name = (not has_glob) and self._looks_like_filename_with_extension(term)
+        filename_oriented = search_param in ("all_fields", "filename") or has_glob or exact_name
+
+        if has_glob or exact_name:
+            match_term = term.lower()
+            if has_glob:
+                return {
+                    "mode": "glob",
+                    "pattern": self._escape_like_literal(match_term).replace("*", "%"),
+                    "filename_oriented": True,
+                    "use_escape": True,
+                }
+            return {
+                "mode": "exact",
+                "pattern": match_term,
+                "filename_oriented": True,
+                "use_escape": False,
+            }
+
+        # Bare media stem (no extension): still basename-oriented so Name search
+        # hits file_path when filename is NULL (e.g. DJI_…_0542_D).
+        stem_oriented = (
+            filename_oriented
+            and ("_" in term or len(term) >= 8)
+            and "." not in os.path.basename(term)
+        )
+        return {
+            "mode": "substring",
+            "pattern": f"%{self._escape_like_literal(term)}%",
+            "filename_oriented": filename_oriented,
+            "stem_oriented": stem_oriented,
+            "stem": term.lower() if stem_oriented else None,
+            "use_escape": True,
+        }
+
+    def _append_term_clause(self, query_parts, params, index, compiled, operator, search_columns):
+        """Append one AND/OR clause for a compiled text term; mutate params."""
+        term_key = f"term_{index}"
+        mode = compiled["mode"]
+        pattern = compiled["pattern"]
+        use_escape = compiled.get("use_escape", False)
+        escape_sql = " ESCAPE '\\'" if use_escape else ""
+        negate = operator == "!="
+        pieces = []
+
+        if mode == "exact":
+            params[term_key] = pattern
+            esc_name = self._escape_like_literal(pattern)
+            if negate:
+                pieces.append(f"(filename IS NULL OR filename != :{term_key})")
+            else:
+                pieces.append(f"filename = :{term_key}")
+            # Basename via file_path (covers NULL filename rows).
+            for j, path_pat in enumerate(self._path_basename_like_patterns(esc_name)):
+                pk = f"{term_key}_p{j}"
+                params[pk] = path_pat
+                if negate:
+                    pieces.append(f"(file_path IS NULL OR file_path NOT LIKE :{pk} ESCAPE '\\')")
+                else:
+                    pieces.append(f"file_path LIKE :{pk} ESCAPE '\\'")
+
+        elif mode == "glob":
+            params[term_key] = pattern
+            if negate:
+                pieces.append(f"(filename IS NULL OR filename NOT LIKE :{term_key}{escape_sql})")
+            else:
+                pieces.append(f"filename LIKE :{term_key}{escape_sql}")
+            for j, path_pat in enumerate(self._path_basename_like_patterns(pattern)):
+                pk = f"{term_key}_p{j}"
+                params[pk] = path_pat
+                if negate:
+                    pieces.append(f"(file_path IS NULL OR file_path NOT LIKE :{pk}{escape_sql})")
+                else:
+                    pieces.append(f"file_path LIKE :{pk}{escape_sql}")
+
+        else:  # substring
+            params[term_key] = pattern
+            cols = list(search_columns)
+            # Name / all_fields must consult file_path — filename is often unset.
+            if compiled.get("filename_oriented"):
+                if "file_path" not in cols:
+                    cols.append("file_path")
+                if "filename" not in cols:
+                    cols.insert(0, "filename")
+            for col in cols:
+                if negate:
+                    pieces.append(f"({col} IS NULL OR {col} NOT LIKE :{term_key}{escape_sql})")
+                else:
+                    pieces.append(f"{col} LIKE :{term_key}{escape_sql}")
+
+            # Bare stem "DJI_…_0542_D" → also match "DJI_…_0542_D.jpg" as basename.
+            stem = compiled.get("stem")
+            if stem and not negate:
+                stem_pat = self._escape_like_literal(stem) + ".%"
+                for j, path_pat in enumerate(self._path_basename_like_patterns(stem_pat)):
+                    pk = f"{term_key}_s{j}"
+                    params[pk] = path_pat
+                    pieces.append(f"file_path LIKE :{pk} ESCAPE '\\'")
+                params[f"{term_key}_sf"] = stem_pat
+                pieces.append(f"filename LIKE :{term_key}_sf ESCAPE '\\'")
+
+        if not pieces:
+            return
+        joiner = " AND " if negate else " OR "
+        query_parts.append(f"({joiner.join(pieces)})")
+
+    def _row_in_path_prefix(self, file_path, path_prefix) -> bool:
+        prefix = self._normalize_search_path_prefix(path_prefix)
+        if not prefix:
+            return True
+        if not file_path:
+            return False
+        try:
+            return self.normalize_path(file_path).startswith(prefix)
+        except Exception:
+            return str(file_path).lower().startswith(prefix.lower())
+
+    def _search_by_file_size(self, keyword, operator, path_prefix=None):
         try:
             target_bytes = self._parse_file_size_query_bytes(keyword)
         except ValueError:
@@ -791,6 +1005,8 @@ class Database:
             file_path = row.get("file_path")
             if not file_path:
                 continue
+            if not self._row_in_path_prefix(file_path, path_prefix):
+                continue
             try:
                 size_bytes = float(os.path.getsize(file_path))
             except OSError:
@@ -798,31 +1014,33 @@ class Database:
             if self._compare_numeric(size_bytes, operator, target_bytes):
                 matched.append(row)
         logging.debug(
-            "file_size search matched %d/%d rows operator=%s target_bytes=%s",
+            "file_size search matched %d/%d rows operator=%s target_bytes=%s prefix=%s",
             len(matched),
             len(rows),
             operator,
             target_bytes,
+            path_prefix,
         )
         return matched
     
-    def search_entries(self, search_param, keyword, and_or=None, operator=None):
+    def search_entries(self, search_param, keyword, and_or=None, operator=None, path_prefix=None):
         try:
             search_param = {
                 "name": "filename",
                 "path": "file_path",
             }.get(search_param, search_param)
             logging.debug(
-                "search_entries: param=%s keyword=%s operator=%s and_or=%s",
+                "search_entries: param=%s keyword=%s operator=%s and_or=%s path_prefix=%s",
                 search_param,
                 keyword,
                 operator,
                 and_or,
+                path_prefix,
             )
 
             # Handle numeric comparisons
             if operator in ('<=', '>=', '<', '>', '=', '!=') and search_param == 'file_size':
-                return self._search_by_file_size(keyword, operator)
+                return self._search_by_file_size(keyword, operator, path_prefix=path_prefix)
 
             if operator in ('<=', '>=', '<', '>', '=', '!=') and search_param in ['rating', 'width', 'height', 'duration']:
                 try:
@@ -832,42 +1050,37 @@ class Database:
                     return []
 
                 # Build and execute numeric comparison query
-                query = f"SELECT * FROM files WHERE {search_param} {operator} :value AND {search_param} > 0"
                 params = {'value': value}
+                scope_sql, params = self._path_prefix_sql(path_prefix, params)
+                query = (
+                    f"SELECT * FROM files WHERE {search_param} {operator} :value "
+                    f"AND {search_param} > 0{scope_sql}"
+                )
                 logging.debug("search_entries query: %s params=%s", query, params)
                 return self.db.query(query, **params)
 
             # Handle text searches (AND/OR logic)
-            keywords = [kw.strip() for kw in keyword.split()]
+            keywords = [kw.strip() for kw in keyword.split() if kw.strip()]
             valid_columns = self.get_valid_columns()
-
-            # Validate the search columns
-            search_columns = (
-                valid_columns if search_param == "all_fields" 
-                else [] if search_param == "file_size"
-                else [search_param] if search_param in valid_columns 
-                else []
-            )
+            search_columns = self._text_search_columns(search_param, valid_columns)
             if not search_columns:
                 logging.info(f"[Error] Invalid search field: {search_param}")
                 return []
 
-            # Build the query for text searches
             query_parts = []
             params = {}
             for i, kw in enumerate(keywords):
-                if operator == "!=":
-                    subquery = " AND ".join([
-                        f"({col} IS NULL OR {col} NOT LIKE :term_{i})"
-                        for col in search_columns
-                    ])
-                else:
-                    subquery = " OR ".join([f"{col} LIKE :term_{i}" for col in search_columns])
-                query_parts.append(f"({subquery})")
-                params[f"term_{i}"] = f"%{kw}%"
+                compiled = self._compile_text_search_term(kw, search_param)
+                self._append_term_clause(
+                    query_parts, params, i, compiled, operator, search_columns
+                )
+
+            if not query_parts:
+                return []
 
             joiner = " AND " if and_or == 'AND' or operator in ("=", "!=") else " OR "
-            query = f"SELECT * FROM files WHERE {joiner.join(query_parts)}"
+            scope_sql, params = self._path_prefix_sql(path_prefix, params)
+            query = f"SELECT * FROM files WHERE {joiner.join(query_parts)}{scope_sql}"
             logging.debug("search_entries query: %s params=%s", query, params)
             return self.db.query(query, **params)
 
@@ -875,6 +1088,4 @@ class Database:
             logging.info(f"[Error] search_entries failed: {e}")
             return []
 
-
-        
  

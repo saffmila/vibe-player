@@ -571,7 +571,11 @@ class VideoThumbnailPlayer(
        
         # Variable to hold the state of the checkbox (True/False)
         # We'll set the default to True, so clearing results is the initial behavior.
-        self.clear_search_var = ctk.BooleanVar(value=True) 
+        self.clear_search_var = ctk.BooleanVar(value=True)
+        # Limit DB search to a folder prefix (checkbox + optional explicit path from tree RMB).
+        self.search_scope_only_var = ctk.BooleanVar(value=False)
+        self.search_scope_path = None  # pinned folder from tree "Search folder"
+        self.search_scope_pinned = False  # True only while scope comes from RMB Search folder
         # A list to store and accumulate search results
         self.current_search_results = []
         self.search_results_active = False
@@ -2354,6 +2358,10 @@ class VideoThumbnailPlayer(
             label="Refresh Wide Previews",
             command=lambda: self.refresh_folder_wide_thumbnail(file_path),
             state=tk.NORMAL if _wide else tk.DISABLED,
+        )
+        menu.add_command(
+            label="Search folder",
+            command=lambda fp=file_path: self.open_search_window(scope_directory=fp),
         )
         menu.add_separator()
         

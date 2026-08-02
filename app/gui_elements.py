@@ -2983,6 +2983,24 @@ def open_cache_folder(app):
         messagebox.showinfo("Cache Folder Not Found", "The thumbnail cache folder does not exist.")
 
 
+def _resolve_search_path_prefix(app):
+    """Return the folder scope for search, or None when scope limiting is off.
+
+    - Pinned scope (tree ``Search folder``) uses ``search_scope_path``.
+    - Otherwise the live ``current_directory`` (checkbox label means current view).
+    """
+    try:
+        if not bool(app.search_scope_only_var.get()):
+            return None
+    except Exception:
+        return None
+    if getattr(app, "search_scope_pinned", False):
+        scope = getattr(app, "search_scope_path", None) or getattr(app, "current_directory", None)
+    else:
+        scope = getattr(app, "current_directory", None)
+    return scope if scope else None
+
+
 def perform_search(app, search_param, keyword, operator, media_scope="All"):
     if not keyword.strip():  # Check if the keyword is empty or just spaces
         logging.info("Empty search keyword. Please provide a valid keyword.")
@@ -2994,14 +3012,25 @@ def perform_search(app, search_param, keyword, operator, media_scope="All"):
         logging.info(f"Invalid operator: {operator}. Expected one of {valid_operators}")
         return
 
+    path_prefix = _resolve_search_path_prefix(app)
+
     # If operator is AND/OR, assume a non-comparison search
     if operator in ['AND', 'OR']:
         logging.info(f"Performing non-comparison search with AND/OR operator: {operator}")
-        app.search_database(search_param, keyword, operator, media_scope=media_scope)
+        app.search_database(
+            search_param, keyword, operator, media_scope=media_scope, path_prefix=path_prefix
+        )
         
     else:
         logging.info(f"Performing comparison search with operator: {operator}")
-        app.search_database(search_param, keyword, "AND", operator, media_scope=media_scope)  # Default AND for comparisons
+        app.search_database(
+            search_param,
+            keyword,
+            "AND",
+            operator,
+            media_scope=media_scope,
+            path_prefix=path_prefix,
+        )  # Default AND for comparisons
 
     
     
@@ -3010,14 +3039,14 @@ def create_search_window(app):
     search_window = ctk.CTkToplevel(app)
     search_window.title("Search")
     
-    _sw, _sh = 760, 500
+    _sw, _sh = 760, 540
     if hasattr(app, "_center_toplevel_window"):
         app._center_toplevel_window(search_window, _sw, _sh)
     else:
         search_window.geometry(f"{_sw}x{_sh}")
-    search_window.minsize(680, 430)
+    search_window.minsize(680, 460)
     search_window.attributes('-topmost', True) 
-    # Add a frame for the search parameter selection
+    # Top row: field selectors + Search button (query entry is on the next full-width row).
     search_frame = ctk.CTkFrame(search_window)
     search_frame.pack(side=ctk.TOP, fill=ctk.X, padx=10, pady=5)
 
@@ -3030,10 +3059,6 @@ def create_search_window(app):
     search_param_combobox = ctk.CTkComboBox(search_frame, values=search_values, width=140)
     search_param_combobox.set('all_fields')  # Default to "All Fields"
     search_param_combobox.pack(side=ctk.LEFT, padx=(0, 10))
-
-    # Add the search entry
-    search_entry = ctk.CTkEntry(search_frame, placeholder_text="Enter keyword or use <=, >= for comparisons")
-    search_entry.pack(side=ctk.LEFT, padx=(0, 10), fill=ctk.X, expand=True)
 
     # Add AND/OR/<=/>=/=/!= combobox
     and_or_combobox = ctk.CTkComboBox(
@@ -3063,12 +3088,65 @@ def create_search_window(app):
         command=lambda: perform_search(
             app,
             search_param_combobox.get(),
-            search_entry.get(),
+            search_entry.get().strip(),
             and_or_combobox.get(),
             media_scope_combobox.get(),
         ),
     )
-    search_button.pack(side=ctk.LEFT, padx=(0, 0))
+    search_button.pack(side=ctk.RIGHT, padx=(0, 0))
+
+    # Full-width query row: CTkEntry is cramped in the top bar and x-scrolls poorly
+    # on long filenames, so the entry lives here with caret-follow + live preview.
+    query_frame = ctk.CTkFrame(search_window, fg_color="transparent")
+    query_frame.pack(side=ctk.TOP, fill=ctk.X, padx=10, pady=(0, 4))
+
+    query_label = ctk.CTkLabel(query_frame, text="Query:")
+    query_label.pack(side=ctk.LEFT, padx=(0, 8))
+
+    search_entry = ctk.CTkEntry(
+        query_frame,
+        placeholder_text="Enter keyword, name.ext, or wildcards like 013*.png / *DJI*",
+    )
+    search_entry.pack(side=ctk.LEFT, fill=ctk.X, expand=True)
+
+    query_preview = ctk.CTkLabel(
+        search_window,
+        text="",
+        anchor="w",
+        text_color="#8fa3b8",
+        font=ctk.CTkFont(size=11),
+        wraplength=720,
+        justify="left",
+    )
+    query_preview.pack(fill=ctk.X, padx=28, pady=(0, 4))
+
+    def _sync_query_preview(_event=None):
+        text = search_entry.get()
+        query_preview.configure(text=f"Query text: {text}" if text else "")
+        # Keep the caret visible: CTkEntry often fails to x-scroll long strings.
+        try:
+            inner = search_entry._entry
+            # Tcl entry xview <index> puts that character at the left edge — good enough
+            # to reveal the typing caret on long DJI-style names.
+            inner.tk.call(inner._w, "xview", "insert")
+        except Exception:
+            try:
+                inner = search_entry._entry
+                length = max(1, len(inner.get()))
+                insert = int(inner.index("insert"))
+                inner.xview_moveto(max(0.0, (insert - 10) / float(length)))
+            except Exception:
+                pass
+
+    search_entry.bind("<KeyRelease>", _sync_query_preview)
+    search_entry.bind("<ButtonRelease-1>", _sync_query_preview)
+    search_entry.bind("<FocusIn>", _sync_query_preview)
+    search_entry.bind("<Left>", lambda e: search_window.after_idle(_sync_query_preview))
+    search_entry.bind("<Right>", lambda e: search_window.after_idle(_sync_query_preview))
+    search_entry.bind("<Control-a>", lambda e: (search_entry.select_range(0, "end"), "break"))
+    search_entry.bind("<Return>", lambda e: search_button.invoke())
+    app.search_entry = search_entry
+    app.search_query_preview = query_preview
 
     # Add a CTkTextbox for the keyword list
     keyword_listbox = ctk.CTkTextbox(search_window, height=150, width=50)
@@ -3193,8 +3271,9 @@ def create_search_window(app):
              "1. Use 'AND' or 'OR' for combining multiple terms.\n"
              "2. Use '=', '!=', '<=', '>=', '<', or '>' to compare numerical fields (e.g., rating).\n"
              "3. Type filters results to All, Videos, or Images.\n"
-             "4. Double-click a keyword to add it to the search field.\n"
-             "5. Right-click a keyword to rename or delete it across all files.",
+             "4. Use * as a wildcard (e.g. 013*.png). A bare name.ext matches that filename exactly.\n"
+             "5. Double-click a keyword to add it to the search field.\n"
+             "6. Right-click a keyword to rename or delete it across all files.",
         wraplength=720, justify="left"
     )
     instructions_label.pack(fill=ctk.X, padx=10, pady=5)
@@ -3224,6 +3303,46 @@ def create_search_window(app):
     if hasattr(app, "_update_search_restore_button_state"):
         app._update_search_restore_button_state()
     restore_button.pack(side=ctk.RIGHT, padx=(10, 0))
+
+    scope_frame = ctk.CTkFrame(search_window, fg_color="transparent")
+    scope_frame.pack(fill=ctk.X, padx=10, pady=(0, 2), anchor="w")
+
+    def _on_scope_checkbox_toggle():
+        # Checkbox label is "current directory only" — always use the live view folder.
+        # Clear any previously pinned RMB folder so a stale drive/path cannot stick.
+        app.search_scope_pinned = False
+        app.search_scope_path = None
+        if hasattr(app, "_update_search_scope_ui"):
+            app._update_search_scope_ui()
+
+    scope_checkbox = ctk.CTkCheckBox(
+        scope_frame,
+        text="Search in current directory only",
+        variable=app.search_scope_only_var,
+        command=_on_scope_checkbox_toggle,
+        onvalue=True,
+        offvalue=False,
+        width=14,
+        height=14,
+        checkbox_width=14,
+        checkbox_height=14,
+        border_width=2,
+        font=ctk.CTkFont(size=11),
+    )
+    scope_checkbox.pack(side=ctk.LEFT, anchor="w")
+    app.search_scope_checkbox = scope_checkbox
+
+    scope_path_label = ctk.CTkLabel(
+        search_window,
+        text="",
+        anchor="w",
+        text_color="#8fa3b8",
+        font=ctk.CTkFont(size=11),
+    )
+    scope_path_label.pack(fill=ctk.X, padx=28, pady=(0, 2))
+    app.search_scope_path_label = scope_path_label
+    if hasattr(app, "_update_search_scope_ui"):
+        app._update_search_scope_ui()
 
     clear_results_checkbox = ctk.CTkCheckBox(
         search_window,
