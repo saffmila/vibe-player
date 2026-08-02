@@ -1484,7 +1484,9 @@ def get_file_metadata(path):
             ext = path.lower()
             if ext.endswith(IMAGE_FORMATS):
                 metadata["width"], metadata["height"] = get_pil_image_size(path)
-                if not path.lower().endswith((".psd", ".psb")):
+                if not path.lower().endswith(
+                    (".psd", ".psb", ".af", ".afphoto", ".afdesign", ".afpub")
+                ):
                     try:
                         # EXIF description only — open lazily, no full decode required for tag read.
                         with Image.open(path) as img:

@@ -437,10 +437,15 @@ class VtpDndMixin:
                 self._dnd_release_preview_handles()
             except Exception:
                 logging.debug("[DnD] preview release before op failed", exc_info=True)
+            with_captions = bool(getattr(self, "copy_move_with_captions", True))
             if getattr(self, "dnd_confirm_dialogs", False):
-                self._dnd_show_dialog_and_run(sources, dest, is_move, on_success)
+                self._dnd_show_dialog_and_run(
+                    sources, dest, is_move, on_success, with_captions=with_captions
+                )
             else:
-                self._dnd_start_copy_move(sources, dest, is_move, on_success)
+                self._dnd_start_copy_move(
+                    sources, dest, is_move, on_success, with_captions=with_captions
+                )
 
         self.after(1, _deferred)
 
@@ -616,15 +621,23 @@ class VtpDndMixin:
         dest: str,
         is_move: bool,
         on_success=None,
+        with_captions: bool | None = None,
     ):
         """Open progress (if needed) on UI thread, then run copy/move in a worker."""
+        if with_captions is None:
+            with_captions = bool(getattr(self, "copy_move_with_captions", True))
         progress = None
         if self._dnd_should_show_progress(sources):
             progress = self._dnd_open_progress_dialog(sources, is_move)
 
         threading.Thread(
             target=lambda: self._dnd_execute_copy_move_thread(
-                sources, dest, is_move, on_success, progress=progress
+                sources,
+                dest,
+                is_move,
+                on_success,
+                progress=progress,
+                with_captions=with_captions,
             ),
             daemon=True,
         ).start()
@@ -910,8 +923,14 @@ class VtpDndMixin:
         is_move: bool,
         on_success=None,
         progress=None,
+        with_captions: bool = True,
     ):
         """Run copy/move in a worker; report results on main thread via after()."""
+        from caption_editor_widget import (
+            filter_covered_caption_txt_sources,
+            transfer_caption_sidecar,
+        )
+
         action = "move" if is_move else "copy"
         action_past = "moved" if is_move else "copied"
         dest_name = os.path.basename(dest) or dest
@@ -921,6 +940,11 @@ class VtpDndMixin:
         rename_all = False
         skip_all = False
         cancelled = False
+        captions_done = 0
+
+        sources = filter_covered_caption_txt_sources(
+            list(sources or []), with_captions=bool(with_captions)
+        )
         total = len(sources)
 
         if hasattr(self, "suspend_directory_watcher"):
@@ -1032,6 +1056,11 @@ class VtpDndMixin:
                         time.sleep(0.05 * (attempt + 1))
                 if last_err is not None:
                     raise last_err
+
+                if with_captions and (not is_dir) and src.lower().endswith(IMAGE_FORMATS):
+                    if transfer_caption_sidecar(src, dst, is_move=is_move):
+                        captions_done += 1
+
                 changed_folders = self._dnd_sync_db_cache(
                     src, dst, is_dir=is_dir, is_move=is_move
                 )
@@ -1052,6 +1081,8 @@ class VtpDndMixin:
                 self.resume_directory_watcher(restart=True)
             if ok:
                 msg = f"DnD: {action_past} {len(ok)} item(s) -> {dest_name}"
+                if captions_done:
+                    msg += f" (+{captions_done} caption)"
                 if cancelled:
                     msg += " (canceled)"
                 self.status_bar.set_action_message(msg)
@@ -1139,9 +1170,12 @@ class VtpDndMixin:
         sources: list[str],
         dest: str,
         is_move: bool,
-        on_success=None
+        on_success=None,
+        with_captions: bool = True,
     ):
         """Show confirmation dialog then run operation in a thread."""
+        from caption_editor_widget import count_caption_sidecars
+
         action      = "move" if is_move else "copy"
         dest_name   = os.path.basename(dest) or dest
 
@@ -1154,15 +1188,30 @@ class VtpDndMixin:
             detail = "\n".join(f"  {os.path.basename(s)}" for s in sources[:4])
             detail += f"\n  ... and {n - 4} more item(s)"
 
+        n_caps = count_caption_sidecars(sources)
         msg = f"Do you want to {action} {n} item(s)?\n\n{detail}\n\nDestination: {dest}"
+        if n_caps:
+            msg += f"\n\n{n_caps} image(s) have caption (.txt) sidecars."
         title = f"{'Move' if is_move else 'Copy'} - confirmation"
+
+        caption_var = None
+        checkbox_text = None
+        if n_caps > 0:
+            caption_var = tk.BooleanVar(value=bool(with_captions))
+            verb = "Move" if is_move else "Copy"
+            checkbox_text = f"{verb} with caption (.txt)"
 
         def _confirm_run():
             try:
                 self._dnd_release_preview_handles()
             except Exception:
                 pass
-            self._dnd_start_copy_move(sources, dest, is_move, on_success)
+            chosen = bool(caption_var.get()) if caption_var is not None else bool(with_captions)
+            # Remember last choice for silent DnD / paste
+            self.copy_move_with_captions = chosen
+            self._dnd_start_copy_move(
+                sources, dest, is_move, on_success, with_captions=chosen
+            )
 
         def _cancel_run():
             logging.info("[DnD] Operation canceled by user.")
@@ -1174,7 +1223,9 @@ class VtpDndMixin:
             cancel_callback=_cancel_run,
             confirm_text="Yes",
             cancel_text="No",
-            show_cancel=True
+            show_cancel=True,
+            checkbox_text=checkbox_text,
+            checkbox_variable=caption_var,
         )
 
     def _dnd_on_position_tree(self, event):

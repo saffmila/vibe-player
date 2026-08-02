@@ -6,7 +6,7 @@ preview rotation) and remapped to the canvas on every pan / zoom / resize.
 
 Rotation is Photoshop-style: the crop box stays axis-aligned; the image rotates
 underneath. Interactive preview uses a throttled BILINEAR rotate; Apply uses
-LANCZOS from the snapshotted base frames, then crops.
+BICUBIC from the snapshotted base frames, then crops.
 """
 
 from __future__ import annotations
@@ -303,7 +303,7 @@ class CropOverlayHUD(ctk.CTkFrame):
         self.apply_btn = ctk.CTkButton(
             apply_wrap,
             text="Apply",
-            command=self._on_apply_overwrite,
+            command=lambda: self._run_apply_action(self._on_apply_overwrite),
             width=64,
             height=_CTRL_H,
             corner_radius=_CORNER,
@@ -326,10 +326,10 @@ class CropOverlayHUD(ctk.CTkFrame):
         )
         self.menu_btn.pack(side="left")
 
-        # Custom drop-up (not tk.Menu): avoids Windows grab / click-through bugs
-        # that re-open the menu instead of showing the Save dialog.
+        # Drop-up panel placed on the HUD (not tk.Menu / not a separate Toplevel).
         self._apply_panel = None
         self._menu_guard = False
+        self._outside_bind_id = None
 
     def _mode_chosen(self, value: str):
         mode = _TOOL_ROTATE if str(value).lower().startswith("rot") else _TOOL_CROP
@@ -366,11 +366,13 @@ class CropOverlayHUD(ctk.CTkFrame):
         pop = self._apply_panel
         self._apply_panel = None
         if pop is None:
+            logging.info("[crop-hud] dismiss apply panel (already closed)")
             return
+        logging.info("[crop-hud] dismiss apply panel")
         try:
             pop.destroy()
-        except Exception:
-            pass
+        except Exception as e:
+            logging.info("[crop-hud] dismiss apply panel failed: %s", e)
 
     def _unlock_menu(self):
         self._menu_guard = False
@@ -380,62 +382,69 @@ class CropOverlayHUD(ctk.CTkFrame):
             pass
 
     def _run_apply_action(self, fn: Callable[[], None]):
-        """Close the drop-up, then run ``fn`` after the UI has settled."""
-        if self._menu_guard:
-            return
-        self._menu_guard = True
-        try:
-            self.menu_btn.configure(state="disabled")
-        except Exception:
-            pass
+        """Close the drop-up (if any), then run ``fn`` on the next tick."""
+        logging.info("[crop-hud] run apply action %s", getattr(fn, "__name__", fn))
         self._dismiss_apply_panel()
+        self._menu_guard = False
 
         def _go():
-            win = self.winfo_toplevel()
-            was_topmost = False
-            try:
-                # Topmost viewer often hides / blocks the native Save dialog on Windows.
-                was_topmost = bool(win.attributes("-topmost"))
-                if was_topmost:
-                    win.attributes("-topmost", False)
-                    win.update_idletasks()
-            except Exception:
-                was_topmost = False
             try:
                 fn()
             except Exception as e:
-                logging.info("Crop apply panel action failed: %s", e)
+                logging.info("Crop apply action failed: %s", e, exc_info=True)
+                try:
+                    messagebox.showerror(
+                        "Crop",
+                        f"Apply failed:\n{e}",
+                        parent=self.winfo_toplevel(),
+                    )
+                except Exception:
+                    pass
             finally:
-                if was_topmost:
-                    try:
-                        win.attributes("-topmost", True)
-                    except Exception:
-                        pass
-                # Keep ▴ disabled briefly so the dismissing click cannot reopen it.
-                self.after(200, self._unlock_menu)
+                self._unlock_menu()
 
-        self.after(60, _go)
+        self.after(30, _go)
+
+    def _run_apply_action_named(self, label: str, fn: Callable[[], None]):
+        logging.info("[crop-hud] panel item clicked: %s", label)
+        self._run_apply_action(fn)
 
     def _toggle_apply_panel(self):
-        """Show / hide the Apply options panel above the button."""
-        if self._menu_guard:
-            return
+        """Show / hide the Apply options as a screen-positioned drop-up window."""
+        logging.info(
+            "[crop-hud] ▴ clicked; panel_open=%s guard=%s",
+            self._apply_panel is not None,
+            self._menu_guard,
+        )
         if self._apply_panel is not None:
             self._dismiss_apply_panel()
             return
 
         self.update_idletasks()
-        pop = tk.Toplevel(self)
+        try:
+            bx = int(self.apply_btn.winfo_rootx())
+            by = int(self.apply_btn.winfo_rooty())
+            bw = max(int(self.apply_btn.winfo_width()), 64)
+            mw = max(int(self.menu_btn.winfo_width()), 28)
+        except Exception as e:
+            logging.info("[crop-hud] measure apply buttons failed: %s", e)
+            bx = by = 100
+            bw = mw = 64
+
+        pw = max(180, bw + mw + 8)
+        # 3 rows × ~30px + padding
+        ph = 3 * 32 + 12
+
+        # Independent toplevel + screen geometry — reliable on multi-monitor /
+        # fullscreen / overrideredirect (place() on the viewer was off-screen).
+        pop = tk.Toplevel(self.winfo_toplevel())
         pop.withdraw()
         pop.overrideredirect(True)
         try:
             pop.attributes("-topmost", True)
         except Exception:
             pass
-        pop.configure(bg="#2d2d2d")
-
-        wrap = ctk.CTkFrame(pop, fg_color=_ENTRY_FG, corner_radius=6, border_width=1, border_color="#555555")
-        wrap.pack(fill="both", expand=True, padx=1, pady=1)
+        pop.configure(bg="#2b2b2b", highlightthickness=1, highlightbackground="#555555")
 
         items = (
             ("Apply (Overwrite)", self._on_apply_overwrite),
@@ -443,65 +452,51 @@ class CropOverlayHUD(ctk.CTkFrame):
             ("Copy to Clipboard", self._on_apply_clipboard),
         )
         for label, fn in items:
-            ctk.CTkButton(
-                wrap,
-                text=label,
-                command=lambda f=fn: self._run_apply_action(f),
-                height=28,
-                corner_radius=4,
-                fg_color="transparent",
-                hover_color=_BTN_PRIMARY,
+            btn = tk.Button(
+                pop,
+                text=f"  {label}",
                 anchor="w",
-                font=ctk.CTkFont(size=12),
-            ).pack(fill="x", padx=4, pady=2)
+                command=lambda f=fn, lab=label: self._run_apply_action_named(lab, f),
+                bg="#2b2b2b",
+                fg="#ffffff",
+                activebackground=_BTN_PRIMARY,
+                activeforeground="#ffffff",
+                relief="flat",
+                bd=0,
+                padx=10,
+                pady=6,
+                font=("Segoe UI", 10),
+            )
+            btn.pack(fill="x")
 
         pop.update_idletasks()
-        pw = max(168, wrap.winfo_reqwidth() + 4)
-        ph = max(96, wrap.winfo_reqheight() + 4)
-        x = self.apply_btn.winfo_rootx()
-        y = max(0, self.apply_btn.winfo_rooty() - ph - 4)
-        pop.geometry(f"{pw}x{ph}+{x}+{y}")
+        ph = max(ph, int(pop.winfo_reqheight()))
+        pw = max(pw, int(pop.winfo_reqwidth()))
+        px = bx
+        py = max(0, by - ph - 4)
+        pop.geometry(f"{pw}x{ph}+{px}+{py}")
         pop.deiconify()
         pop.lift()
+        try:
+            pop.focus_force()
+        except Exception:
+            pass
         self._apply_panel = pop
+        logging.info(
+            "[crop-hud] apply panel geometry %sx%s+%s+%s (btn root=%s,%s)",
+            pw,
+            ph,
+            px,
+            py,
+            bx,
+            by,
+        )
 
         def _on_escape(_event=None):
             self._dismiss_apply_panel()
             return "break"
 
         pop.bind("<Escape>", _on_escape)
-        # Click outside → dismiss (bind once on the viewer window).
-        try:
-            top = self.winfo_toplevel()
-            top.bind("<ButtonPress-1>", self._on_outside_apply_panel, add="+")
-        except Exception:
-            pass
-
-    def _on_outside_apply_panel(self, event):
-        pop = self._apply_panel
-        if pop is None:
-            return
-        xr, yr = event.x_root, event.y_root
-        # Ignore clicks on ▴ (toggle closes/opens itself).
-        try:
-            bx = self.menu_btn.winfo_rootx()
-            by = self.menu_btn.winfo_rooty()
-            bw = self.menu_btn.winfo_width()
-            bh = self.menu_btn.winfo_height()
-            if bx <= xr <= bx + bw and by <= yr <= by + bh:
-                return
-        except Exception:
-            pass
-        try:
-            px = pop.winfo_rootx()
-            py = pop.winfo_rooty()
-            pw = pop.winfo_width()
-            ph = pop.winfo_height()
-            if px <= xr <= px + pw and py <= yr <= py + ph:
-                return
-        except Exception:
-            pass
-        self._dismiss_apply_panel()
 
     def set_size_fields(self, width: int, height: int):
         """Update W/H entries without firing size-change callbacks."""
@@ -1266,6 +1261,13 @@ class CropModeController:
         """Rotate clockwise by ``angle_cw`` degrees with expand=True."""
         if abs(angle_cw) < 1e-6:
             return im.copy()
+        # Pillow Image.rotate only allows NEAREST / BILINEAR / BICUBIC (not LANCZOS).
+        if resample not in (
+            PILImage.NEAREST,
+            PILImage.BILINEAR,
+            PILImage.BICUBIC,
+        ):
+            resample = PILImage.BICUBIC
         # Pillow positive angle is counter-clockwise.
         fill = (0, 0, 0, 0) if "A" in (im.mode or "") else (0, 0, 0)
         try:
@@ -1377,7 +1379,7 @@ class CropModeController:
         return (x0, y0, x1, y1)
 
     def _build_output_frames(self):
-        """Rotate base frames (LANCZOS) then crop — used for Apply / Copy / Clipboard."""
+        """Rotate base frames (BICUBIC — LANCZOS is not valid for Image.rotate) then crop."""
         box = self._crop_box()
         if box is None or not self._base_frames:
             return None
@@ -1386,7 +1388,7 @@ class CropModeController:
         work_w, work_h = self.v.original_image.size
         out = []
         for src in self._base_frames:
-            im = self._rotate_pil(src, angle, resample=PILImage.LANCZOS)
+            im = self._rotate_pil(src, angle, resample=PILImage.BICUBIC)
             x0, y0, x1, y1 = box
             if im.size != (work_w, work_h) and work_w > 0 and work_h > 0:
                 sx = im.size[0] / float(work_w)
@@ -1431,12 +1433,83 @@ class CropModeController:
         else:
             first.save(path)
 
+    def _dialog_parent(self):
+        """Best parent for native dialogs (viewer window when usable)."""
+        win = self.v.image_window
+        try:
+            if win.winfo_exists():
+                return win
+        except Exception:
+            pass
+        return self.hud
+
+    def _with_native_dialogs(self, fn):
+        """
+        Run ``fn`` with the viewer temporarily safe for Win32 file/message dialogs.
+
+        Borderless (overrideredirect) + topmost windows commonly swallow or hide
+        Tk filedialog / messagebox on Windows — Apply / Save as Copy look dead.
+        """
+        win = self.v.image_window
+        was_topmost = False
+        was_override = False
+        try:
+            was_topmost = str(win.attributes("-topmost")) == "1"
+        except Exception:
+            was_topmost = False
+        try:
+            was_override = bool(win.overrideredirect())
+        except Exception:
+            was_override = False
+
+        try:
+            if was_topmost:
+                win.attributes("-topmost", False)
+            if was_override:
+                win.overrideredirect(False)
+            try:
+                win.update_idletasks()
+            except Exception:
+                pass
+            return fn()
+        finally:
+            try:
+                if was_override:
+                    win.overrideredirect(True)
+                if was_topmost:
+                    win.attributes("-topmost", True)
+            except Exception:
+                pass
+
     def apply(self, mode: str = "overwrite"):
         """mode: 'overwrite' | 'copy' | 'clipboard'."""
-        frames = self._cropped_frames()
-        if not frames:
+        try:
+            frames = self._cropped_frames()
+        except Exception as e:
+            logging.info("Crop build frames failed: %s", e, exc_info=True)
+            parent = self._dialog_parent()
+
+            def _err():
+                messagebox.showerror("Crop", f"Could not build crop:\n{e}", parent=parent)
+
+            self._with_native_dialogs(_err)
             return
+
+        if not frames:
+            parent = self._dialog_parent()
+
+            def _empty():
+                messagebox.showwarning(
+                    "Crop",
+                    "Nothing to apply — crop selection is invalid.",
+                    parent=parent,
+                )
+
+            self._with_native_dialogs(_empty)
+            return
+
         v = self.v
+        parent = self._dialog_parent()
 
         if mode == "clipboard":
             try:
@@ -1444,52 +1517,69 @@ class CropModeController:
                 logging.info("Cropped image copied to clipboard.")
             except Exception as e:
                 logging.info("Failed to copy crop to clipboard: %s", e)
-                messagebox.showerror("Clipboard", f"Failed to copy:\n{e}", parent=v.image_window)
+
+                def _clip_err():
+                    messagebox.showerror(
+                        "Clipboard", f"Failed to copy:\n{e}", parent=parent
+                    )
+
+                self._with_native_dialogs(_clip_err)
             return
 
         if mode == "copy":
             src = getattr(v, "image_path", None) or ""
             initial_dir = os.path.dirname(src) if src else None
             base = os.path.splitext(os.path.basename(src))[0] if src else "crop"
-            # Prefer a stable parent; image_window may be borderless/topmost.
-            parent = v.image_window
-            try:
-                if not parent.winfo_viewable():
-                    parent = self.hud or parent
-            except Exception:
-                pass
-            save_path = filedialog.asksaveasfilename(
-                parent=parent,
-                title="Save crop as copy",
-                defaultextension=".png",
-                filetypes=[
-                    ("PNG files", "*.png"),
-                    ("JPEG files", "*.jpg;*.jpeg"),
-                    ("WebP files", "*.webp"),
-                    ("All Files", "*.*"),
-                ],
-                initialdir=initial_dir or None,
-                initialfile=f"{base}_crop.png",
-            )
+
+            def _ask_save():
+                return filedialog.asksaveasfilename(
+                    parent=parent,
+                    title="Save crop as copy",
+                    defaultextension=".png",
+                    filetypes=[
+                        ("PNG files", "*.png"),
+                        ("JPEG files", "*.jpg;*.jpeg"),
+                        ("WebP files", "*.webp"),
+                        ("All Files", "*.*"),
+                    ],
+                    initialdir=initial_dir or None,
+                    initialfile=f"{base}_crop.png",
+                )
+
+            save_path = self._with_native_dialogs(_ask_save)
             if not save_path:
                 return
             try:
                 self._save_frames(frames, save_path)
+                logging.info("Crop saved as copy: %s", save_path)
             except Exception as e:
-                messagebox.showerror("Save", f"Failed to save:\n{e}", parent=v.image_window)
+                def _save_err():
+                    messagebox.showerror(
+                        "Save", f"Failed to save:\n{e}", parent=parent
+                    )
+
+                self._with_native_dialogs(_save_err)
             return
 
         # overwrite
-        if not messagebox.askyesno(
-            "Overwrite",
-            f"Overwrite the original file?\n\n{v.image_path}",
-            parent=v.image_window,
-        ):
+        def _confirm():
+            return messagebox.askyesno(
+                "Overwrite",
+                f"Overwrite the original file?\n\n{v.image_path}",
+                parent=parent,
+            )
+
+        if not self._with_native_dialogs(_confirm):
             return
         try:
             self._save_frames(frames, v.image_path)
         except Exception as e:
-            messagebox.showerror("Overwrite", f"Failed to save:\n{e}", parent=v.image_window)
+            def _ow_err():
+                messagebox.showerror(
+                    "Overwrite", f"Failed to save:\n{e}", parent=parent
+                )
+
+            self._with_native_dialogs(_ow_err)
             return
 
         # Install cropped frames into the viewer and leave crop mode.

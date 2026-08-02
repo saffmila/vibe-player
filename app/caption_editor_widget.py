@@ -24,6 +24,147 @@ def caption_path_for_image(image_path: str | os.PathLike[str]) -> Path:
     return p.with_suffix(".txt")
 
 
+def existing_caption_sidecar(image_path: str | os.PathLike[str]) -> str | None:
+    """If ``image_path`` is an image with a sibling ``.txt``, return that path."""
+    try:
+        path = str(image_path)
+    except Exception:
+        return None
+    if not path or not path.lower().endswith(IMAGE_FORMATS):
+        return None
+    cap = caption_path_for_image(path)
+    try:
+        if cap.is_file():
+            return str(cap)
+    except OSError:
+        return None
+    return None
+
+
+def count_caption_sidecars(paths: list[str] | None) -> int:
+    """How many paths in ``paths`` are images that already have a ``.txt`` sidecar."""
+    if not paths:
+        return 0
+    n = 0
+    for p in paths:
+        if existing_caption_sidecar(p):
+            n += 1
+    return n
+
+
+def filter_covered_caption_txt_sources(
+    sources: list[str], *, with_captions: bool
+) -> list[str]:
+    """
+    When transferring captions with images, drop standalone ``.txt`` entries that
+    are sidecars of selected images (those are handled with the image).
+    """
+    if not with_captions or not sources:
+        return list(sources or [])
+    covered: set[str] = set()
+    for src in sources:
+        cap = existing_caption_sidecar(src)
+        if cap:
+            try:
+                covered.add(os.path.normcase(os.path.normpath(cap)))
+            except Exception:
+                pass
+    if not covered:
+        return list(sources)
+    out: list[str] = []
+    for src in sources:
+        try:
+            key = os.path.normcase(os.path.normpath(src))
+        except Exception:
+            out.append(src)
+            continue
+        if key in covered and str(src).lower().endswith(".txt"):
+            continue
+        out.append(src)
+    return out
+
+
+def transfer_caption_sidecar(src_image: str, dst_image: str, *, is_move: bool) -> bool:
+    """
+    Copy or move ``src_image``'s sibling ``.txt`` next to ``dst_image``.
+
+    Returns True if a sidecar was transferred.
+    """
+    # Prefer caption beside the original image path. After an image *move*, the
+    # image is gone from src but the .txt usually still sits next to the old name.
+    candidates: list[str] = []
+    found = existing_caption_sidecar(src_image)
+    if found:
+        candidates.append(found)
+    try:
+        candidates.append(str(caption_path_for_image(src_image)))
+    except Exception:
+        pass
+
+    src_cap = None
+    seen: set[str] = set()
+    for c in candidates:
+        if not c:
+            continue
+        try:
+            key = os.path.normcase(os.path.normpath(c))
+        except Exception:
+            key = c
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if os.path.isfile(c):
+                src_cap = c
+                break
+        except OSError:
+            continue
+    if not src_cap:
+        return False
+
+    dst_cap = str(caption_path_for_image(dst_image))
+    try:
+        src_n = os.path.normcase(os.path.normpath(src_cap))
+        dst_n = os.path.normcase(os.path.normpath(dst_cap))
+    except Exception:
+        src_n = src_cap
+        dst_n = dst_cap
+    if src_n == dst_n:
+        return False
+
+    try:
+        import shutil
+
+        parent = os.path.dirname(dst_cap)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        if is_move:
+            if os.path.exists(dst_cap):
+                try:
+                    os.remove(dst_cap)
+                except OSError:
+                    pass
+            shutil.move(src_cap, dst_cap)
+        else:
+            shutil.copy2(src_cap, dst_cap)
+        logging.info(
+            "[Caption] %s sidecar: %s -> %s",
+            "moved" if is_move else "copied",
+            src_cap,
+            dst_cap,
+        )
+        return True
+    except OSError as exc:
+        logging.warning(
+            "[Caption] Failed to %s sidecar %s -> %s: %s",
+            "move" if is_move else "copy",
+            src_cap,
+            dst_cap,
+            exc,
+        )
+        return False
+
+
 class CaptionEditorWidget(ctk.CTkFrame):
     """Bottom-panel text editor for per-image caption sidecars."""
 

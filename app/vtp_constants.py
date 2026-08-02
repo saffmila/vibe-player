@@ -36,6 +36,10 @@ IMAGE_FORMATS = (
     ".tiff",
     ".psd",
     ".psb",
+    ".af",
+    ".afphoto",
+    ".afdesign",
+    ".afpub",
 )
 
 # Do not recurse into these when building folder preview grids (Windows junk / ACL).

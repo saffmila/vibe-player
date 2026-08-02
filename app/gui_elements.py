@@ -2641,11 +2641,20 @@ def create_preferences_window(app):
         text="Confirm before each drag-and-drop copy/move",
         variable=dnd_confirm_var,
     ).pack(anchor="w", padx=12, pady=4)
+    copy_move_captions_var = ctk.BooleanVar(
+        value=bool(getattr(app, "copy_move_with_captions", True))
+    )
+    ctk.CTkCheckBox(
+        adv_body,
+        text="Include caption (.txt) when copying/moving images",
+        variable=copy_move_captions_var,
+    ).pack(anchor="w", padx=12, pady=4)
     ctk.CTkLabel(
         adv_body,
         text=(
             "Internal (thumbnails / folder tree): no modifier = Move, Ctrl = Copy.\n"
-            "From Windows Explorer: no modifier = Copy, Shift = Move."
+            "From Windows Explorer: no modifier = Copy, Shift = Move.\n"
+            "Caption sidecars use the same stem as the image (photo.png → photo.txt)."
         ),
         font=("Helvetica", 12),
         text_color=("gray30", "gray70"),
@@ -2680,6 +2689,7 @@ def create_preferences_window(app):
 
     def save_and_close_action():
         app.dnd_confirm_dialogs = dnd_confirm_var.get()
+        app.copy_move_with_captions = bool(copy_move_captions_var.get())
         app.delete_to_trash = bool(delete_to_trash_var.get())
         app.auto_refresh_folder = bool(auto_refresh_folder_var.get())
         if app.auto_refresh_folder:
@@ -2827,6 +2837,7 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
         "preview_window_strip_limit": bool(getattr(app, "preview_window_strip_limit", True)),
         "search_results_page_size": int(getattr(app, "search_results_page_size", 250)),
         "dnd_confirm_dialogs": getattr(app, "dnd_confirm_dialogs", False),
+        "copy_move_with_captions": bool(getattr(app, "copy_move_with_captions", True)),
         "delete_to_trash": bool(getattr(app, "delete_to_trash", True)),
         "auto_refresh_folder": bool(getattr(app, "auto_refresh_folder", False)),
         "sort_option": _sort_val,
@@ -2926,6 +2937,7 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
         app.play_broken_videos_var.set(app.play_broken_videos)
 
     app.dnd_confirm_dialogs = bool(preferences.get("dnd_confirm_dialogs", False))
+    app.copy_move_with_captions = bool(preferences.get("copy_move_with_captions", True))
     app.delete_to_trash = bool(preferences.get("delete_to_trash", True))
     app.auto_refresh_folder = bool(preferences.get("auto_refresh_folder", False))
     if app.auto_refresh_folder:

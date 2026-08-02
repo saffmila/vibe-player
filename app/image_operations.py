@@ -34,7 +34,44 @@ from image_crop_hud import CropModeController
 from image_edit_guard import confirm_leave_image_edit
 from image_loader import load_pil_frames, load_pil_image
 from image_resize_dialog import open_resize_image_dialog
+from external_apps import append_external_apps_cascade, append_external_apps_flat_commands
 from vtp_constants import IMAGE_FORMATS
+
+
+def _with_native_dialogs(win, fn):
+    """
+    Run ``fn`` so Win32 filedialog / messagebox can appear above the viewer.
+
+    Borderless (overrideredirect) + topmost Tk windows often hide native dialogs.
+    """
+    was_topmost = False
+    was_override = False
+    try:
+        was_topmost = str(win.attributes("-topmost")) == "1"
+    except Exception:
+        was_topmost = False
+    try:
+        was_override = bool(win.overrideredirect())
+    except Exception:
+        was_override = False
+    try:
+        if was_topmost:
+            win.attributes("-topmost", False)
+        if was_override:
+            win.overrideredirect(False)
+        try:
+            win.update_idletasks()
+        except Exception:
+            pass
+        return fn()
+    finally:
+        try:
+            if was_override:
+                win.overrideredirect(True)
+            if was_topmost:
+                win.attributes("-topmost", True)
+        except Exception:
+            pass
 
 
 class ImageViewerLegacy:
@@ -782,11 +819,99 @@ class ImageViewerLegacy:
 
     def save_image_to_folder(self):
         from tkinter import filedialog
-        save_path = filedialog.asksaveasfilename(defaultextension=".png",
-                                                  filetypes=[("PNG files", "*.png"), ("JPEG files", "*.jpg;*.jpeg"), ("All Files", "*.*")])
+
+        src = getattr(self, "image_path", None) or ""
+        initial_dir = os.path.dirname(src) if src else None
+        base = os.path.splitext(os.path.basename(src))[0] if src else "image"
+        win = self.image_window
+
+        def _ask():
+            return filedialog.asksaveasfilename(
+                parent=win,
+                title="Save image as",
+                defaultextension=".png",
+                filetypes=[
+                    ("PNG files", "*.png"),
+                    ("JPEG files", "*.jpg;*.jpeg"),
+                    ("WebP files", "*.webp"),
+                    ("All Files", "*.*"),
+                ],
+                initialdir=initial_dir or None,
+                initialfile=f"{base}.png",
+            )
+
+        save_path = _with_native_dialogs(win, _ask)
         if save_path:
             self.original_image.save(save_path)
             self._image_dirty = False
+            logging.info("Image saved as: %s", save_path)
+            self._after_save_as(save_path)
+
+    def _after_save_as(self, save_path: str):
+        """Retarget viewer to the new file and refresh the thumbnail grid when relevant.
+
+        Common practice: keep the viewer open (unlike Export-and-close), treat Save As
+        as the new current document, and update the browser if the file landed in the
+        folder currently shown.
+        """
+        save_path = os.path.normpath(save_path)
+        self.image_path = save_path
+        self.image_name = os.path.basename(save_path)
+        try:
+            self.image_window.title(self.image_name)
+        except Exception:
+            pass
+        try:
+            self._refresh_overlays()
+        except Exception:
+            pass
+        self._notify_browser_after_save(save_path)
+
+    def _notify_browser_after_save(self, save_path: str):
+        ctrl = getattr(self, "controller", None)
+        if ctrl is None:
+            return
+        cd = getattr(ctrl, "current_directory", None)
+        try:
+            save_dir = os.path.dirname(os.path.abspath(save_path))
+            same_dir = bool(
+                cd
+                and os.path.normcase(os.path.abspath(cd))
+                == os.path.normcase(save_dir)
+            )
+        except Exception:
+            same_dir = False
+
+        known = False
+        try:
+            norm = os.path.normcase(os.path.normpath(save_path))
+            for vf in getattr(ctrl, "video_files", None) or []:
+                if os.path.normcase(os.path.normpath(vf.get("path", ""))) == norm:
+                    known = True
+                    break
+        except Exception:
+            known = False
+
+        refresh = getattr(ctrl, "refresh_single_thumbnail", None)
+        reload_fn = getattr(ctrl, "display_thumbnails", None)
+
+        def _do():
+            # Existing grid entry → regenerate that thumb. New file in current folder → reload.
+            if known and callable(refresh):
+                try:
+                    refresh(save_path, overwrite=True)
+                except Exception as e:
+                    logging.info("Thumb refresh after Save As failed: %s", e)
+            elif same_dir and callable(reload_fn) and cd:
+                try:
+                    reload_fn(cd, preserve_scroll=True)
+                except Exception as e:
+                    logging.info("Folder reload after Save As failed: %s", e)
+
+        try:
+            ctrl.after(0, _do)
+        except Exception:
+            _do()
 
     def start_pan(self, event):
         self.canvas.scan_mark(event.x, event.y)
@@ -1245,6 +1370,8 @@ class ImageViewerLegacy:
         menu.add_separator()
         menu.add_command(label=f"Save As ({hk_label('image_save', 'Ctrl+S')})", command=self.save_image_to_folder)
         menu.add_command(label=f"Copy ({hk_label('image_copy', 'Ctrl+C')})", command=self.copy_image_to_clipboard)
+        if getattr(self, "image_path", None) and os.path.isfile(self.image_path):
+            append_external_apps_cascade(menu, self.image_window, self.image_path)
         menu.add_separator()
         _rating_path = getattr(self, "image_path", None)
         if _rating_path and os.path.isfile(_rating_path):
@@ -2348,13 +2475,92 @@ class ImageViewerGPU:
 
     def save_image_to_folder(self, event=None):
         from tkinter import filedialog
-        path = filedialog.asksaveasfilename(
-            defaultextension='.png',
-            filetypes=[('PNG', '*.png'), ('JPEG', '*.jpg;*.jpeg'), ('All', '*.*')],
-        )
+
+        src = getattr(self, "image_path", None) or ""
+        initial_dir = os.path.dirname(src) if src else None
+        base = os.path.splitext(os.path.basename(src))[0] if src else "image"
+        # GPU viewer hosts dialogs on the Tk parent (GL window is not a Tk dialog parent).
+        win = self.parent
+
+        def _ask():
+            return filedialog.asksaveasfilename(
+                parent=win,
+                title="Save image as",
+                defaultextension=".png",
+                filetypes=[
+                    ("PNG files", "*.png"),
+                    ("JPEG files", "*.jpg;*.jpeg"),
+                    ("WebP files", "*.webp"),
+                    ("All Files", "*.*"),
+                ],
+                initialdir=initial_dir or None,
+                initialfile=f"{base}.png",
+            )
+
+        path = _with_native_dialogs(win, _ask)
         if path:
             self.original_image.save(path)
             self._image_dirty = False
+            logging.info("Image saved as: %s", path)
+            self._after_save_as(path)
+
+    def _after_save_as(self, save_path: str):
+        """Retarget to the new file; refresh browser when saved into the open folder."""
+        save_path = os.path.normpath(save_path)
+        self.image_path = save_path
+        self.image_name = os.path.basename(save_path)
+        try:
+            # GPU HUD / window title if present.
+            if getattr(self, "window", None) is not None:
+                self.window.set_caption(self.image_name)
+        except Exception:
+            pass
+        self._notify_browser_after_save(save_path)
+
+    def _notify_browser_after_save(self, save_path: str):
+        ctrl = getattr(self, "controller", None)
+        if ctrl is None:
+            return
+        cd = getattr(ctrl, "current_directory", None)
+        try:
+            save_dir = os.path.dirname(os.path.abspath(save_path))
+            same_dir = bool(
+                cd
+                and os.path.normcase(os.path.abspath(cd))
+                == os.path.normcase(save_dir)
+            )
+        except Exception:
+            same_dir = False
+
+        known = False
+        try:
+            norm = os.path.normcase(os.path.normpath(save_path))
+            for vf in getattr(ctrl, "video_files", None) or []:
+                if os.path.normcase(os.path.normpath(vf.get("path", ""))) == norm:
+                    known = True
+                    break
+        except Exception:
+            known = False
+
+        refresh = getattr(ctrl, "refresh_single_thumbnail", None)
+        reload_fn = getattr(ctrl, "display_thumbnails", None)
+
+        def _do():
+            if known and callable(refresh):
+                try:
+                    refresh(save_path, overwrite=True)
+                except Exception as e:
+                    logging.info("Thumb refresh after Save As failed: %s", e)
+            elif same_dir and callable(reload_fn) and cd:
+                try:
+                    reload_fn(cd, preserve_scroll=True)
+                except Exception as e:
+                    logging.info("Folder reload after Save As failed: %s", e)
+
+        try:
+            ctrl.after(0, _do)
+        except Exception:
+            _do()
 
     # ------------------------------------------------------------------
     # HUD  (worker thread)
@@ -2505,6 +2711,8 @@ class ImageViewerGPU:
         menu.add_separator()
         menu.add_command(label="Save As…", accelerator=hk('image_save', 'Ctrl+S'), command=self.save_image_to_folder)
         menu.add_command(label="Copy", accelerator=hk('image_copy', 'Ctrl+C'), command=self.copy_image_to_clipboard)
+        if getattr(self, "image_path", None) and os.path.isfile(self.image_path):
+            append_external_apps_flat_commands(menu, self.parent, self.image_path)
         menu.add_separator()
         _rating_path = getattr(self, "image_path", None)
         if _rating_path and os.path.isfile(_rating_path):

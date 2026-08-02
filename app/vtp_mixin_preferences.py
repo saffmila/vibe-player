@@ -315,6 +315,9 @@ class VtpPreferencesMixin:
                         self.preview_window_strip_limit
                     )
                 self.dnd_confirm_dialogs = bool(settings.get("dnd_confirm_dialogs", False))
+                self.copy_move_with_captions = bool(
+                    settings.get("copy_move_with_captions", True)
+                )
                 self.delete_to_trash = bool(settings.get("delete_to_trash", True))
                 self.auto_refresh_folder = bool(settings.get("auto_refresh_folder", False))
                 if not self.auto_refresh_folder and hasattr(self, "stop_directory_watcher"):
@@ -429,6 +432,7 @@ class VtpPreferencesMixin:
             self.widefolder_size = (560, 400)  # Default size
             self.memory_cache = True  # Default if no settings file exists
             self.dnd_confirm_dialogs = False
+            self.copy_move_with_captions = True
             self.delete_to_trash = True
             self.auto_refresh_folder = False
             self._pending_sort_option = "Filename"

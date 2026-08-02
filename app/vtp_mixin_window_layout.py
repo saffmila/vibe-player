@@ -524,6 +524,17 @@ class VtpWindowLayoutMixin:
 
             self._enforce_collapsed_panel_heights()
 
+            # Captions packed during startup (often while collapsed / before sash place)
+            # can stay invisible until the user toggles the panel — remount after layout.
+            if (
+                getattr(self, "bottom_panel_mode", None) == "Captions"
+                and getattr(self, "timeline_container", None) is not None
+                and getattr(self.timeline_container, "expanded", False)
+                and hasattr(self, "_remount_bottom_panel_content")
+            ):
+                self.after_idle(self._remount_bottom_panel_content)
+                self.after(150, self._remount_bottom_panel_content)
+
         except Exception as e:
             logging.error(f"[ERROR] set_initial_split_heights (outer) failed: {e}")
 

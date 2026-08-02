@@ -37,6 +37,7 @@ from gui_elements import (
     _current_file_rating,
 )
 from hotkeys import DEFAULT_HOTKEYS, DOCUMENTED_EXTRA_HOTKEYS, menu_accel
+from external_apps import append_external_apps_cascade
 import logging
 
 import tkinterdnd2 as dnd
@@ -3466,6 +3467,15 @@ class VideoPlayer:
             lambda: self.controller.add_selected_to_playlist(new_playlist=True),
             "new_playlist",
         )
+
+        if self.video_path and os.path.isfile(self.video_path):
+            menu.add_separator()
+            append_external_apps_cascade(
+                menu,
+                self.video_window,
+                self.video_path,
+                prepare_submenu=self._guard_menu_commands,
+            )
 
         menu.add_separator()
 

@@ -311,6 +311,8 @@ class VideoThumbnailPlayer(
         self._thumb_double_click_consumed = False
         # Confirm dialogs before DnD copy/move (default off — Advanced in preferences)
         self.dnd_confirm_dialogs = False
+        # Include image caption sidecars (.txt) with copy/move (default on)
+        self.copy_move_with_captions = True
         self.folder_title_font_base_size = 12
         self.folder_title_font = ctk.CTkFont(size=self.folder_title_font_base_size, weight="bold") # Or choose size/weight you prefer 
         self.thumb_BorderSize = 14
@@ -1323,6 +1325,8 @@ class VideoThumbnailPlayer(
         cancel_text="Cancel",
         show_cancel=True,
         modal=True,
+        checkbox_text=None,
+        checkbox_variable=None,
     ):
         """
         Create a universal dialog window for confirmation, error, or input.
@@ -1337,6 +1341,8 @@ class VideoThumbnailPlayer(
             input_field (bool): Whether the dialog requires an input field (default is False).
             default_input (str): The default value for the input field if enabled.
             modal (bool): Whether to grab all app input while the dialog is open.
+            checkbox_text (str): Optional checkbox label below the message.
+            checkbox_variable: Optional BooleanVar for the checkbox (created if missing).
         """
         # Avoid stacking multiple universal dialogs (e.g. repeated DnD warnings).
         existing = getattr(self, "_active_universal_dialog", None)
@@ -1357,6 +1363,8 @@ class VideoThumbnailPlayer(
         self._active_universal_dialog = dialog_window
         dialog_window.title(title)
         _dw, _dh = (600, 220) if input_field else (440, 200)
+        if checkbox_text:
+            _dh = max(_dh, 240)
         dialog_window.resizable(False, False)
         try:
             dialog_window.transient(self)
@@ -1394,6 +1402,15 @@ class VideoThumbnailPlayer(
         if input_field:
             input_entry = ctk.CTkEntry(content, textvariable=input_var, height=32)
             input_entry.pack(fill="x", expand=True, pady=(8, 0))
+
+        if checkbox_text:
+            if checkbox_variable is None:
+                checkbox_variable = ctk.BooleanVar(value=True)
+            ctk.CTkCheckBox(
+                content,
+                text=checkbox_text,
+                variable=checkbox_variable,
+            ).pack(anchor="w", pady=(10, 0))
 
         # Confirm button
         confirm_in_progress = False
@@ -1699,14 +1716,70 @@ class VideoThumbnailPlayer(
                 logging.warning("[Delete] Could not inspect folder contents for %s: %s", path, e)
                 return None
 
+        def _summarize_folder_tree(path: str, *, max_files: int = 50_000) -> dict | None:
+            """Count images / videos / other files (+ subfolders) under ``path``.
+
+            Caps at ``max_files`` so huge trees don't stall the delete confirm.
+            """
+            images = videos = others = 0
+            subdirs = 0
+            truncated = False
+            try:
+                for _root, dirnames, filenames in os.walk(path):
+                    subdirs += len(dirnames)
+                    for name in filenames:
+                        if images + videos + others >= max_files:
+                            truncated = True
+                            break
+                        low = name.lower()
+                        if low.endswith(IMAGE_FORMATS):
+                            images += 1
+                        elif low.endswith(VIDEO_FORMATS):
+                            videos += 1
+                        else:
+                            others += 1
+                    if truncated:
+                        break
+            except OSError as e:
+                logging.warning("[Delete] Could not scan folder tree for %s: %s", path, e)
+                return None
+            return {
+                "images": images,
+                "videos": videos,
+                "others": others,
+                "subdirs": subdirs,
+                "truncated": truncated,
+            }
+
+        def _format_content_summary(stats: dict) -> str:
+            parts = []
+            if stats.get("images"):
+                parts.append(f"{stats['images']} image(s)")
+            if stats.get("videos"):
+                parts.append(f"{stats['videos']} video(s)")
+            if stats.get("others"):
+                parts.append(f"{stats['others']} other file(s)")
+            if stats.get("subdirs"):
+                parts.append(f"{stats['subdirs']} subfolder(s)")
+            if not parts:
+                return "empty or only empty subfolders"
+            text = ", ".join(parts)
+            if stats.get("truncated"):
+                text += " (count stopped early — folder may contain more)"
+            return text
+
         non_empty_dirs = []
         unknown_dirs = []
+        folder_stats: dict[str, dict] = {}
         for path in paths:
             if not os.path.isdir(path):
                 continue
             has_entries = _folder_has_entries(path)
             if has_entries is True:
                 non_empty_dirs.append(path)
+                summary = _summarize_folder_tree(path)
+                if summary is not None:
+                    folder_stats[path] = summary
             elif has_entries is None:
                 unknown_dirs.append(path)
 
@@ -1727,21 +1800,47 @@ class VideoThumbnailPlayer(
 
         warnings = []
         if non_empty_dirs:
-            # Avoid repeating the same names already listed under "Delete N item(s)?".
+            # Aggregate media counts across all non-empty selected folders.
+            tot_img = tot_vid = tot_other = tot_sub = 0
+            any_truncated = False
+            for p in non_empty_dirs:
+                st = folder_stats.get(p)
+                if not st:
+                    continue
+                tot_img += st["images"]
+                tot_vid += st["videos"]
+                tot_other += st["others"]
+                tot_sub += st["subdirs"]
+                any_truncated = any_truncated or st.get("truncated", False)
+            agg = {
+                "images": tot_img,
+                "videos": tot_vid,
+                "others": tot_other,
+                "subdirs": tot_sub,
+                "truncated": any_truncated,
+            }
+            content_line = _format_content_summary(agg)
+
             listed_already = (
                 len(non_empty_dirs) == n
                 and all(os.path.isdir(p) for p in paths)
             )
-            if listed_already:
+            if listed_already and len(non_empty_dirs) == 1:
+                warnings.append(
+                    "Warning: this folder is not empty.\n"
+                    f"Contents that will also be deleted: {content_line}."
+                )
+            elif listed_already:
                 warnings.append(
                     f"Warning: {len(non_empty_dirs)} selected folder(s) are not empty.\n"
-                    "Their contents will be deleted too."
+                    f"Contents that will also be deleted: {content_line}."
                 )
             else:
                 warnings.append(
                     f"Warning: {len(non_empty_dirs)} selected folder(s) are not empty.\n"
                     "Their contents will be deleted too:\n"
-                    f"{_format_path_names(non_empty_dirs)}"
+                    f"{_format_path_names(non_empty_dirs)}\n"
+                    f"Contents: {content_line}."
                 )
         if unknown_dirs:
             warnings.append(
@@ -3690,15 +3789,33 @@ class VideoThumbnailPlayer(
             if expanded:
                 # Remap content after proxy swap — CTk textboxes packed while the
                 # real panel was unmapped can otherwise stay blank until a re-pack.
-                self._remount_bottom_panel_content()
+                # Defer: sash/pane geometry is often not ready in the same callback.
+                self.after_idle(self._remount_bottom_panel_content)
+                self.after(50, self._remount_bottom_panel_content)
+                self.after(200, self._remount_bottom_panel_content)
                 if mode == "Captions" and hasattr(self, "caption_editor"):
-                    self.caption_editor.load_for_path(
-                        getattr(self, "selected_file_path", None),
-                        commit_previous=False,
-                    )
+                    def _reload_caption():
+                        if getattr(self, "bottom_panel_mode", None) != "Captions":
+                            return
+                        if not getattr(self, "timeline_container", None):
+                            return
+                        if not self.timeline_container.expanded:
+                            return
+                        self.caption_editor.load_for_path(
+                            getattr(self, "selected_file_path", None),
+                            commit_previous=False,
+                        )
+
+                    self.after(60, _reload_caption)
 
     def _remount_bottom_panel_content(self):
         """Re-pack active bottom content + header chrome after expand/layout recovery."""
+        container = getattr(self, "timeline_container", None)
+        if container is None:
+            return
+        if not getattr(container, "expanded", False):
+            return
+
         mode = getattr(self, "bottom_panel_mode", "Timeline")
         captions_on = False
         if hasattr(self, "captions_mode_enabled_var"):
@@ -3717,26 +3834,40 @@ class VideoThumbnailPlayer(
             except tk.TclError:
                 pass
 
-        if mode == "Captions" and hasattr(self, "caption_editor"):
-            try:
+        try:
+            if mode == "Captions" and hasattr(self, "caption_editor"):
                 if hasattr(self, "timeline_widget"):
                     self.timeline_widget.pack_forget()
                 self.caption_editor.pack_forget()
                 self.caption_editor.pack(fill="both", expand=True)
-                self.timeline_container.content_widget = self.caption_editor
-            except tk.TclError:
-                pass
-            self._set_caption_autosave_visible(True)
-        elif hasattr(self, "timeline_widget"):
-            try:
+                container.content_widget = self.caption_editor
+                self._set_caption_autosave_visible(True)
+            elif hasattr(self, "timeline_widget"):
                 if hasattr(self, "caption_editor"):
                     self.caption_editor.pack_forget()
                 self.timeline_widget.pack_forget()
                 self.timeline_widget.pack(fill="both", expand=True)
-                self.timeline_container.content_widget = self.timeline_widget
-            except tk.TclError:
-                pass
-            self._set_caption_autosave_visible(False)
+                container.content_widget = self.timeline_widget
+                self._set_caption_autosave_visible(False)
+
+            # pack_propagate(False) parents often leave a newly packed child at 0 height
+            # until the pane height is re-asserted after remount / mode switch.
+            try:
+                h = int(container.winfo_height())
+            except (tk.TclError, TypeError, ValueError):
+                h = 0
+            if h < 40:
+                h = int(getattr(container, "default_height", 150) or 150)
+            container.configure(height=max(80, h))
+            container.update_idletasks()
+            parent_paned = getattr(container, "parent_paned", None)
+            if parent_paned is not None:
+                try:
+                    parent_paned.paneconfig(container, height=max(80, h))
+                except tk.TclError:
+                    pass
+        except tk.TclError:
+            logging.debug("[BottomPanel] remount failed", exc_info=True)
 
     def _on_caption_autosave_toggled(self):
         if hasattr(self, "save_preferences"):
@@ -3889,6 +4020,12 @@ class VideoThumbnailPlayer(
                 tc.sync_collapsed_proxy_chrome()
             except Exception:
                 logging.debug("[BottomPanel] proxy chrome sync failed", exc_info=True)
+        # If the panel is already expanded, force a layout remount — mode switch during
+        # startup/splitter restore often packs Captions into a 0-height slot.
+        if tc is not None and getattr(tc, "expanded", False):
+            self.after_idle(self._remount_bottom_panel_content)
+            self.after(100, self._remount_bottom_panel_content)
+            self.after(350, self._remount_bottom_panel_content)
         if save_prefs and hasattr(self, "save_preferences"):
             try:
                 self.save_preferences()
@@ -5116,7 +5253,9 @@ class VideoThumbnailPlayer(
         if key in self._node_missing_cache:
             return None
 
-        # 3. Full traversal (runs only once per unknown path; warms caches)
+        # 3. Full traversal (runs only once per unknown path; warms caches).
+        # Walk collapsed branches too — Treeview keeps children when closed, and
+        # skipping them falsely poisoned the missing-cache for favorites deep links.
         for item in self.tree.get_children(''):
             node_values = self.tree.item(item, 'values')
             if node_values and node_values[0] not in ('dummy',):
@@ -5124,7 +5263,7 @@ class VideoThumbnailPlayer(
                 self._node_path_cache[node_key] = item
                 if node_key == key:
                     return item
-                if self.tree.item(item, 'open'):
+                if self.tree.get_children(item):
                     child_node = self.find_node_by_path_recursive(item, key)
                     if child_node:
                         return child_node
@@ -5143,11 +5282,41 @@ class VideoThumbnailPlayer(
                 self._node_missing_cache.discard(node_key)
                 if node_key == key:
                     return item
-                if self.tree.item(item, 'open'):
+                if self.tree.get_children(item):
                     child_node = self.find_node_by_path_recursive(item, key)
                     if child_node:
                         return child_node
         return None
+
+    def _reveal_tree_item(self, item_id, defer_idle: bool = True):
+        """Scroll the left tree so ``item_id`` is visible.
+
+        Call after open/populate/heal — inserting siblings after an earlier
+        ``see()`` pushes deep favorites out of the viewport (large folders).
+        A deferred idle pass covers Tk geometry that applies after the event.
+        """
+        if not item_id:
+            return
+        try:
+            if not self.tree.exists(item_id):
+                return
+            self.tree.see(item_id)
+        except Exception:
+            logging.debug("[TreeSync] see(%s) failed", item_id, exc_info=True)
+            return
+        if defer_idle:
+            self.after_idle(lambda i=item_id: self._reveal_tree_item_idle(i))
+
+    def _reveal_tree_item_idle(self, item_id):
+        try:
+            if not item_id or not self.tree.exists(item_id):
+                return
+            # Drop stale reveals after the user navigated elsewhere.
+            if item_id not in (self.tree.selection() or ()) and self.tree.focus() != item_id:
+                return
+            self.tree.see(item_id)
+        except Exception:
+            logging.debug("[TreeSync] idle see(%s) failed", item_id, exc_info=True)
 
 
     def refresh_folder_icon(self, folder_path):
@@ -5211,13 +5380,15 @@ class VideoThumbnailPlayer(
 
                 # Select and focus on the target node
                 self.tree.selection_set(item)
-                self.tree.see(item)
+                self.tree.focus(item)
                 self.tree.item(item, open=True)
 
                 # Repopulate the child nodes if needed
                 self.process_directory(item, target_directory)
                 self._ensure_open_tree_branch_populated(item)
                 self._heal_open_tree_dummy_rows()
+                # see() after populate/heal — earlier see is lost when siblings are inserted
+                self._reveal_tree_item(item)
             else:
                 logging.info(f"No tree node found for {target_directory}. Attempting to repopulate tree.")
                 self.populate_tree()  # Fall back to repopulating the entire tree
@@ -5864,6 +6035,7 @@ class VideoThumbnailPlayer(
         logging.debug("[TreeSync] START path=%s", cd)
         # Block <<TreeviewSelect>> from treating programmatic sync as user navigation.
         self._suppress_tree_select_navigation = True
+        reveal_item = None
         try:
             item = self.find_node_by_path(cd)
             logging.info("SELECT TREE ITEM:  %s: %s", cd, item)
@@ -5876,7 +6048,6 @@ class VideoThumbnailPlayer(
 
                 self.tree.selection_set(item)
                 self.tree.focus(item)
-                self.tree.see(item)
                 if not is_virtual:
                     # Only expand when collapsed — re-open fires <<TreeviewOpen>> and
                     # process_directory, which is expensive on folders full of media.
@@ -5885,25 +6056,36 @@ class VideoThumbnailPlayer(
                     # Programmatic open=True often skips <<TreeviewOpen>>; populate this
                     # branch immediately so a leftover dummy does not show as a blank row.
                     self._ensure_open_tree_branch_populated(item)
+                reveal_item = item
             else:
                 logging.info("Node for %s not found in tree.", cd)
+                # Stale negative cache can block a retry after expand inserts nodes.
+                try:
+                    self._node_missing_cache.discard(self.normalize_path(cd))
+                except Exception:
+                    pass
                 self.expand_tree_to_path(cd, select_final_node=True)
+                reveal_item = self.find_node_by_path(cd) or self.tree.focus()
             if not is_virtual:
                 # Safety net for any other open nodes that still show a dummy gap.
+                # Must run BEFORE see() — populate inserts siblings and shifts rows.
                 self._heal_open_tree_dummy_rows()
+            # see() after open/populate/heal so favorites in large folders stay in view.
+            if reveal_item:
+                self._reveal_tree_item(reveal_item)
             elapsed = time.perf_counter() - sync_started
             if elapsed >= 0.20:
                 logging.info(
                     "[TreeSync] SLOW path=%s item=%s elapsed=%.3fs",
                     cd,
-                    item,
+                    reveal_item or item,
                     elapsed,
                 )
             else:
                 logging.debug(
                     "[TreeSync] DONE path=%s item=%s elapsed=%.3fs",
                     cd,
-                    item,
+                    reveal_item or item,
                     elapsed,
                 )
         finally:

@@ -20,6 +20,11 @@ from gui_elements import (
     open_file_op_progress_dialog,
 )
 from hotkeys import DEFAULT_HOTKEYS, format_accelerator_menu
+from caption_editor_widget import (
+    filter_covered_caption_txt_sources,
+    transfer_caption_sidecar,
+)
+from vtp_constants import IMAGE_FORMATS
 
 
 class VtpLegacyDragMixin:
@@ -651,6 +656,23 @@ class VtpLegacyDragMixin:
                     if path == source_path:
                         self.selected_thumbnails[i] = (new_path, label, index)
                 moved_items.append(source_path)
+
+            # Image caption sidecars (.txt) — follow the image when enabled
+            if (
+                bool(getattr(self, "copy_move_with_captions", True))
+                and os.path.isfile(new_path)
+                and source_path.lower().endswith(IMAGE_FORMATS)
+            ):
+                try:
+                    transfer_caption_sidecar(
+                        source_path, new_path, is_move=(not copy_mode)
+                    )
+                except Exception:
+                    logging.debug(
+                        "[Caption] sidecar transfer failed for %s",
+                        source_path,
+                        exc_info=True,
+                    )
         except PermissionError as e:
             logging.info(f"Permission error for {source_path}: {e}")
         except Exception as e:
@@ -1014,6 +1036,14 @@ class VtpLegacyDragMixin:
         dest_dir = os.path.normpath(dest_dir)
         if not dest_dir or not os.path.isdir(dest_dir):
             logging.info("[clipboard] Paste: invalid destination %s", dest_dir)
+            return
+
+        with_captions = bool(getattr(self, "copy_move_with_captions", True))
+        sources = filter_covered_caption_txt_sources(
+            list(sources), with_captions=with_captions
+        )
+        if not sources:
+            logging.info("[clipboard] Paste: nothing left after caption filter")
             return
 
         def process_paste_main():

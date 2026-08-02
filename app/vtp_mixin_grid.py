@@ -43,6 +43,7 @@ from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS, preview_skip_subdir
 from virtual_folders import load_virtual_folders
 from hotkeys import DEFAULT_HOTKEYS, menu_accel, rename_accelerators_label
 from bookmark_manager import BookmarkManager
+from external_apps import append_external_apps_cascade
 from folder_scroll_state import (
     clamp_yview,
     normalize_scroll_path,
@@ -3708,6 +3709,8 @@ class VtpGridMixin:
 
         else:
             menu.add_command(label="Open", command=lambda: os.startfile(file_path))  # fallback
+
+        append_external_apps_cascade(menu, self, file_path)
 
         merge_paths = self.selected_video_paths_for_merge(file_path)
         if len(merge_paths) >= 2:
