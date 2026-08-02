@@ -9,7 +9,7 @@ A **no-nonsense, comfortable, and easy-to-use media player based on the famous V
 * **Advanced Media Controls**: Professional timeline featuring precise navigation, custom looping, and visual bookmark management.
 * **Smart Automated Tagging**: Automatically generates descriptive keywords for your media to keep your library organized without manual typing.
 
-### Two Ways to Run
+### Ways to Run
 
 #### 1. Portable Version (Recommended for Users)
 Download the latest **VibePlayer.zip** from the [Releases](https://github.com/saffmila/vibe-player/releases/) section.
@@ -22,6 +22,14 @@ Download the latest **VibePlayer.zip** from the [Releases](https://github.com/sa
 #### 2. Development Version (From Source)
 1. **Installation**: Run `run install.bat`. This sets up a Python 3.11 virtual environment and installs all dependencies.
 2. **Run**: Double-click `run.bat` (standard) or `run_debug.bat` (for console logs and debugging).
+
+#### 3. Run via Pinokio (1-Click Setup)
+If you use [Pinokio](https://pinokio.computer/) for managing local AI applications, you can run Vibe Player in an isolated environment with a single click:
+
+1. Open Pinokio.
+2. Click **Discover** (or *Download from URL*).
+3. Paste the repository URL: `https://github.com/saffmila/vibe-player`
+4. Click **Install**, and once finished, click **Start Vibe Player**.
 
 ###  Security & Privacy Audit
 We value your privacy. This project includes a dedicated audit tool, `check_build.py`, to ensure that every public release is:

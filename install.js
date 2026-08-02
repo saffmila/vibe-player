@@ -8,8 +8,9 @@ module.exports = {
       params: {
         venv: "env",
         message: [
-          "pip install --upgrade pip setuptools wheel",
-          "pip install -r requirements.txt"
+          // Must use `python -m pip` — bare `pip` cannot self-upgrade on Windows
+          "python -m pip install --upgrade pip setuptools wheel",
+          "python -m pip install -r requirements.txt"
         ]
       }
     }
