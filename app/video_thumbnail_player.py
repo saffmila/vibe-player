@@ -449,6 +449,9 @@ class VideoThumbnailPlayer(
         self.thumbnail_time = 0.1  # Default value: 10% of video duration
 
         self.folder_view_mode = ctk.StringVar(value="Standard")  # default "Standard" (Wide mode via checkbox)
+        # Block folder-view refresh until startup restore finishes — load_preferences
+        # writes this var and would otherwise open default_directory before the last folder.
+        self._initial_folder_loaded = False
         self.folder_view_mode.trace_add("write", self._on_folder_view_changed)
         
         self.wide_folders_check_var = tk.BooleanVar()
@@ -4234,21 +4237,41 @@ class VideoThumbnailPlayer(
   
         
     def add_to_recent_directories(self, path):
-            logging.info(f"add_to_recent_directories PATH: {path}")  # Debug info
+        """Record a folder as most-recent (list end). Dedupes by normalized path."""
+        if not path or not isinstance(path, str):
+            return
+        if path.startswith("virtual_library://"):
+            return
+        try:
+            if not os.path.isdir(path):
+                return
+            path = os.path.normpath(path)
+        except Exception:
+            return
 
-        # Add path if it's not already in recent_directories
-        # if path not in self.recent_directories:
-            self.recent_directories.append(path)
-           
-            # Ensure recent_directories does not exceed quick_acces_history limit
-            if len(self.recent_directories) > self.quick_acces_history:
-                removed_path = self.recent_directories.pop(0)  # Remove the oldest entry
-                logging.info(f"Removed oldest entry from recent directories: {removed_path}")  # Debug info
-                
-            self.update_quick_access_combo(path)
+        logging.info(f"add_to_recent_directories PATH: {path}")
+
+        want = os.path.normcase(path)
+        self.recent_directories = [
+            p
+            for p in self.recent_directories
+            if os.path.normcase(os.path.normpath(str(p))) != want
+        ]
+        self.recent_directories.append(path)
+
+        limit = getattr(self, "quick_acces_history", 15) or 15
+        while len(self.recent_directories) > limit:
+            removed_path = self.recent_directories.pop(0)
+            logging.info(f"Removed oldest entry from recent directories: {removed_path}")
+
+        if getattr(self, "quick_access_combo", None) is not None:
+            try:
+                self.update_quick_access_combo(path)
+            except Exception:
+                logging.debug("update_quick_access_combo failed", exc_info=True)
 
     def update_quick_access_combo(self, path):
-         # Display recent_directories in reverse order, so newest entries appear at the top
+        # Display recent_directories in reverse order, so newest entries appear at the top
         self.quick_access_combo.configure(values=self.recent_directories[::-1])
 
         # Set the selected path directly (current_directory may not be updated yet at this point)
@@ -4277,7 +4300,15 @@ class VideoThumbnailPlayer(
             )
         except Exception:
             logging.debug("[ScrollState] save on close failed", exc_info=True)
-        save_recent_directories(self.settings_file,self.recent_directories)
+        try:
+            # Always persist the folder currently on screen (thumb nav may not
+            # have gone through the tree, which previously was the only recent writer).
+            cd = getattr(self, "current_directory", None)
+            if cd:
+                self.add_to_recent_directories(cd)
+        except Exception:
+            logging.debug("ensure current_directory in recent on close failed", exc_info=True)
+        save_recent_directories(self.settings_file, self.recent_directories)
         save_folder_favorites(getattr(self, "folder_favorites", []), FAVORITES_FILE)
         self.save_preferences()  # unified save
         try:

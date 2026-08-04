@@ -918,8 +918,18 @@ class VtpGridMixin:
         # self.update_idletasks()
 
         # 1. Init, cancel stale load, capture render_id (includes clear_thumbnails)
-        self._initialize_thumbnail_display(dir_path)
+        if self._initialize_thumbnail_display(dir_path) is False:
+            return
         my_render_id = self._render_id  # Snapshot — older async phases will abort when they see this changed
+
+        # Remember any folder open (tree, thumb double-click, favorites, …) so
+        # restart restores the folder actually on screen — not only last tree click.
+        if not same_folder:
+            try:
+                if hasattr(self, "add_to_recent_directories"):
+                    self.add_to_recent_directories(self.current_directory)
+            except Exception:
+                logging.debug("add_to_recent_directories from display_thumbnails failed", exc_info=True)
 
         # 2. DB cache only — grid already cleared inside _initialize_thumbnail_display
         self.database.clear_entry_cache()
@@ -1855,6 +1865,12 @@ class VtpGridMixin:
             is_wide = new_mode == "Wide"
             if self.wide_folders_check_var.get() != is_wide:
                 self.wide_folders_check_var.set(is_wide)
+
+        # load_preferences writes this var during init; do not open default_directory
+        # before initialize_gui_content restores the last visited folder.
+        if not getattr(self, "_initial_folder_loaded", False):
+            logging.info("Skipping folder-view refresh until startup folder restore.")
+            return
 
         self.display_thumbnails(self.current_directory, preserve_scroll=True)
 
@@ -6936,21 +6952,23 @@ class VtpGridMixin:
     # Function to get the most recent directory from the correct JSON file
     def get_last_recent_directory(self):
         """
-        Loads the list of recent directories and returns the most recent one.
+        Return the most recently opened directory (list end = newest).
+        Prefers the in-memory list already loaded at startup.
         """
         try:
-            with open('recent_directories.json', 'r') as f:
+            recent_list = getattr(self, "recent_directories", None) or []
+            if recent_list:
+                return recent_list[-1]
+            with open("recent_directories.json", "r") as f:
                 data = json.load(f)
-            # The most recent path is the FIRST one in the list
             recent_list = data.get("recent_directories", [])
             if recent_list:
-                # Instead of [0] for the first item, use [-1] for the LAST item
                 return recent_list[-1]
         except FileNotFoundError:
             logging.info("No recent_directories.json file found.")
         except Exception as e:
             logging.error(f"Failed to get last recent directory: {e}")
-        return None # Return None if anything fails
+        return None
 
 
     def restore_tree_state(self):

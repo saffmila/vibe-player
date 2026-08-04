@@ -1022,6 +1022,62 @@ class Database:
             path_prefix,
         )
         return matched
+
+    @staticmethod
+    def _parse_dimensions_query(keyword):
+        """
+        Parse a dimensions search value.
+
+        Returns:
+            ('max', pixels) for a single number — compare against the larger side
+            ('wh', width, height) for ``WxH`` / ``W*H`` / ``W x H``
+        """
+        text = str(keyword or "").strip().lower().replace(",", ".")
+        if not text:
+            raise ValueError("empty dimensions")
+
+        for sep in ("x", "*"):
+            if sep in text:
+                left, right = text.split(sep, 1)
+                return ("wh", float(left.strip()), float(right.strip()))
+
+        return ("max", float(text))
+
+    def _search_by_dimensions(self, keyword, operator, path_prefix=None):
+        """
+        Compare stored width/height.
+
+        Single number (e.g. ``5000``): uses ``MAX(width, height)`` so either side
+        matching is enough for ``>=`` / ``>`` (images larger than N px on any side).
+
+        ``WxH`` (e.g. ``3000x5000``): compares width and height independently.
+        """
+        try:
+            parsed = self._parse_dimensions_query(keyword)
+        except ValueError:
+            logging.info("[Error] Invalid dimensions value: %s", keyword)
+            return []
+
+        if parsed[0] == "max":
+            value = parsed[1]
+            params = {"value": value}
+            scope_sql, params = self._path_prefix_sql(path_prefix, params)
+            query = (
+                f"SELECT * FROM files WHERE MAX(COALESCE(width, 0), COALESCE(height, 0)) "
+                f"{operator} :value AND MAX(COALESCE(width, 0), COALESCE(height, 0)) > 0"
+                f"{scope_sql}"
+            )
+        else:
+            _, w, h = parsed
+            params = {"w": w, "h": h}
+            scope_sql, params = self._path_prefix_sql(path_prefix, params)
+            query = (
+                f"SELECT * FROM files WHERE width {operator} :w AND height {operator} :h "
+                f"AND width > 0 AND height > 0{scope_sql}"
+            )
+
+        logging.debug("dimensions search query: %s params=%s", query, params)
+        return self.db.query(query, **params)
     
     def search_entries(self, search_param, keyword, and_or=None, operator=None, path_prefix=None):
         try:
@@ -1041,6 +1097,9 @@ class Database:
             # Handle numeric comparisons
             if operator in ('<=', '>=', '<', '>', '=', '!=') and search_param == 'file_size':
                 return self._search_by_file_size(keyword, operator, path_prefix=path_prefix)
+
+            if operator in ('<=', '>=', '<', '>', '=', '!=') and search_param == 'dimensions':
+                return self._search_by_dimensions(keyword, operator, path_prefix=path_prefix)
 
             if operator in ('<=', '>=', '<', '>', '=', '!=') and search_param in ['rating', 'width', 'height', 'duration']:
                 try:

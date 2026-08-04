@@ -3110,7 +3110,7 @@ def create_search_window(app):
 
     search_entry = ctk.CTkEntry(
         query_frame,
-        placeholder_text="Enter keyword, name.ext, or wildcards like 013*.png / *DJI*",
+        placeholder_text="keyword / name.ext / wildcards; dimensions: 5000 or 3000x5000",
     )
     search_entry.pack(side=ctk.LEFT, fill=ctk.X, expand=True)
 
