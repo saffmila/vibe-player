@@ -46,7 +46,7 @@ class VtpTaggingMixin:
                 result = plugin.run(file_path)
                 tags = result.get("tags", [])
                 if result.get("error") == "gpu_pack_missing":
-                    self._notify_gpu_pack_missing_once(result.get("message", "Není nainstalovaný Autotag GPU Pack"))
+                    self._notify_gpu_pack_missing_once(result.get("message", "Autotag GPU Pack is not installed"))
                     return
 
                 if tags:
@@ -141,7 +141,7 @@ class VtpTaggingMixin:
                     result = plugin.run(thumb_path)
                     tags = result.get("tags", [])
                     if result.get("error") == "gpu_pack_missing":
-                        self._notify_gpu_pack_missing_once(result.get("message", "Není nainstalovaný Autotag GPU Pack"))
+                        self._notify_gpu_pack_missing_once(result.get("message", "Autotag GPU Pack is not installed"))
                         break
                     if tags:
                         all_tags.update(tag.strip() for tag in tags if tag.strip())

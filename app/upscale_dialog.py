@@ -8,6 +8,7 @@ Advanced view (collapsed by default): backend, GPU, model, VRAM, paths, status.
 from __future__ import annotations
 
 import os
+import threading
 import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -32,6 +33,7 @@ from seedvr2_config import (
     PRESCALE_MODE_CUSTOM,
     PRESCALE_MODE_LABELS,
     PRESCALE_MODE_OFF,
+    default_setup_runner_dir,
     default_weights_dir,
     list_cuda_gpus,
     list_dit_models,
@@ -44,6 +46,215 @@ from seedvr2_config import (
 UPSCALE_DIALOG_WIDTH = 620
 UPSCALE_BASIC_HEIGHT = 380
 UPSCALE_ADVANCED_EXTRA = 420
+
+
+class SeedVR2RunnerInstallDialog(ctk.CTkToplevel):
+    """Explain-then-confirm dialog before downloading the SeedVR2 runner."""
+
+    _WIDTH = 560
+    _HEIGHT = 620
+
+    def __init__(self, parent, initial_dir: str):
+        super().__init__(parent)
+        self.title("Install SeedVR2 runner")
+        self.result_path: str | None = None
+        self._path = (initial_dir or "").strip() or default_setup_runner_dir()
+
+        # Size first — CTk reqheight is unreliable before the window is mapped,
+        # and locking a tiny geometry crops all content under the title.
+        self.geometry(f"{self._WIDTH}x{self._HEIGHT}")
+        self.minsize(self._WIDTH, 520)
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        from seedvr2_config import COMFY_REPO_URL
+        from seedvr2_runner_setup import (
+            SEEDVR2_RUNNER_REF,
+            SEEDVR2_RUNNER_REPO,
+            SEEDVR2_SETUP_DISK_ESTIMATE,
+            SEEDVR2_TORCH_INDEX,
+        )
+
+        # Buttons first (bottom) so they stay visible even if content is tall.
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(side="bottom", fill="x", padx=18, pady=(8, 16))
+        ctk.CTkButton(
+            btn_row,
+            text="Cancel",
+            width=110,
+            fg_color=("gray75", "#3a3a3a"),
+            hover_color=("gray65", "#4a4a4a"),
+            command=self._cancel,
+        ).pack(side="right")
+        ctk.CTkButton(
+            btn_row,
+            text="Install",
+            width=120,
+            command=self._install,
+        ).pack(side="right", padx=(0, 8))
+
+        scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        scroll.pack(side="top", fill="both", expand=True, padx=4, pady=(4, 0))
+
+        ctk.CTkLabel(
+            scroll,
+            text="Install SeedVR2 runner",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color="#00bfff",
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=(12, 6))
+
+        ctk.CTkLabel(
+            scroll,
+            text=(
+                "This installs the offline engine used by SeedVR 2 Upscale "
+                "(image/video). Vibe Player will call it locally — nothing is "
+                "uploaded."
+            ),
+            wraplength=500,
+            justify="left",
+            anchor="w",
+            text_color="#dddddd",
+        ).pack(fill="x", padx=14, pady=(0, 12))
+
+        body = ctk.CTkFrame(scroll, fg_color=("gray90", "#2a2a2a"), corner_radius=8)
+        body.pack(fill="x", padx=14, pady=(0, 12))
+
+        rows = [
+            ("What", f"ComfyUI-SeedVR2 CLI ({SEEDVR2_RUNNER_REF}) + Python .venv"),
+            ("Includes", "PyTorch (CUDA) and SeedVR2 Python dependencies"),
+            ("From", f"GitHub: {SEEDVR2_RUNNER_REPO}"),
+            ("Also from", "PyTorch CUDA wheels (download.pytorch.org)"),
+            ("Disk space", f"About {SEEDVR2_SETUP_DISK_ESTIMATE} (mostly PyTorch)"),
+            ("Time", "Several minutes on a typical connection"),
+            ("Network", "Required for the download"),
+        ]
+        for i, (label, value) in enumerate(rows):
+            row = ctk.CTkFrame(body, fg_color="transparent")
+            row.pack(
+                fill="x",
+                padx=12,
+                pady=(10 if i == 0 else 4, 4 if i < len(rows) - 1 else 10),
+            )
+            ctk.CTkLabel(
+                row,
+                text=label,
+                width=88,
+                anchor="nw",
+                text_color="#888888",
+                font=ctk.CTkFont(size=12, weight="bold"),
+            ).pack(side="left", anchor="n")
+            ctk.CTkLabel(
+                row,
+                text=value,
+                wraplength=380,
+                justify="left",
+                anchor="w",
+                text_color="#eeeeee",
+            ).pack(side="left", fill="x", expand=True)
+
+        ctk.CTkLabel(
+            scroll,
+            text="Install location",
+            anchor="w",
+            text_color="#aaaaaa",
+        ).pack(fill="x", padx=14, pady=(0, 4))
+
+        path_row = ctk.CTkFrame(scroll, fg_color="transparent")
+        path_row.pack(fill="x", padx=14, pady=(0, 6))
+        self.path_var = ctk.StringVar(value=self._path)
+        self.path_entry = ctk.CTkEntry(path_row, textvariable=self.path_var)
+        self.path_entry.pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(
+            path_row, text="Change…", width=90, command=self._change_folder
+        ).pack(side="left", padx=(8, 0))
+
+        ctk.CTkLabel(
+            scroll,
+            text=f"Source: {COMFY_REPO_URL}\nTorch index: {SEEDVR2_TORCH_INDEX}",
+            wraplength=500,
+            justify="left",
+            anchor="w",
+            text_color="#777777",
+            font=ctk.CTkFont(size=11),
+        ).pack(fill="x", padx=14, pady=(4, 16))
+
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.after(20, self._center_on_parent)
+        try:
+            self.focus_force()
+        except Exception:
+            pass
+
+    def _center_on_parent(self):
+        try:
+            self.update_idletasks()
+            self.geometry(f"{self._WIDTH}x{self._HEIGHT}")
+            parent = self.master
+            if parent is not None and parent.winfo_exists():
+                px = parent.winfo_rootx()
+                py = parent.winfo_rooty()
+                pw = parent.winfo_width()
+                ph = parent.winfo_height()
+                x = px + max(0, (pw - self._WIDTH) // 2)
+                y = py + max(0, (ph - self._HEIGHT) // 2)
+                self.geometry(f"{self._WIDTH}x{self._HEIGHT}+{x}+{y}")
+        except Exception:
+            pass
+
+    def _change_folder(self):
+        current = (self.path_var.get() or "").strip() or default_setup_runner_dir()
+        try:
+            os.makedirs(current, exist_ok=True)
+        except OSError:
+            current = default_setup_runner_dir()
+        chosen = filedialog.askdirectory(
+            parent=self,
+            initialdir=current,
+            title="Choose folder for SeedVR2 runner",
+        )
+        if chosen:
+            self.path_var.set(chosen)
+
+    def _cancel(self):
+        self.result_path = None
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
+
+    def _install(self):
+        path = (self.path_var.get() or "").strip()
+        if not path:
+            messagebox.showwarning(
+                "Install SeedVR2 runner",
+                "Choose an install location first.",
+                parent=self,
+            )
+            return
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError as exc:
+            messagebox.showerror(
+                "Install SeedVR2 runner",
+                f"Cannot create folder:\n{path}\n\n{exc}",
+                parent=self,
+            )
+            return
+        self.result_path = path
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
+
+    def show_and_wait(self) -> str | None:
+        """Block until closed; return chosen path or None if cancelled."""
+        self.wait_window(self)
+        return self.result_path
 
 
 class UpscaleOptionsDialog(ctk.CTkToplevel):
@@ -183,7 +394,7 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         # --- Action bar ---
         buttons = ctk.CTkFrame(self, fg_color="transparent")
         buttons.pack(side="bottom", fill="x", padx=16, pady=12)
-        ctk.CTkButton(buttons, text="Cancel", width=100, command=self.destroy).pack(
+        ctk.CTkButton(buttons, text="Cancel", width=100, command=self._on_close).pack(
             side="right"
         )
         ctk.CTkButton(buttons, text="Start", width=100, command=self._confirm).pack(
@@ -253,18 +464,17 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         _path_row(adv, 6, "Runner folder", self.runner_dir_var, self._browse_runner)
 
         link_row = ctk.CTkFrame(adv, fg_color="transparent")
-        link_row.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(8, 4))
+        link_row.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(20, 10))
+        link_btns = ctk.CTkFrame(link_row, fg_color="transparent")
+        link_btns.pack(anchor="center")
         ctk.CTkButton(
-            link_row, text="Open weights folder", width=150, command=self._open_weights_folder
+            link_btns, text="Open weights folder", width=150, command=self._open_weights_folder
         ).pack(side="left")
         ctk.CTkButton(
-            link_row, text="Download weights…", width=150, command=self._open_download_url
+            link_btns, text="Download weights…", width=150, command=self._open_download_url
         ).pack(side="left", padx=(8, 0))
         ctk.CTkButton(
-            link_row, text="Get runner…", width=120, command=self._open_runner_url
-        ).pack(side="left", padx=(8, 0))
-        ctk.CTkButton(
-            link_row, text="Save paths", width=100, command=self._save_paths_only
+            link_btns, text="Install runner…", width=130, command=self._setup_runner
         ).pack(side="left", padx=(8, 0))
 
         ctk.CTkLabel(
@@ -276,9 +486,18 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             anchor="w",
         ).grid(row=8, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
+        self._autosave_job = None
+        self._autosave_enabled = False
         self.weights_dir_var.trace_add("write", lambda *_: self._on_paths_changed())
         self.runner_dir_var.trace_add("write", lambda *_: self._on_paths_changed())
+        self.gpu_var.trace_add("write", lambda *_: self._schedule_autosave())
+        self.model_var.trace_add("write", lambda *_: self._schedule_autosave())
+        self.keep_vram_var.trace_add("write", lambda *_: self._schedule_autosave())
+        self.vae_tiled_var.trace_add("write", lambda *_: self._schedule_autosave())
+        self.output_format_var.trace_add("write", lambda *_: self._schedule_autosave())
+        self.prescale_custom_var.trace_add("write", lambda *_: self._schedule_autosave())
         self._refresh_status()
+        self._autosave_enabled = True
 
         want_open = bool(cfg.get(KEY_ADVANCED_OPEN))
         if want_open:
@@ -290,6 +509,7 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             self._set_advanced_open(False, persist=False, resize=False)
             self.geometry(f"{UPSCALE_DIALOG_WIDTH}x{UPSCALE_BASIC_HEIGHT}")
 
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(50, self._center_on_parent)
 
     def _set_advanced_open(self, open_: bool, *, persist: bool = True, resize: bool = True):
@@ -343,6 +563,50 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
                 self.prescale_custom_row.grid_remove()
         except Exception:
             pass
+        self._schedule_autosave()
+
+    def _schedule_autosave(self, delay_ms: int = 400):
+        """Debounced persist of SeedVR settings (paths, GPU, model, toggles)."""
+        if not getattr(self, "_autosave_enabled", False):
+            return
+        job = getattr(self, "_autosave_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+        try:
+            self._autosave_job = self.after(delay_ms, self._autosave_now)
+        except Exception:
+            self._autosave_job = None
+
+    def _autosave_now(self):
+        self._autosave_job = None
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+        self._persist_settings()
+
+    def _flush_autosave(self):
+        """Cancel debounce and write settings immediately."""
+        job = getattr(self, "_autosave_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+            self._autosave_job = None
+        if getattr(self, "_autosave_enabled", False):
+            self._persist_settings()
+
+    def _on_close(self):
+        self._flush_autosave()
+        try:
+            self.destroy()
+        except Exception:
+            pass
 
     def _selected_backend(self):
         label = self.backend_var.get()
@@ -388,6 +652,7 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
     def _on_paths_changed(self):
         self._reload_model_list(prefer=self._selected_dit_filename())
         self._refresh_status()
+        self._schedule_autosave()
 
     def _refresh_status(self):
         backend = self._selected_backend()
@@ -428,9 +693,7 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         )
         if chosen:
             self.weights_dir_var.set(chosen)
-            self._reload_model_list()
-            self._save_paths_only(quiet=True)
-            self._refresh_status()
+            self._flush_autosave()
 
     def _browse_runner(self):
         initial = self.runner_dir_var.get() or None
@@ -441,8 +704,7 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         )
         if chosen:
             self.runner_dir_var.set(chosen)
-            self._save_paths_only(quiet=True)
-            self._refresh_status()
+            self._flush_autosave()
 
     def _selected_cuda_index(self) -> str:
         label = (self.gpu_var.get() or "").strip()
@@ -456,7 +718,8 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
                 pass
         return "0"
 
-    def _save_paths_only(self, quiet: bool = False):
+    def _persist_settings(self):
+        """Write current SeedVR dialog options to settings.json (silent)."""
         weights = (self.weights_dir_var.get() or "").strip() or default_weights_dir()
         runner = (self.runner_dir_var.get() or "").strip()
         cuda = self._selected_cuda_index()
@@ -492,9 +755,11 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
                     pass
         backend = self._selected_backend()
         self._apply_paths_to_backend(backend)
-        if not quiet:
-            messagebox.showinfo("Upscale", "Settings saved.", parent=self)
         self._refresh_status()
+
+    def _save_paths_only(self, quiet: bool = True):
+        """Compat alias — settings always persist silently now."""
+        self._persist_settings()
 
     def _open_weights_folder(self):
         path = (self.weights_dir_var.get() or "").strip() or default_weights_dir()
@@ -513,15 +778,81 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             return
         webbrowser.open(url)
 
-    def _open_runner_url(self):
-        backend = self._selected_backend()
-        runner = backend.runner_status() if hasattr(backend, "runner_status") else {}
-        url = runner.get("download_url") or "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler"
-        webbrowser.open(url)
+    def _setup_runner(self):
+        """Explain-then-install flow for the ComfyUI-SeedVR2 CLI runner."""
+        initial = (self.runner_dir_var.get() or "").strip() or default_setup_runner_dir()
+        confirm = SeedVR2RunnerInstallDialog(self, initial_dir=initial)
+        chosen = confirm.show_and_wait()
+        if not chosen:
+            return
+
+        from gui_elements import open_file_op_progress_dialog
+        from seedvr2_runner_setup import setup_seedvr2_runner
+
+        progress = open_file_op_progress_dialog(
+            self,
+            title="Install SeedVR2 runner",
+            total=5,
+            action_label="Install",
+            topmost=True,
+            show_preview=False,
+        )
+
+        def _on_progress(step: int, total: int, detail: str):
+            try:
+                self.after(
+                    0,
+                    lambda s=step, t=total, d=detail: progress.set_progress(
+                        s, t, detail=d, phase="load"
+                    ),
+                )
+            except Exception:
+                pass
+
+        def _worker():
+            result = setup_seedvr2_runner(
+                chosen,
+                progress_cb=_on_progress,
+                should_stop=lambda: bool(getattr(progress, "cancelled", False)),
+            )
+
+            def _done():
+                try:
+                    progress.close()
+                except Exception:
+                    pass
+                if result.get("ok"):
+                    path = result.get("path") or chosen
+                    self.runner_dir_var.set(path)
+                    self._flush_autosave()
+                    messagebox.showinfo(
+                        "Install SeedVR2 runner",
+                        result.get("message") or f"Runner ready:\n{path}",
+                        parent=self,
+                    )
+                elif result.get("error") == "aborted":
+                    messagebox.showinfo(
+                        "Install SeedVR2 runner",
+                        "Installation cancelled.",
+                        parent=self,
+                    )
+                else:
+                    messagebox.showerror(
+                        "Install SeedVR2 runner",
+                        result.get("message") or "Installation failed.",
+                        parent=self,
+                    )
+
+            try:
+                self.after(0, _done)
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _confirm(self):
         backend = self._selected_backend()
-        self._save_paths_only(quiet=True)
+        self._flush_autosave()
         self._apply_paths_to_backend(backend)
 
         runtime = backend.runtime_status() if hasattr(backend, "runtime_status") else {"ready": True}

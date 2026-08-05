@@ -62,14 +62,23 @@ def default_weights_dir() -> str:
     return str(Path.home() / ".vibeplayer" / "models" / "seedvr2")
 
 
+def default_setup_runner_dir() -> str:
+    """Writable AppData location used by one-click Setup runner."""
+    base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+    if base:
+        return str(Path(base) / "VibePlayer" / "seedvr2_runner")
+    return str(Path.home() / ".vibeplayer" / "seedvr2_runner")
+
+
 def default_runner_dir() -> str:
-    """Prefer ``<repo>/seedvr2_runner`` when present next to the app."""
+    """Prefer an existing checkout (repo-local, then AppData setup dir)."""
     here = Path(__file__).resolve().parent  # app/
     candidates = [
         here.parent / "seedvr2_runner",
         here / "seedvr2_runner",
         Path.cwd() / "seedvr2_runner",
         Path.cwd().parent / "seedvr2_runner",
+        Path(default_setup_runner_dir()),
     ]
     for cand in candidates:
         if detect_runner(str(cand)):

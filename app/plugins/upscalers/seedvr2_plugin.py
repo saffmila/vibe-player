@@ -39,16 +39,15 @@ SEEDVR2_PROJECT_URL = "https://github.com/ByteDance-Seed/SeedVR"
 SEEDVR2_WEIGHTS_URL = "https://huggingface.co/models?other=seedvr"
 SEEDVR2_RUNNER_URL = COMFY_REPO_URL
 
-GPU_PACK_MISSING_MESSAGE = "Není nainstalovaný Autotag GPU Pack (potřeba pro SeedVR 2)."
+GPU_PACK_MISSING_MESSAGE = "Autotag GPU Pack is not installed (required for SeedVR 2)."
 WEIGHTS_MISSING_MESSAGE = (
     "SeedVR 2 weights not found. Download them from Hugging Face "
     f"({SEEDVR2_WEIGHTS_URL}) and place them in the models folder."
 )
 RUNNER_MISSING_MESSAGE = (
-    "SeedVR 2 runner not configured. Use the ComfyUI-SeedVR2 CLI checkout "
-    f"({SEEDVR2_RUNNER_URL}) — not the ByteDance research repo and not ComfyUI GUI. "
-    "Clone it, create .venv, then set Runner folder to the directory that contains "
-    "inference_cli.py."
+    "SeedVR 2 runner not configured. Click “Install runner…” to download the "
+    "ComfyUI-SeedVR2 CLI checkout automatically, or point Runner folder at a "
+    f"directory that contains inference_cli.py ({SEEDVR2_RUNNER_URL})."
 )
 OOM_HELP_MESSAGE = (
     "GPU out of memory (VRAM) during SeedVR 2.\n\n"

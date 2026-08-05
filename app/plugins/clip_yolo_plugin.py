@@ -14,7 +14,7 @@ from generate_tags_ilektra import run_tagging_pipeline
 from app_settings import TaggingSettings
 
 
-GPU_PACK_MISSING_MESSAGE = "Není nainstalovaný Autotag GPU Pack"
+GPU_PACK_MISSING_MESSAGE = "Autotag GPU Pack is not installed"
 
 
 def _is_gpu_pack_missing_error(exc: Exception) -> bool:
