@@ -16,6 +16,14 @@ module.exports = {
           "python -m pip install -r requirements.txt"
         ]
       }
+    },
+    // Ensure FFmpeg is present for installs that predate tools/ bundling
+    {
+      when: "{{platform === 'win32' && !exists('tools/ffmpeg/bin/ffmpeg.exe')}}",
+      method: "shell.run",
+      params: {
+        message: "powershell -NoProfile -ExecutionPolicy Bypass -File install_ffmpeg.ps1"
+      }
     }
   ]
 }
