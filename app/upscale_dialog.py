@@ -1,8 +1,8 @@
 """
 upscale_dialog.py — Options dialog for offline AI upscale backends.
 
-Basic view: scale / prescale / save format / output folder.
-Advanced view (collapsed by default): backend, GPU, model, VRAM, paths, status.
+Basic view: scale / prescale / save format (image) or MP4 (video) / output folder.
+Advanced view: backend, GPU, model, VRAM, batch / overlap / chunk / VAE tiles, paths.
 """
 
 from __future__ import annotations
@@ -16,8 +16,14 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 
 from seedvr2_config import (
+    BATCH_SIZE_AUTO,
+    BATCH_SIZE_LABELS,
+    CHUNK_SIZE_AUTO,
+    CHUNK_SIZE_LABELS,
     DEFAULT_DIT_MODEL,
     KEY_ADVANCED_OPEN,
+    KEY_BATCH_SIZE,
+    KEY_CHUNK_SIZE,
     KEY_CUDA_DEVICE,
     KEY_DIT_MODEL,
     KEY_KEEP_VRAM,
@@ -25,6 +31,10 @@ from seedvr2_config import (
     KEY_PRESCALE_CUSTOM,
     KEY_PRESCALE_MODE,
     KEY_RUNNER_DIR,
+    KEY_TEMPORAL_OVERLAP,
+    KEY_UNIFORM_BATCH,
+    KEY_VAE_DECODE_TILE,
+    KEY_VAE_ENCODE_TILE,
     KEY_VAE_TILED,
     KEY_WEIGHTS_DIR,
     OUTPUT_FORMAT_JPEG,
@@ -33,6 +43,10 @@ from seedvr2_config import (
     PRESCALE_MODE_CUSTOM,
     PRESCALE_MODE_LABELS,
     PRESCALE_MODE_OFF,
+    TEMPORAL_OVERLAP_DEFAULT,
+    VAE_DECODE_TILE_DEFAULT,
+    VAE_ENCODE_TILE_DEFAULT,
+    VAE_TILE_CHOICES,
     default_setup_runner_dir,
     default_weights_dir,
     list_cuda_gpus,
@@ -41,11 +55,13 @@ from seedvr2_config import (
     resolve_prescale_long_edge,
     save_seedvr2_settings,
 )
+from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS
 
 
-UPSCALE_DIALOG_WIDTH = 620
+UPSCALE_DIALOG_WIDTH = 640
 UPSCALE_BASIC_HEIGHT = 380
-UPSCALE_ADVANCED_EXTRA = 420
+UPSCALE_ADVANCED_EXTRA = 520
+UPSCALE_ADVANCED_EXTRA_VIDEO = 620
 
 
 class SeedVR2RunnerInstallDialog(ctk.CTkToplevel):
@@ -300,12 +316,32 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         self.gpu_var = ctk.StringVar(value=initial_gpu)
 
         n = len(self.paths)
+        self._n_img = sum(
+            1 for p in self.paths if os.path.splitext(p)[1].lower() in IMAGE_FORMATS
+        )
+        self._n_vid = sum(
+            1 for p in self.paths if os.path.splitext(p)[1].lower() in VIDEO_FORMATS
+        )
+        # Fallback: anything not image counts as video-ish for UI.
+        if self._n_img + self._n_vid < n:
+            self._n_vid = n - self._n_img
+        self._has_video = self._n_vid > 0
+        self._has_image = self._n_img > 0
+        self._video_only = self._has_video and not self._has_image
         if n <= 1:
             header = "SeedVR 2 Upscale — Single File"
-            subtitle = "1 file selected" if n == 1 else "No files selected"
+            kind = "video" if self._n_vid else "image"
+            subtitle = f"1 {kind} selected" if n == 1 else "No files selected"
         else:
             header = f"SeedVR 2 Upscale — Batch Mode ({n} items selected)"
-            subtitle = f"{n} files selected"
+            parts = []
+            if self._n_img:
+                parts.append(f"{self._n_img} image(s)")
+            if self._n_vid:
+                parts.append(f"{self._n_vid} video(s)")
+            subtitle = ", ".join(parts) if parts else f"{n} files selected"
+            if self._n_vid:
+                subtitle += " — video jobs can take a long time"
         self.title(header)
         ctk.CTkLabel(self, text=header, text_color="#00bfff").pack(pady=(12, 4))
         ctk.CTkLabel(self, text=subtitle, text_color="#aaaaaa").pack(pady=(0, 8))
@@ -314,6 +350,7 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         basic = ctk.CTkFrame(self, fg_color="transparent")
         basic.pack(fill="x", padx=16, pady=4)
         basic.grid_columnconfigure(1, weight=1)
+        self._basic = basic
 
         def _path_row(parent, row: int, label: str, variable: ctk.StringVar, browse_cmd):
             ctk.CTkLabel(parent, text=label).grid(row=row, column=0, sticky="w", pady=4)
@@ -380,13 +417,29 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
                 saved_fmt, self._fmt_label_by_mode[OUTPUT_FORMAT_PNG]
             )
         )
-        ctk.CTkLabel(basic, text="Save as").grid(row=3, column=0, sticky="w", pady=4)
-        ctk.CTkOptionMenu(
+
+        # Save-as adapts: images → PNG/JPEG; videos → MP4; mixed → both.
+        self._save_as_label = ctk.CTkLabel(basic, text="Save as")
+        self._save_as_label.grid(row=3, column=0, sticky="w", pady=4)
+        self._save_as_image_menu = ctk.CTkOptionMenu(
             basic,
             variable=self.output_format_var,
             values=[label for label, _m in OUTPUT_FORMAT_LABELS],
             width=320,
-        ).grid(row=3, column=1, sticky="ew", pady=4, padx=(8, 0))
+        )
+        self._save_as_video_label = ctk.CTkLabel(
+            basic,
+            text="MP4 (video output)",
+            text_color="#cccccc",
+            anchor="w",
+        )
+        self._save_as_mixed_label = ctk.CTkLabel(
+            basic,
+            text="Images: format below · Videos: always MP4",
+            text_color="#888888",
+            anchor="w",
+        )
+        self._layout_save_as_row()
 
         _path_row(basic, 4, "Output folder", self.output_dir_var, self._browse_output)
         self._on_prescale_mode_changed()
@@ -458,13 +511,93 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             adv,
             text="Low VRAM (tiled VAE encode/decode)",
             variable=self.vae_tiled_var,
+            command=self._on_vae_tiled_changed,
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(2, 4))
 
-        _path_row(adv, 5, "Weights folder", self.weights_dir_var, self._browse_weights)
-        _path_row(adv, 6, "Runner folder", self.runner_dir_var, self._browse_runner)
+        # --- Processing knobs (batch / overlap / chunk / tiles) ---
+        self._batch_label_by_val = {v: lab for lab, v in BATCH_SIZE_LABELS}
+        self._batch_val_by_label = {lab: v for lab, v in BATCH_SIZE_LABELS}
+        saved_batch = int(cfg.get(KEY_BATCH_SIZE) or BATCH_SIZE_AUTO)
+        self.batch_var = ctk.StringVar(
+            value=self._batch_label_by_val.get(
+                saved_batch, self._batch_label_by_val[BATCH_SIZE_AUTO]
+            )
+        )
+        ctk.CTkLabel(adv, text="Batch size").grid(row=5, column=0, sticky="w", pady=4)
+        ctk.CTkOptionMenu(
+            adv,
+            variable=self.batch_var,
+            values=[lab for lab, _v in BATCH_SIZE_LABELS],
+            width=320,
+        ).grid(row=5, column=1, sticky="ew", pady=4, padx=(8, 0))
+
+        self.uniform_batch_var = ctk.BooleanVar(
+            value=True if KEY_UNIFORM_BATCH not in cfg else bool(cfg.get(KEY_UNIFORM_BATCH))
+        )
+        ctk.CTkCheckBox(
+            adv,
+            text="Uniform batch size (pad last batch — better for video)",
+            variable=self.uniform_batch_var,
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(2, 4))
+
+        self._video_opts_start_row = 7
+        saved_overlap = int(cfg.get(KEY_TEMPORAL_OVERLAP) or TEMPORAL_OVERLAP_DEFAULT)
+        self.overlap_var = ctk.StringVar(value=str(max(0, min(16, saved_overlap))))
+        self._overlap_label = ctk.CTkLabel(adv, text="Temporal overlap")
+        self._overlap_label.grid(row=7, column=0, sticky="w", pady=4)
+        self._overlap_menu = ctk.CTkOptionMenu(
+            adv,
+            variable=self.overlap_var,
+            values=[str(i) for i in range(0, 9)],
+            width=320,
+        )
+        self._overlap_menu.grid(row=7, column=1, sticky="ew", pady=4, padx=(8, 0))
+
+        self._chunk_label_by_val = {v: lab for lab, v in CHUNK_SIZE_LABELS}
+        self._chunk_val_by_label = {lab: v for lab, v in CHUNK_SIZE_LABELS}
+        saved_chunk = int(cfg.get(KEY_CHUNK_SIZE) or CHUNK_SIZE_AUTO)
+        self.chunk_var = ctk.StringVar(
+            value=self._chunk_label_by_val.get(
+                saved_chunk, self._chunk_label_by_val[CHUNK_SIZE_AUTO]
+            )
+        )
+        self._chunk_label = ctk.CTkLabel(adv, text="Chunk size")
+        self._chunk_label.grid(row=8, column=0, sticky="w", pady=4)
+        self._chunk_menu = ctk.CTkOptionMenu(
+            adv,
+            variable=self.chunk_var,
+            values=[lab for lab, _v in CHUNK_SIZE_LABELS],
+            width=320,
+        )
+        self._chunk_menu.grid(row=8, column=1, sticky="ew", pady=4, padx=(8, 0))
+
+        tile_vals = [str(v) for v in VAE_TILE_CHOICES]
+        enc = int(cfg.get(KEY_VAE_ENCODE_TILE) or VAE_ENCODE_TILE_DEFAULT)
+        dec = int(cfg.get(KEY_VAE_DECODE_TILE) or VAE_DECODE_TILE_DEFAULT)
+        if enc not in VAE_TILE_CHOICES:
+            enc = VAE_ENCODE_TILE_DEFAULT
+        if dec not in VAE_TILE_CHOICES:
+            dec = VAE_DECODE_TILE_DEFAULT
+        self.encode_tile_var = ctk.StringVar(value=str(enc))
+        self.decode_tile_var = ctk.StringVar(value=str(dec))
+        self._encode_tile_label = ctk.CTkLabel(adv, text="VAE encode tile")
+        self._encode_tile_label.grid(row=9, column=0, sticky="w", pady=4)
+        self._encode_tile_menu = ctk.CTkOptionMenu(
+            adv, variable=self.encode_tile_var, values=tile_vals, width=320
+        )
+        self._encode_tile_menu.grid(row=9, column=1, sticky="ew", pady=4, padx=(8, 0))
+        self._decode_tile_label = ctk.CTkLabel(adv, text="VAE decode tile")
+        self._decode_tile_label.grid(row=10, column=0, sticky="w", pady=4)
+        self._decode_tile_menu = ctk.CTkOptionMenu(
+            adv, variable=self.decode_tile_var, values=tile_vals, width=320
+        )
+        self._decode_tile_menu.grid(row=10, column=1, sticky="ew", pady=4, padx=(8, 0))
+
+        _path_row(adv, 11, "Weights folder", self.weights_dir_var, self._browse_weights)
+        _path_row(adv, 12, "Runner folder", self.runner_dir_var, self._browse_runner)
 
         link_row = ctk.CTkFrame(adv, fg_color="transparent")
-        link_row.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(20, 10))
+        link_row.grid(row=13, column=0, columnspan=2, sticky="ew", pady=(20, 10))
         link_btns = ctk.CTkFrame(link_row, fg_color="transparent")
         link_btns.pack(anchor="center")
         ctk.CTkButton(
@@ -480,11 +613,11 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         ctk.CTkLabel(
             adv,
             textvariable=self.status_var,
-            wraplength=540,
+            wraplength=560,
             justify="left",
             text_color="#cccccc",
             anchor="w",
-        ).grid(row=8, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ).grid(row=14, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
         self._autosave_job = None
         self._autosave_enabled = False
@@ -496,14 +629,22 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         self.vae_tiled_var.trace_add("write", lambda *_: self._schedule_autosave())
         self.output_format_var.trace_add("write", lambda *_: self._schedule_autosave())
         self.prescale_custom_var.trace_add("write", lambda *_: self._schedule_autosave())
+        self.batch_var.trace_add("write", lambda *_: self._schedule_autosave())
+        self.uniform_batch_var.trace_add("write", lambda *_: self._schedule_autosave())
+        self.overlap_var.trace_add("write", lambda *_: self._schedule_autosave())
+        self.chunk_var.trace_add("write", lambda *_: self._schedule_autosave())
+        self.encode_tile_var.trace_add("write", lambda *_: self._schedule_autosave())
+        self.decode_tile_var.trace_add("write", lambda *_: self._schedule_autosave())
         self._refresh_status()
+        self._update_video_advanced_visibility()
+        self._on_vae_tiled_changed()
         self._autosave_enabled = True
 
         want_open = bool(cfg.get(KEY_ADVANCED_OPEN))
         if want_open:
             self._set_advanced_open(True, persist=False, resize=False)
             self.geometry(
-                f"{UPSCALE_DIALOG_WIDTH}x{UPSCALE_BASIC_HEIGHT + UPSCALE_ADVANCED_EXTRA}"
+                f"{UPSCALE_DIALOG_WIDTH}x{UPSCALE_BASIC_HEIGHT + self._advanced_extra_height()}"
             )
         else:
             self._set_advanced_open(False, persist=False, resize=False)
@@ -511,6 +652,76 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(50, self._center_on_parent)
+
+    def _advanced_extra_height(self) -> int:
+        return UPSCALE_ADVANCED_EXTRA_VIDEO if self._has_video else UPSCALE_ADVANCED_EXTRA
+
+    def _layout_save_as_row(self):
+        """Show image format menu and/or MP4 hint depending on selection."""
+        for w in (
+            getattr(self, "_save_as_image_menu", None),
+            getattr(self, "_save_as_video_label", None),
+            getattr(self, "_save_as_mixed_label", None),
+        ):
+            if w is None:
+                continue
+            try:
+                w.grid_remove()
+            except Exception:
+                pass
+        if self._video_only:
+            self._save_as_label.configure(text="Save as")
+            self._save_as_video_label.grid(
+                row=3, column=1, sticky="ew", pady=4, padx=(8, 0)
+            )
+        elif self._has_video and self._has_image:
+            self._save_as_label.configure(text="Images as")
+            self._save_as_image_menu.grid(
+                row=3, column=1, sticky="ew", pady=4, padx=(8, 0)
+            )
+        else:
+            self._save_as_label.configure(text="Save as")
+            self._save_as_image_menu.grid(
+                row=3, column=1, sticky="ew", pady=4, padx=(8, 0)
+            )
+
+    def _update_video_advanced_visibility(self):
+        """Show temporal overlap / chunk only when selection includes video."""
+        widgets = (
+            getattr(self, "_overlap_label", None),
+            getattr(self, "_overlap_menu", None),
+            getattr(self, "_chunk_label", None),
+            getattr(self, "_chunk_menu", None),
+        )
+        for w in widgets:
+            if w is None:
+                continue
+            try:
+                if self._has_video:
+                    w.grid()
+                else:
+                    w.grid_remove()
+            except Exception:
+                pass
+
+    def _on_vae_tiled_changed(self, *_args):
+        tiled = bool(self.vae_tiled_var.get())
+        for w in (
+            getattr(self, "_encode_tile_label", None),
+            getattr(self, "_encode_tile_menu", None),
+            getattr(self, "_decode_tile_label", None),
+            getattr(self, "_decode_tile_menu", None),
+        ):
+            if w is None:
+                continue
+            try:
+                if tiled:
+                    w.grid()
+                else:
+                    w.grid_remove()
+            except Exception:
+                pass
+        self._schedule_autosave()
 
     def _set_advanced_open(self, open_: bool, *, persist: bool = True, resize: bool = True):
         """Show or hide the advanced panel and optionally resize the window."""
@@ -522,7 +733,7 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             if resize:
                 self.update_idletasks()
                 self.geometry(
-                    f"{UPSCALE_DIALOG_WIDTH}x{UPSCALE_BASIC_HEIGHT + UPSCALE_ADVANCED_EXTRA}"
+                    f"{UPSCALE_DIALOG_WIDTH}x{UPSCALE_BASIC_HEIGHT + self._advanced_extra_height()}"
                 )
         else:
             self.advanced.pack_forget()
@@ -540,9 +751,39 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         self._set_advanced_open(not self._advanced_open, persist=True, resize=True)
 
     def _selected_output_format(self) -> str:
+        if self._video_only:
+            return "mp4"
         label = (self.output_format_var.get() or "").strip()
         mode = self._fmt_mode_by_label.get(label, OUTPUT_FORMAT_PNG)
         return OUTPUT_FORMAT_JPEG if mode == OUTPUT_FORMAT_JPEG else OUTPUT_FORMAT_PNG
+
+    def _selected_batch_size(self) -> int:
+        label = (self.batch_var.get() or "").strip()
+        return int(self._batch_val_by_label.get(label, BATCH_SIZE_AUTO))
+
+    def _selected_chunk_size(self) -> int:
+        label = (self.chunk_var.get() or "").strip()
+        return int(self._chunk_val_by_label.get(label, CHUNK_SIZE_AUTO))
+
+    def _selected_temporal_overlap(self) -> int:
+        try:
+            return max(0, min(16, int(self.overlap_var.get().strip())))
+        except (TypeError, ValueError):
+            return TEMPORAL_OVERLAP_DEFAULT
+
+    def _selected_encode_tile(self) -> int:
+        try:
+            v = int(self.encode_tile_var.get().strip())
+            return v if v in VAE_TILE_CHOICES else VAE_ENCODE_TILE_DEFAULT
+        except (TypeError, ValueError):
+            return VAE_ENCODE_TILE_DEFAULT
+
+    def _selected_decode_tile(self) -> int:
+        try:
+            v = int(self.decode_tile_var.get().strip())
+            return v if v in VAE_TILE_CHOICES else VAE_DECODE_TILE_DEFAULT
+        except (TypeError, ValueError):
+            return VAE_DECODE_TILE_DEFAULT
 
     def _selected_prescale_mode(self) -> str:
         label = (self.prescale_var.get() or "").strip()
@@ -724,6 +965,14 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         runner = (self.runner_dir_var.get() or "").strip()
         cuda = self._selected_cuda_index()
         dit = self._selected_dit_filename()
+        # Persist image format even in video-only (last preference); ignore mp4 sentinel.
+        out_fmt = self._selected_output_format()
+        if out_fmt == "mp4":
+            label = (self.output_format_var.get() or "").strip()
+            mode = self._fmt_mode_by_label.get(label, OUTPUT_FORMAT_PNG)
+            out_fmt = (
+                OUTPUT_FORMAT_JPEG if mode == OUTPUT_FORMAT_JPEG else OUTPUT_FORMAT_PNG
+            )
         save_seedvr2_settings(
             weights_dir=weights,
             runner_dir=runner,
@@ -731,10 +980,16 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             dit_model=dit,
             keep_vram=bool(self.keep_vram_var.get()),
             vae_tiled=bool(self.vae_tiled_var.get()),
-            output_format=self._selected_output_format(),
+            output_format=out_fmt,
             prescale_mode=self._selected_prescale_mode(),
             prescale_custom=self._selected_prescale_custom(),
             advanced_open=self._advanced_open,
+            batch_size=self._selected_batch_size(),
+            uniform_batch=bool(self.uniform_batch_var.get()),
+            temporal_overlap=self._selected_temporal_overlap(),
+            chunk_size=self._selected_chunk_size(),
+            vae_encode_tile=self._selected_encode_tile(),
+            vae_decode_tile=self._selected_decode_tile(),
         )
         if self.controller is not None:
             setattr(self.controller, "seedvr2_weights_dir", weights)
@@ -743,7 +998,7 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             setattr(self.controller, "seedvr2_dit_model", dit)
             setattr(self.controller, "seedvr2_keep_vram", bool(self.keep_vram_var.get()))
             setattr(self.controller, "seedvr2_vae_tiled", bool(self.vae_tiled_var.get()))
-            setattr(self.controller, "seedvr2_output_format", self._selected_output_format())
+            setattr(self.controller, "seedvr2_output_format", out_fmt)
             setattr(self.controller, "seedvr2_prescale_mode", self._selected_prescale_mode())
             setattr(self.controller, "seedvr2_prescale_custom", self._selected_prescale_custom())
             if not self.keep_vram_var.get():
@@ -910,22 +1165,32 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         long_edge = resolve_prescale_long_edge(mode, custom_px)
         out_dir = (self.output_dir_var.get() or "").strip() or None
         cuda = self._selected_cuda_index()
+        batch_size = self._selected_batch_size()
+        options = {
+            "scale": scale,
+            "output_dir": out_dir,
+            "suffix": f"_{getattr(backend, 'id', 'upscale')}",
+            "cuda_device": cuda,
+            "dit_model": dit,
+            "keep_vram": bool(self.keep_vram_var.get()),
+            "vae_tiled": bool(self.vae_tiled_var.get()),
+            "output_format": self._selected_output_format(),
+            "prescale_mode": mode,
+            "prescale_custom": custom_px,
+            "prescale_long_edge": long_edge,
+            "batch_size": batch_size if batch_size > 0 else None,
+            "uniform_batch_size": bool(self.uniform_batch_var.get()),
+            "vae_encode_tile_size": self._selected_encode_tile(),
+            "vae_decode_tile_size": self._selected_decode_tile(),
+        }
+        if self._has_video:
+            options["temporal_overlap"] = self._selected_temporal_overlap()
+            chunk = self._selected_chunk_size()
+            options["chunk_size"] = chunk if chunk > 0 else None
         self.result = {
             "backend_id": getattr(backend, "id", "upscale"),
             "paths": list(self.paths),
-            "options": {
-                "scale": scale,
-                "output_dir": out_dir,
-                "suffix": f"_{getattr(backend, 'id', 'upscale')}",
-                "cuda_device": cuda,
-                "dit_model": dit,
-                "keep_vram": bool(self.keep_vram_var.get()),
-                "vae_tiled": bool(self.vae_tiled_var.get()),
-                "output_format": self._selected_output_format(),
-                "prescale_mode": mode,
-                "prescale_custom": custom_px,
-                "prescale_long_edge": long_edge,
-            },
+            "options": options,
         }
         if callable(self.on_confirm):
             self.on_confirm(self.result)

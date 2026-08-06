@@ -33,7 +33,22 @@ from seedvr2_config import (
     resolve_prescale_long_edge,
     resolve_runner_python,
 )
+from seedvr2_progress import SeedVR2ProgressState
 from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS
+
+# Extensions SeedVR2 CLI accepts as video (subset of VIDEO_FORMATS + .m4v).
+SEEDVR2_VIDEO_FORMATS = frozenset(
+    {
+        ".mp4",
+        ".avi",
+        ".mov",
+        ".mkv",
+        ".webm",
+        ".flv",
+        ".wmv",
+        ".m4v",
+    }
+)
 
 SEEDVR2_PROJECT_URL = "https://github.com/ByteDance-Seed/SeedVR"
 SEEDVR2_WEIGHTS_URL = "https://huggingface.co/models?other=seedvr"
@@ -52,11 +67,11 @@ RUNNER_MISSING_MESSAGE = (
 OOM_HELP_MESSAGE = (
     "GPU out of memory (VRAM) during SeedVR 2.\n\n"
     "Try:\n"
-    "• Enable “Low VRAM (tiled VAE)” in the Upscale dialog\n"
-    "• Use Prescale → Optimal / Aggressive (smaller input)\n"
-    "• Lower Scale (2× instead of 4×)\n"
-    "• Pick a freer GPU, or turn off Keep-in-VRAM and retry\n"
-    "• Close other GPU apps (training, games, browsers)"
+    "• Prefer FP8 3B model (not FP16 / 7B) on 24 GB cards\n"
+    "• Lower Scale (2×), or Prescale → Optimal / Aggressive\n"
+    "• Enable “Low VRAM (tiled VAE)”\n"
+    "• Use the RTX 4090 — current runner torch does not support RTX 5090\n"
+    "• Close other GPU apps; turn off Keep-in-VRAM and retry"
 )
 
 
@@ -71,8 +86,37 @@ def _is_oom_text(text: str) -> bool:
             "allocation on device",
             "cudnn_status_alloc_failed",
             "hip out of memory",
+            "aborthandler",
+            "unhandled exception caught in c10",
         )
     )
+
+
+def _model_looks_heavy(dit_model: str) -> bool:
+    """FP16 / 7B / sharp need more VRAM than FP8 3B."""
+    name = (dit_model or "").lower()
+    if "fp8" in name and "_3b" in name:
+        return False
+    if "_7b" in name or "sharp" in name:
+        return True
+    if "fp16" in name or name.endswith(".pth"):
+        return True
+    return False
+
+
+def _auto_video_batch(resolution: int, dit_model: str) -> int:
+    """
+    Pick a 4n+1 video batch that fits common 24 GB cards.
+
+    ComfyUI HD uses 33 at ~1080 on big VRAM; portrait 2× (1440 short edge)
+    + FP16 easily OOMs a 4090 at batch 33.
+    """
+    heavy = _model_looks_heavy(dit_model)
+    if resolution >= 1440:
+        return 17 if heavy else 21
+    if resolution >= 1080 and heavy:
+        return 21
+    return VIDEO_BATCH_SIZE_DEFAULT
 
 
 def _format_runner_failure(tail: str) -> tuple[str, str]:
@@ -101,6 +145,21 @@ def _is_gpu_pack_missing_error(exc: BaseException) -> bool:
         "dll load failed",
     )
     return any(marker in text for marker in markers)
+
+
+def _seedvr_batch_4n1(value: int) -> int:
+    """SeedVR requires batch_size in {1, 5, 9, 13, ...} (4n+1)."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        n = 5
+    n = max(1, n)
+    return max(1, ((n - 1) // 4) * 4 + 1)
+
+
+# ComfyUI HD video upscale default (matches SeedVR temporal window).
+VIDEO_BATCH_SIZE_DEFAULT = 33
+IMAGE_BATCH_SIZE_DEFAULT = 5
 
 
 def _has_weight_files(path: Path) -> bool:
@@ -355,9 +414,8 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
         self.keep_vram = bool(cfg.get(KEY_KEEP_VRAM))
 
     def supports(self, file_path: str) -> bool:
-        # Video upscale is temporarily disabled (long jobs / freeze risk).
         ext = os.path.splitext(file_path)[1].lower()
-        return ext in IMAGE_FORMATS
+        return ext in IMAGE_FORMATS or ext in SEEDVR2_VIDEO_FORMATS
 
     def runtime_status(self) -> dict[str, Any]:
         try:
@@ -416,12 +474,17 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
             "scale": 2,
             "suffix": "_seedvr2",
             "output_dir": None,
-            "batch_size": 5,
+            "batch_size": None,  # None/0 = auto (video by model/res; images → 5)
             "resolution": None,  # auto from scale × short side
             "cuda_device": None,  # None = use saved setting
             "dit_model": None,  # None = use saved setting
             "keep_vram": None,  # None = use saved setting
             "vae_tiled": True,  # tiled VAE encode/decode — much lower VRAM
+            "uniform_batch_size": None,  # None = auto (on for video)
+            "temporal_overlap": None,
+            "chunk_size": None,
+            "vae_encode_tile_size": 1024,
+            "vae_decode_tile_size": 768,
             "output_format": "png",  # images: png|jpg (never keep webp/source)
             "prescale_mode": "off",
             "prescale_long_edge": None,  # int when custom / resolved
@@ -443,8 +506,8 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
                 ext = ".jpg"
             else:
                 ext = ".png"
-        elif ext_l in VIDEO_FORMATS and ext_l not in (".mp4", ".png"):
-            # Video path kept for a future re-enable; force mp4.
+        elif ext_l in SEEDVR2_VIDEO_FORMATS or ext_l in VIDEO_FORMATS:
+            # SeedVR video output is always mp4.
             ext = ".mp4"
         return os.path.join(out_dir, f"{stem}{suffix}{ext}")
 
@@ -576,15 +639,40 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
     ) -> dict[str, Any]:
         # Resolution is based on the (possibly prescaled) work input.
         resolution = self._target_resolution(work_path, opts)
-        try:
-            batch_size = int(opts.get("batch_size") or 5)
-        except (TypeError, ValueError):
-            batch_size = 5
-        if batch_size < 1:
-            batch_size = 1
+        is_video = os.path.splitext(work_path)[1].lower() in SEEDVR2_VIDEO_FORMATS
 
         cuda_device = str(opts.get("cuda_device") or self.cuda_device or "0").strip() or "0"
         dit_model = str(opts.get("dit_model") or self.dit_model or DEFAULT_DIT_MODEL).strip() or DEFAULT_DIT_MODEL
+
+        # ComfyUI HD video uses batch_size=33 (+ uniform). Images stay on small batches.
+        # Auto when unset/0; explicit dialog values always win.
+        raw_batch = opts.get("batch_size")
+        try:
+            raw_batch_i = int(raw_batch) if raw_batch is not None else 0
+        except (TypeError, ValueError):
+            raw_batch_i = 0
+        if is_video:
+            if raw_batch_i <= 0:
+                batch_size = _auto_video_batch(resolution, dit_model)
+            else:
+                batch_size = raw_batch_i
+        else:
+            batch_size = raw_batch_i if raw_batch_i > 0 else IMAGE_BATCH_SIZE_DEFAULT
+        batch_size = _seedvr_batch_4n1(batch_size)
+        if is_video:
+            logging.info(
+                "[SeedVR2] Video batch_size=%s (res=%s, model=%s)",
+                batch_size,
+                resolution,
+                dit_model,
+            )
+
+        uniform_batch = opts.get("uniform_batch_size")
+        if uniform_batch is None:
+            uniform_batch = bool(is_video)
+        else:
+            uniform_batch = bool(uniform_batch)
+
         keep_vram = opts.get("keep_vram")
         if keep_vram is None:
             keep_vram = bool(getattr(self, "keep_vram", False))
@@ -599,6 +687,17 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
         # High output short-side → force tiling even if user left it off.
         if resolution >= 1440:
             vae_tiled = True
+
+        try:
+            encode_tile = int(opts.get("vae_encode_tile_size") or 1024)
+        except (TypeError, ValueError):
+            encode_tile = 1024
+        try:
+            decode_tile = int(opts.get("vae_decode_tile_size") or 768)
+        except (TypeError, ValueError):
+            decode_tile = 768
+        encode_tile = max(256, min(2048, encode_tile))
+        decode_tile = max(256, min(2048, decode_tile))
 
         staged = ensure_model_visible_to_runner(self.runner_dir, self.weights_dir, dit_model)
         if staged is None and not (Path(self.weights_dir) / dit_model).is_file():
@@ -624,6 +723,27 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
         except Exception:
             pass
 
+        # Stream long videos in chunks so RAM/VRAM stay bounded.
+        chunk_size = 0
+        temporal_overlap = 0
+        if is_video:
+            try:
+                chunk_size = max(0, int(opts.get("chunk_size") or 0))
+            except (TypeError, ValueError):
+                chunk_size = 0
+            if chunk_size <= 0:
+                # Prefer ~10× batch window (Comfy examples use 330 with batch 33).
+                chunk_size = max(batch_size * 10, 100)
+                # Keep chunk length compatible with temporal batches.
+                chunk_size = _seedvr_batch_4n1(chunk_size)
+            try:
+                if opts.get("temporal_overlap") is None:
+                    temporal_overlap = 3
+                else:
+                    temporal_overlap = max(0, int(opts.get("temporal_overlap")))
+            except (TypeError, ValueError):
+                temporal_overlap = 3
+
         if keep_vram:
             return self._process_persistent(
                 input_path=work_path,
@@ -636,6 +756,12 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
                 batch_size=batch_size,
                 video_backend=video_backend,
                 vae_tiled=vae_tiled,
+                chunk_size=chunk_size,
+                temporal_overlap=temporal_overlap,
+                uniform_batch_size=uniform_batch,
+                encode_tile=encode_tile,
+                decode_tile=decode_tile,
+                is_video=is_video,
                 progress_cb=progress_cb,
                 should_stop=should_stop,
             )
@@ -657,20 +783,29 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
             "--dit_model",
             dit_model,
         ]
-        if video_backend == "ffmpeg":
+        if uniform_batch:
+            cmd.append("--uniform_batch_size")
+        if is_video:
+            cmd.extend(["--output_format", "mp4"])
+            if video_backend == "ffmpeg":
+                cmd.extend(["--video_backend", "ffmpeg"])
+            if chunk_size > 0:
+                cmd.extend(["--chunk_size", str(chunk_size)])
+            if temporal_overlap > 0:
+                cmd.extend(["--temporal_overlap", str(temporal_overlap)])
+        elif video_backend == "ffmpeg":
+            # Harmless for stills; kept for runner compatibility.
             cmd.extend(["--video_backend", "ffmpeg"])
         if vae_tiled:
             cmd.extend(["--vae_encode_tiled", "--vae_decode_tiled"])
-            # Slightly smaller tiles help stubborn OOMs on large stills.
-            if resolution >= 1440:
-                cmd.extend(
-                    [
-                        "--vae_encode_tile_size",
-                        "768",
-                        "--vae_decode_tile_size",
-                        "768",
-                    ]
-                )
+            cmd.extend(
+                [
+                    "--vae_encode_tile_size",
+                    str(encode_tile),
+                    "--vae_decode_tile_size",
+                    str(decode_tile),
+                ]
+            )
 
         # Prefer ffmpeg backend when available (bundled with Vibe Player).
         env = os.environ.copy()
@@ -716,6 +851,7 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
             }
 
         log_lines: list[str] = []
+        progress_state = SeedVR2ProgressState()
         assert proc.stdout is not None
         for line in proc.stdout:
             if should_stop and should_stop():
@@ -734,14 +870,8 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
                 log_lines.append(text)
                 logging.info("[SeedVR2] %s", text)
                 if progress_cb:
-                    low = text.lower()
-                    phase = "load" if any(
-                        t in low for t in ("load", "download", "weight", "model")
-                    ) and "upscal" not in low else "upscale"
-                    # Once inference-ish lines appear, force upscale phase.
-                    if any(t in low for t in ("processing", "frame", "encode", "decode", "generation", "fps")):
-                        phase = "upscale"
-                    progress_cb(0.5, text[:120], phase)
+                    frac, msg, phase = progress_state.update(text)
+                    progress_cb(frac, msg, phase)
 
         code = proc.wait()
         if code != 0:
@@ -804,6 +934,12 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
         batch_size: int,
         video_backend: str,
         vae_tiled: bool = True,
+        chunk_size: int = 0,
+        temporal_overlap: int = 0,
+        uniform_batch_size: bool = False,
+        encode_tile: int = 1024,
+        decode_tile: int = 768,
+        is_video: bool = False,
         progress_cb: Callable[[float, str], None] | None,
         should_stop: Callable[[], bool] | None,
     ) -> dict[str, Any]:
@@ -844,10 +980,17 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
             "batch_size": batch_size,
             "video_backend": video_backend,
             "vae_tiled": bool(vae_tiled),
+            "uniform_batch_size": bool(uniform_batch_size),
         }
-        if vae_tiled and resolution >= 1440:
-            job_opts["vae_encode_tile_size"] = 768
-            job_opts["vae_decode_tile_size"] = 768
+        if is_video:
+            job_opts["output_format"] = "mp4"
+            if chunk_size > 0:
+                job_opts["chunk_size"] = int(chunk_size)
+            if temporal_overlap > 0:
+                job_opts["temporal_overlap"] = int(temporal_overlap)
+        if vae_tiled:
+            job_opts["vae_encode_tile_size"] = int(encode_tile)
+            job_opts["vae_decode_tile_size"] = int(decode_tile)
 
         result = host.upscale(
             input_path=os.path.abspath(input_path),

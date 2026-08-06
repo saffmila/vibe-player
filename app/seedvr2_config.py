@@ -27,6 +27,12 @@ KEY_OUTPUT_FORMAT = "seedvr2_output_format"
 KEY_PRESCALE_MODE = "seedvr2_prescale_mode"
 KEY_PRESCALE_CUSTOM = "seedvr2_prescale_custom"
 KEY_ADVANCED_OPEN = "seedvr2_advanced_open"
+KEY_BATCH_SIZE = "seedvr2_batch_size"
+KEY_UNIFORM_BATCH = "seedvr2_uniform_batch"
+KEY_TEMPORAL_OVERLAP = "seedvr2_temporal_overlap"
+KEY_CHUNK_SIZE = "seedvr2_chunk_size"
+KEY_VAE_ENCODE_TILE = "seedvr2_vae_encode_tile"
+KEY_VAE_DECODE_TILE = "seedvr2_vae_decode_tile"
 
 # Long-edge presets (px). Downscale-only before SeedVR to clear soft/compressed detail.
 PRESCALE_MODE_OFF = "off"
@@ -48,6 +54,22 @@ PRESCALE_MODE_LABELS = (
     ("Aggressive (~960 long edge)", PRESCALE_MODE_AGGRESSIVE),
     ("Custom…", PRESCALE_MODE_CUSTOM),
 )
+
+# 0 = Auto (plugin picks by model/resolution). Values must be 4n+1 for SeedVR.
+BATCH_SIZE_AUTO = 0
+BATCH_SIZE_CHOICES = (0, 1, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41)
+BATCH_SIZE_LABELS = tuple(
+    ("Auto (recommended)", 0) if v == 0 else (str(v), v) for v in BATCH_SIZE_CHOICES
+)
+CHUNK_SIZE_AUTO = 0
+CHUNK_SIZE_CHOICES = (0, 100, 165, 330, 495)
+CHUNK_SIZE_LABELS = tuple(
+    ("Auto (recommended)", 0) if v == 0 else (str(v), v) for v in CHUNK_SIZE_CHOICES
+)
+TEMPORAL_OVERLAP_DEFAULT = 3
+VAE_ENCODE_TILE_DEFAULT = 1024
+VAE_DECODE_TILE_DEFAULT = 768
+VAE_TILE_CHOICES = (512, 768, 1024, 1280)
 
 BYTEDANCE_REPO_URL = "https://github.com/ByteDance-Seed/SeedVR"
 COMFY_REPO_URL = "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler"
@@ -104,6 +126,12 @@ def load_seedvr2_settings() -> dict:
         KEY_PRESCALE_MODE: PRESCALE_MODE_OFF,
         KEY_PRESCALE_CUSTOM: PRESCALE_CUSTOM_DEFAULT,
         KEY_ADVANCED_OPEN: False,
+        KEY_BATCH_SIZE: BATCH_SIZE_AUTO,
+        KEY_UNIFORM_BATCH: True,
+        KEY_TEMPORAL_OVERLAP: TEMPORAL_OVERLAP_DEFAULT,
+        KEY_CHUNK_SIZE: CHUNK_SIZE_AUTO,
+        KEY_VAE_ENCODE_TILE: VAE_ENCODE_TILE_DEFAULT,
+        KEY_VAE_DECODE_TILE: VAE_DECODE_TILE_DEFAULT,
     }
     path = settings_path()
     if not path.is_file():
@@ -152,6 +180,33 @@ def load_seedvr2_settings() -> dict:
                 pass
         if KEY_ADVANCED_OPEN in raw:
             data[KEY_ADVANCED_OPEN] = bool(raw.get(KEY_ADVANCED_OPEN))
+        if KEY_UNIFORM_BATCH in raw:
+            data[KEY_UNIFORM_BATCH] = bool(raw.get(KEY_UNIFORM_BATCH))
+        try:
+            bs = int(raw.get(KEY_BATCH_SIZE, BATCH_SIZE_AUTO))
+            data[KEY_BATCH_SIZE] = bs if bs in BATCH_SIZE_CHOICES else BATCH_SIZE_AUTO
+        except (TypeError, ValueError):
+            pass
+        try:
+            ov = int(raw.get(KEY_TEMPORAL_OVERLAP, TEMPORAL_OVERLAP_DEFAULT))
+            data[KEY_TEMPORAL_OVERLAP] = max(0, min(16, ov))
+        except (TypeError, ValueError):
+            pass
+        try:
+            cs = int(raw.get(KEY_CHUNK_SIZE, CHUNK_SIZE_AUTO))
+            data[KEY_CHUNK_SIZE] = cs if cs in CHUNK_SIZE_CHOICES else CHUNK_SIZE_AUTO
+        except (TypeError, ValueError):
+            pass
+        try:
+            et = int(raw.get(KEY_VAE_ENCODE_TILE, VAE_ENCODE_TILE_DEFAULT))
+            data[KEY_VAE_ENCODE_TILE] = et if et in VAE_TILE_CHOICES else VAE_ENCODE_TILE_DEFAULT
+        except (TypeError, ValueError):
+            pass
+        try:
+            dt = int(raw.get(KEY_VAE_DECODE_TILE, VAE_DECODE_TILE_DEFAULT))
+            data[KEY_VAE_DECODE_TILE] = dt if dt in VAE_TILE_CHOICES else VAE_DECODE_TILE_DEFAULT
+        except (TypeError, ValueError):
+            pass
         if not data.get(KEY_RUNNER_DIR):
             data[KEY_RUNNER_DIR] = default_runner_dir()
     except Exception as exc:
@@ -198,6 +253,12 @@ def save_seedvr2_settings(
     prescale_mode: str | None = None,
     prescale_custom: int | None = None,
     advanced_open: bool | None = None,
+    batch_size: int | None = None,
+    uniform_batch: bool | None = None,
+    temporal_overlap: int | None = None,
+    chunk_size: int | None = None,
+    vae_encode_tile: int | None = None,
+    vae_decode_tile: int | None = None,
 ) -> dict:
     """Merge SeedVR2 keys into settings.json and return the updated seedvr subset."""
     path = settings_path()
@@ -250,6 +311,41 @@ def save_seedvr2_settings(
             current[KEY_PRESCALE_CUSTOM] = PRESCALE_CUSTOM_DEFAULT
     if advanced_open is not None:
         current[KEY_ADVANCED_OPEN] = bool(advanced_open)
+    if batch_size is not None:
+        try:
+            bs = int(batch_size)
+            current[KEY_BATCH_SIZE] = bs if bs in BATCH_SIZE_CHOICES else BATCH_SIZE_AUTO
+        except (TypeError, ValueError):
+            current[KEY_BATCH_SIZE] = BATCH_SIZE_AUTO
+    if uniform_batch is not None:
+        current[KEY_UNIFORM_BATCH] = bool(uniform_batch)
+    if temporal_overlap is not None:
+        try:
+            current[KEY_TEMPORAL_OVERLAP] = max(0, min(16, int(temporal_overlap)))
+        except (TypeError, ValueError):
+            current[KEY_TEMPORAL_OVERLAP] = TEMPORAL_OVERLAP_DEFAULT
+    if chunk_size is not None:
+        try:
+            cs = int(chunk_size)
+            current[KEY_CHUNK_SIZE] = cs if cs in CHUNK_SIZE_CHOICES else CHUNK_SIZE_AUTO
+        except (TypeError, ValueError):
+            current[KEY_CHUNK_SIZE] = CHUNK_SIZE_AUTO
+    if vae_encode_tile is not None:
+        try:
+            et = int(vae_encode_tile)
+            current[KEY_VAE_ENCODE_TILE] = (
+                et if et in VAE_TILE_CHOICES else VAE_ENCODE_TILE_DEFAULT
+            )
+        except (TypeError, ValueError):
+            current[KEY_VAE_ENCODE_TILE] = VAE_ENCODE_TILE_DEFAULT
+    if vae_decode_tile is not None:
+        try:
+            dt = int(vae_decode_tile)
+            current[KEY_VAE_DECODE_TILE] = (
+                dt if dt in VAE_TILE_CHOICES else VAE_DECODE_TILE_DEFAULT
+            )
+        except (TypeError, ValueError):
+            current[KEY_VAE_DECODE_TILE] = VAE_DECODE_TILE_DEFAULT
 
     settings.update(current)
     try:

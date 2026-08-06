@@ -33,6 +33,11 @@ def _build_args(job: dict) -> SimpleNamespace:
     resolution = int(opts.get("resolution") or 1080)
     batch_size = int(opts.get("batch_size") or 5)
     video_backend = opts.get("video_backend") or "opencv"
+    chunk_size = int(opts.get("chunk_size") or 0)
+    temporal_overlap = int(opts.get("temporal_overlap") or 0)
+    uniform_batch_size = bool(opts.get("uniform_batch_size") or False)
+    vae_encode_tile = int(opts.get("vae_encode_tile_size") or 1024)
+    vae_decode_tile = int(opts.get("vae_decode_tile_size") or 768)
 
     return SimpleNamespace(
         input=job.get("input"),
@@ -48,22 +53,24 @@ def _build_args(job: dict) -> SimpleNamespace:
         seed=int(opts.get("seed") or 42),
         skip_first_frames=0,
         load_cap=0,
-        chunk_size=0,
+        chunk_size=chunk_size,
         prepend_frames=0,
-        temporal_overlap=0,
+        temporal_overlap=temporal_overlap,
         color_correction=opts.get("color_correction") or "lab",
         input_noise_scale=0.0,
         latent_noise_scale=0.0,
+        # Keep on GPU for speed on high-VRAM cards (4090). ComfyUI CPU offload
+        # + blocks_to_swap is a VRAM saver, not a speed path.
         dit_offload_device="none",
         vae_offload_device="none",
         tensor_offload_device="none",
         blocks_to_swap=0,
         swap_io_components=False,
         vae_encode_tiled=bool(opts.get("vae_tiled", True)),
-        vae_encode_tile_size=int(opts.get("vae_encode_tile_size") or 1024),
+        vae_encode_tile_size=vae_encode_tile,
         vae_encode_tile_overlap=128,
         vae_decode_tiled=bool(opts.get("vae_tiled", True)),
-        vae_decode_tile_size=int(opts.get("vae_decode_tile_size") or 1024),
+        vae_decode_tile_size=vae_decode_tile,
         vae_decode_tile_overlap=128,
         tile_debug="false",
         allow_vram_overflow=False,
@@ -80,7 +87,7 @@ def _build_args(job: dict) -> SimpleNamespace:
         cache_vae=True,
         cuda_device=cuda_device,
         debug=bool(opts.get("debug") or False),
-        uniform_batch_size=False,
+        uniform_batch_size=uniform_batch_size,
     )
 
 
@@ -204,16 +211,71 @@ def main() -> int:
                 itype = seedvr_cli.get_input_type(input_path)
                 args.output_format = "mp4" if itype == "video" else "png"
 
-            _emit({"event": "progress", "phase": "upscale", "msg": f"Upscaling {Path(input_path).name}…"})
+            _emit({"event": "progress", "phase": "upscale", "msg": f"Upscaling {Path(input_path).name}…", "frac": 0.1})
 
-            frames = seedvr_cli.process_single_file(
-                input_path,
-                args,
-                device_list,
-                output_path,
-                format_auto_detected=format_auto,
-                runner_cache=runner_cache,
-            )
+            # Forward SeedVR debug lines as progress events (chunk N/M, etc.).
+            # Mirror logs to stderr — stdout is reserved for JSON protocol.
+            from seedvr2_progress import SeedVR2ProgressState
+
+            progress_state = SeedVR2ProgressState(frac=0.1, phase="upscale")
+            dbg = getattr(seedvr_cli, "debug", None)
+            orig_log = getattr(dbg, "log", None) if dbg is not None else None
+            hooked = False
+
+            if dbg is not None and callable(orig_log):
+
+                def _patched_log(
+                    message: str,
+                    level: str = "INFO",
+                    category: str = "general",
+                    force: bool = False,
+                    indent_level: int = 0,
+                ):
+                    text = str(message or "")
+                    try:
+                        if text and (getattr(dbg, "enabled", False) or force) and "█" not in text[:2]:
+                            print(f"[seedvr2] {text}", file=sys.stderr, flush=True)
+                    except Exception:
+                        pass
+                    if not text:
+                        return
+                    frac, msg, phase = progress_state.update(text)
+                    if any(
+                        tok in text
+                        for tok in (
+                            "Chunk ",
+                            "Video info:",
+                            "Streaming mode:",
+                            "Streaming complete",
+                            "Output saved",
+                            "Processing time:",
+                        )
+                    ):
+                        _emit(
+                            {
+                                "event": "progress",
+                                "phase": phase,
+                                "msg": msg,
+                                "frac": frac,
+                            }
+                        )
+
+                dbg.log = _patched_log  # type: ignore[method-assign]
+                hooked = True
+
+            try:
+                frames = seedvr_cli.process_single_file(
+                    input_path,
+                    args,
+                    device_list,
+                    output_path,
+                    format_auto_detected=format_auto,
+                    runner_cache=runner_cache,
+                )
+            finally:
+                if hooked and dbg is not None and orig_log is not None:
+                    dbg.log = orig_log  # type: ignore[method-assign]
+
             if frames <= 0 and not Path(output_path).is_file():
                 _emit(
                     {

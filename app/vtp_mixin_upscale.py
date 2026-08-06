@@ -43,7 +43,7 @@ class VtpUpscaleMixin:
         self.after(0, lambda: messagebox.showwarning(title, text))
 
     def selected_paths_for_upscale(self, clicked_path: str | None = None) -> list[str]:
-        """Resolve image paths from multi-select or the right-clicked item (images only)."""
+        """Resolve image/video paths from multi-select or the right-clicked item."""
         selected_paths: list[str] = []
         if hasattr(self, "selected_thumbnails") and self.selected_thumbnails:
             selected_paths = [
@@ -56,14 +56,14 @@ class VtpUpscaleMixin:
             selected_paths = [clicked_path]
 
         supported = []
-        skipped_video = 0
+        skipped_unsupported = 0
         for path in selected_paths:
             ext = os.path.splitext(path)[1].lower()
-            if ext in IMAGE_FORMATS:
+            if ext in IMAGE_FORMATS or ext in VIDEO_FORMATS:
                 supported.append(path)
-            elif ext in VIDEO_FORMATS:
-                skipped_video += 1
-        self._upscale_skipped_video_count = skipped_video
+            else:
+                skipped_unsupported += 1
+        self._upscale_skipped_unsupported_count = skipped_unsupported
         return supported
 
     def list_available_upscale_backends(self) -> list:
@@ -79,24 +79,9 @@ class VtpUpscaleMixin:
     def open_upscale_dialog(self, clicked_path: str | None = None):
         """Open upscale options for the current selection."""
         paths = self.selected_paths_for_upscale(clicked_path)
-        skipped_video = int(getattr(self, "_upscale_skipped_video_count", 0) or 0)
         if not paths:
-            if skipped_video:
-                messagebox.showinfo(
-                    "Upscale",
-                    "Video upscale is not enabled yet.\n\n"
-                    "Please select one or more images.",
-                )
-            else:
-                messagebox.showinfo("Upscale", "No images selected.")
+            messagebox.showinfo("Upscale", "No images or videos selected.")
             return
-        if skipped_video:
-            # Selection mixed: continue with images only, warn once.
-            messagebox.showinfo(
-                "Upscale",
-                f"Skipping {skipped_video} video(s) — video upscale is not enabled yet.\n"
-                f"Continuing with {len(paths)} image(s).",
-            )
 
         backends = self.list_available_upscale_backends()
         if not backends:
@@ -105,6 +90,29 @@ class VtpUpscaleMixin:
                 "No upscale plugins loaded. Check app.log for plugin import errors.",
             )
             return
+
+        # Drop formats the primary backend cannot handle (e.g. .mpg for SeedVR2).
+        primary = next(
+            (b for b in backends if getattr(b, "id", "") == "seedvr2"),
+            backends[0],
+        )
+        if hasattr(primary, "supports"):
+            accepted = [p for p in paths if primary.supports(p)]
+            skipped = len(paths) - len(accepted)
+            if not accepted:
+                messagebox.showinfo(
+                    "Upscale",
+                    "Selected files are not supported by SeedVR 2.\n\n"
+                    "Videos: mp4, mkv, mov, avi, webm, flv, wmv.",
+                )
+                return
+            if skipped:
+                messagebox.showinfo(
+                    "Upscale",
+                    f"Skipping {skipped} unsupported file(s).\n"
+                    f"Continuing with {len(accepted)} file(s).",
+                )
+            paths = accepted
 
         UpscaleOptionsDialog(
             self,

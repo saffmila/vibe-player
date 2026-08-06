@@ -26,6 +26,7 @@ class SeedVR2WorkerHost:
         self._python: str | None = None
         self._runner_dir: str | None = None
         self._worker_script: str | None = None
+        self._recent_noise: list[str] = []
 
     @property
     def alive(self) -> bool:
@@ -132,7 +133,12 @@ class SeedVR2WorkerHost:
             try:
                 return json.loads(line)
             except json.JSONDecodeError:
-                logging.warning("[SeedVR2] Non-JSON worker line: %s", line[:200])
+                text = (line or "").rstrip()
+                if text:
+                    self._recent_noise.append(text)
+                    if len(self._recent_noise) > 40:
+                        self._recent_noise = self._recent_noise[-40:]
+                    logging.warning("[SeedVR2] Non-JSON worker line: %s", text[:200])
                 return self._read_event(timeout_s=timeout_s)
 
         # POSIX: select-based timeout
@@ -149,7 +155,12 @@ class SeedVR2WorkerHost:
             try:
                 return json.loads(line)
             except json.JSONDecodeError:
-                logging.warning("[SeedVR2] Non-JSON worker line: %s", line[:200])
+                text = (line or "").rstrip()
+                if text:
+                    self._recent_noise.append(text)
+                    if len(self._recent_noise) > 40:
+                        self._recent_noise = self._recent_noise[-40:]
+                    logging.warning("[SeedVR2] Non-JSON worker line: %s", text[:200])
                 continue
         return {"event": "timeout", "ok": False, "message": "Worker read timeout"}
 
@@ -223,7 +234,14 @@ class SeedVR2WorkerHost:
                 if kind == "progress":
                     if progress_cb:
                         phase = evt.get("phase") or "upscale"
-                        progress_cb(0.5, str(evt.get("msg") or "Working…"), phase)
+                        try:
+                            frac = float(
+                                evt.get("frac") if evt.get("frac") is not None else 0.5
+                            )
+                        except (TypeError, ValueError):
+                            frac = 0.5
+                        frac = max(0.0, min(1.0, frac))
+                        progress_cb(frac, str(evt.get("msg") or "Working…"), phase)
                     continue
                 if kind == "preview":
                     # UI polls the file; optional nudge via progress text.
@@ -245,12 +263,34 @@ class SeedVR2WorkerHost:
                         "message": evt.get("message") or "Upscale failed",
                     }
                 if kind in ("eof", "timeout", "fatal", "error"):
+                    noise = "\n".join(self._recent_noise[-15:])
                     self._shutdown_unlocked()
+                    msg = evt.get("message") or "Worker error"
+                    # Native CUDA abort often dumps a stack to stdout then dies.
+                    low_noise = noise.lower()
+                    if (
+                        "allocation on device" in low_noise
+                        or "out of memory" in low_noise
+                        or "aborthandler" in low_noise
+                    ):
+                        return {
+                            "ok": False,
+                            "output_path": None,
+                            "error": "oom",
+                            "message": (
+                                "GPU out of memory (VRAM) — SeedVR worker crashed.\n\n"
+                                "Try FP8 3B model (not FP16), lower Scale, or a smaller video."
+                            ),
+                        }
+                    if kind == "eof":
+                        msg = "Worker exited"
+                        if noise:
+                            msg = f"Worker exited.\n\n{noise[-500:]}"
                     return {
                         "ok": False,
                         "output_path": None,
-                        "error": kind,
-                        "message": evt.get("message") or "Worker error",
+                        "error": "oom" if "allocation on device" in (msg or "").lower() else kind,
+                        "message": msg,
                     }
                 # ignore unknown events
 
