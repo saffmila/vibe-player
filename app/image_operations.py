@@ -11,6 +11,7 @@ so Canvas-only use never loads GL.
 
 import io
 import logging
+import math
 import os
 import queue as _Q
 import sys
@@ -36,6 +37,23 @@ from image_loader import load_pil_frames, load_pil_image
 from image_resize_dialog import open_resize_image_dialog
 from external_apps import append_external_apps_cascade, append_external_apps_flat_commands
 from vtp_constants import IMAGE_FORMATS
+
+# Legacy Canvas zoom: coalesce wheel notches; viewport tiles when scaled size is huge.
+_ZOOM_COALESCE_MS = 16
+_VIEWPORT_FULL_BUDGET = 3_500_000
+_VIEWPORT_OVERSCAN_FRAC = 0.45
+_VIEWPORT_OVERSCAN_MIN = 96
+_VIEWPORT_EDGE_MARGIN = 48
+_VIEWPORT_REFRESH_MS = 16
+_MIP_MIN_SIDE = 512
+_MIP_MAX_LEVELS = 6
+# Wheel zoom: mild soft preview; pan tile refresh: coarser (FastStone-style).
+_MIP_ZOOM_BIAS = 1
+_MIP_PAN_BIAS = 2
+_MIP_INTERACTIVE_COVER = 0.55
+_MIP_HQ_COVER = 0.95
+_HQ_DELAY_MS = 500
+_HQ_LANCZOS_MAX_SIDE = 4096
 
 
 def _with_native_dialogs(win, fn):
@@ -117,6 +135,7 @@ class ImageViewerLegacy:
         self._anim_durations: list = []
         self._anim_index = 0
         self._anim_after_id = None
+        self._image_mips: list = []
 
         frames, durations = load_pil_frames(self.image_path)
         self._apply_loaded_frames(frames, durations, reset_title=False)
@@ -139,6 +158,9 @@ class ImageViewerLegacy:
         self._hq_timer = None
         self._overlay_after_id = None
         self._zoom_timer = None
+        self._viewport_refresh_after = None
+        # (tile_l, tile_t, tile_w, tile_h, disp_w, disp_h) when using viewport paint.
+        self._tile_meta = None
         
         # --- NOVÉ PROMĚNNÉ ---
         self.bg_colors = ['black', '#303030', 'white']
@@ -406,7 +428,10 @@ class ImageViewerLegacy:
         if not frames:
             raise ValueError("no image frames")
         self._stop_animation()
-        self._anim_frames = list(frames)
+        frames = list(frames)
+        if len(frames) == 1:
+            frames[0] = self._normalize_pil_for_view(frames[0])
+        self._anim_frames = frames
         self._anim_durations = list(durations) if durations else [0] * len(frames)
         if len(self._anim_durations) < len(self._anim_frames):
             self._anim_durations.extend(
@@ -415,8 +440,80 @@ class ImageViewerLegacy:
         self._anim_index = 0
         self.image = self._anim_frames[0]
         self.original_image = self._anim_frames[0]
+        self._rebuild_mips()
         if reset_title:
             self.image_window.title(self.image_name)
+
+    def _normalize_pil_for_view(self, im: PILImage.Image) -> PILImage.Image:
+        """RGB when opaque — faster resize/PhotoImage than RGBA."""
+        has_alpha = (
+            im.mode in ("RGBA", "LA")
+            or (im.mode == "P" and "transparency" in getattr(im, "info", {}))
+        )
+        return im.convert("RGBA" if has_alpha else "RGB")
+
+    def _rebuild_mips(self) -> None:
+        """Power-of-two pyramid for cheap fit / zoomed-out paints (static images only)."""
+        self._image_mips = []
+        if self._is_animated() or self.original_image is None:
+            return
+        levels = [self.original_image]
+        cur = self.original_image
+        while max(cur.size) > _MIP_MIN_SIDE and len(levels) < _MIP_MAX_LEVELS:
+            nw = max(1, cur.size[0] // 2)
+            nh = max(1, cur.size[1] // 2)
+            cur = cur.resize((nw, nh), PILImage.BOX)
+            levels.append(cur)
+        self._image_mips = levels
+
+    def _pick_mip(
+        self, full_box, out_w: int, out_h: int, *, interactive: bool = False, bias=None
+    ):
+        """Choose coarsest mip that still has enough pixels for out_w×out_h.
+
+        interactive=True (wheel/pan): looser cover + bias toward coarser levels.
+        bias: extra mip levels to drop (defaults to zoom bias when interactive).
+        """
+        mips = self._image_mips or [self.original_image]
+        full = mips[0]
+        fw = max(1, full.size[0])
+        src_w = max(1, full_box[2] - full_box[0])
+        src_h = max(1, full_box[3] - full_box[1])
+        cover = _MIP_INTERACTIVE_COVER if interactive else _MIP_HQ_COVER
+        best_i = 0
+        for i, mip in enumerate(mips):
+            scale = fw / float(max(1, mip.size[0]))
+            if (src_w / scale) >= out_w * cover and (src_h / scale) >= out_h * cover:
+                best_i = i
+            else:
+                break
+        if interactive:
+            drop = _MIP_ZOOM_BIAS if bias is None else int(bias)
+            if drop > 0:
+                best_i = min(len(mips) - 1, best_i + drop)
+        mip = mips[best_i]
+        scale = fw / float(max(1, mip.size[0]))
+        box = (
+            max(0, int(math.floor(full_box[0] / scale))),
+            max(0, int(math.floor(full_box[1] / scale))),
+            min(mip.size[0], int(math.ceil(full_box[2] / scale))),
+            min(mip.size[1], int(math.ceil(full_box[3] / scale))),
+        )
+        if box[2] <= box[0]:
+            box = (box[0], box[1], min(mip.size[0], box[0] + 1), box[3])
+        if box[3] <= box[1]:
+            box = (box[0], box[1], box[2], min(mip.size[1], box[1] + 1))
+        return mip, best_i, box
+
+    def _hq_resample(self):
+        """LANCZOS only for moderate sources — huge stills stay on BILINEAR."""
+        try:
+            side = max(self.original_image.size)
+            if side > _HQ_LANCZOS_MAX_SIDE:
+                return PILImage.BILINEAR
+        except Exception:
+            pass
+        return PILImage.LANCZOS
 
     def _stop_animation(self):
         job = getattr(self, "_anim_after_id", None)
@@ -466,11 +563,18 @@ class ImageViewerLegacy:
         self._anim_index = min(self._anim_index, len(self._anim_frames) - 1)
         self.original_image = self._anim_frames[self._anim_index]
         self.image = self.original_image
+        self._rebuild_mips()
         if was_animated:
             self._start_animation_if_needed()
 
     def _cancel_pending_image_timers(self):
-        for attr in ("_hq_timer", "_overlay_after_id", "_zoom_timer", "_anim_after_id"):
+        for attr in (
+            "_hq_timer",
+            "_overlay_after_id",
+            "_zoom_timer",
+            "_viewport_refresh_after",
+            "_anim_after_id",
+        ):
             job = getattr(self, attr, None)
             if job is None:
                 continue
@@ -499,6 +603,9 @@ class ImageViewerLegacy:
 
     def enter_crop_mode(self):
         """Start inline crop overlay + bottom HUD toolbar."""
+        # Crop maps via full-image canvas bbox — leave viewport tiles first.
+        if getattr(self, "_tile_meta", None) is not None:
+            self.update_image(high_quality=False, center=False)
         self.crop.enter()
 
     def exit_crop_mode(self):
@@ -717,10 +824,12 @@ class ImageViewerLegacy:
     def _on_canvas_xscroll(self, *args):
         self.canvas.xview(*args)
         self._refresh_overlays()
+        self._maybe_refresh_viewport_tile()
 
     def _on_canvas_yscroll(self, *args):
         self.canvas.yview(*args)
         self._refresh_overlays()
+        self._maybe_refresh_viewport_tile()
 
     def _set_image_scrollregion_only(self):
         """Scroll jen podle obrázku — HUD nesmí rozšiřovat scrollregion (posuny / skoky)."""
@@ -808,16 +917,34 @@ class ImageViewerLegacy:
         self._view_fit_mode = "manual"
         scale = 1.1 if event.delta > 0 else 0.9
         self.zoom_factor *= scale
-        self.update_image()
+        self._schedule_zoom_paint()
 
     def zoom_in(self, event=None):
         self._view_fit_mode = "manual"
         self.zoom_factor *= 1.1
-        self.update_image()
+        self._schedule_zoom_paint()
 
     def zoom_out(self, event=None):
         self._view_fit_mode = "manual"
         self.zoom_factor *= 0.9
+        self._schedule_zoom_paint()
+
+    def _schedule_zoom_paint(self):
+        """Coalesce rapid wheel/key zooms — one paint per ~16ms with latest zoom_factor."""
+        if self._zoom_timer is not None:
+            return
+        try:
+            self._zoom_timer = self.image_window.after(
+                _ZOOM_COALESCE_MS, self._flush_zoom_paint
+            )
+        except Exception:
+            self._zoom_timer = None
+            self.update_image()
+
+    def _flush_zoom_paint(self):
+        self._zoom_timer = None
+        if not getattr(self, "_running", False):
+            return
         self.update_image()
 
     def actual_size(self):
@@ -1000,10 +1127,12 @@ class ImageViewerLegacy:
 
     def end_pan(self, event):
         self.canvas.config(cursor="arrow")
+        self._maybe_refresh_viewport_tile(force=True)
 
     def do_pan(self, event):
         self.canvas.scan_dragto(event.x, event.y, gain=1)
         self._refresh_overlays()
+        self._maybe_refresh_viewport_tile()
  
     def toggle_fullscreen(self, event=None):
         self.set_fullscreen(not self.is_fullscreen)
@@ -1109,13 +1238,20 @@ class ImageViewerLegacy:
             if self.vbar.get() != (0.0, 1.0):
                 self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
                 self._refresh_overlays()
+                self._maybe_refresh_viewport_tile()
 
 
-    def update_image(self, high_quality=False, center=False, refresh_overlays=True):
+    def update_image(
+        self, high_quality=False, center=False, refresh_overlays=True, mip_bias=None
+    ):
         """
         Aktualizuje obrázek na plátně.
         high_quality=False -> Použije rychlý BILINEAR (pro zoomování).
         high_quality=True  -> Použije pomalý LANCZOS (pro finální zobrazení).
+
+        Large zooms use a viewport+overscan tile (scrollregion stays full-size) so
+        pan can use canvas scan/scroll without re-rasterizing every move.
+        mip_bias: interactive mip drop (None → zoom bias; pan refresh passes pan bias).
         """
         if not getattr(self, "_running", False):
             return
@@ -1125,54 +1261,230 @@ class ImageViewerLegacy:
         except tk.TclError:
             return
 
-        # 1. Zrušíme jakýkoliv čekající HQ render (protože uživatel právě změnil stav)
+        # Cancel pending coalesced zoom / HQ / viewport refresh — we're painting now.
+        if self._zoom_timer:
+            try:
+                self.image_window.after_cancel(self._zoom_timer)
+            except Exception:
+                pass
+            self._zoom_timer = None
         if self._hq_timer:
             try:
                 self.image_window.after_cancel(self._hq_timer)
             except Exception:
                 pass
             self._hq_timer = None
+        if self._viewport_refresh_after:
+            try:
+                self.image_window.after_cancel(self._viewport_refresh_after)
+            except Exception:
+                pass
+            self._viewport_refresh_after = None
 
-        width = int(self.original_image.width * self.zoom_factor)
-        height = int(self.original_image.height * self.zoom_factor)
-        
-        # Ochrana proti příliš malým rozměrům (min 1px)
-        width = max(1, width)
-        height = max(1, height)
+        width = max(1, int(self.original_image.width * self.zoom_factor))
+        height = max(1, int(self.original_image.height * self.zoom_factor))
+        interactive = not high_quality
+        method = self._hq_resample() if high_quality else PILImage.BILINEAR
 
-        # 2. Rozhodnutí o metodě
-        # BILINEAR je rychlý a vypadá OK. LANCZOS je pomalý a vypadá skvěle.
-        method = PILImage.LANCZOS if high_quality else PILImage.BILINEAR
-        
-        # 3. Samotný resize
-        resized_image = self.original_image.resize((width, height), method)
-        self.photo = ImageTk.PhotoImage(resized_image)
-        self.canvas.itemconfig(self.canvas_image, image=self.photo)
-        if center:
-            self._center_image_for_size(width, height)
+        try:
+            cw = max(1, self.canvas.winfo_width())
+            ch = max(1, self.canvas.winfo_height())
+        except Exception:
+            cw, ch = 1, 1
+
+        if not self._image_mips and not self._is_animated():
+            self._rebuild_mips()
+
+        use_viewport = self._should_use_viewport(width, height, cw, ch)
+        if use_viewport:
+            self._paint_viewport_tile(
+                width,
+                height,
+                method,
+                center=center,
+                interactive=interactive,
+                mip_bias=mip_bias,
+            )
+        else:
+            prev_meta = self._tile_meta
+            self._tile_meta = None
+            iw, ih = self.original_image.size
+            mip, _lvl, box = self._pick_mip(
+                (0, 0, iw, ih),
+                width,
+                height,
+                interactive=interactive,
+                bias=mip_bias,
+            )
+            src = mip if box == (0, 0, mip.size[0], mip.size[1]) else mip.crop(box)
+            resized_image = self._resize_filtered(src, (width, height), method)
+            self.photo = ImageTk.PhotoImage(resized_image)
+            self.canvas.itemconfig(self.canvas_image, image=self.photo)
+            if center:
+                self._center_image_for_size(width, height)
+            elif prev_meta is not None:
+                # Leave viewport mode: place full bitmap at virtual origin.
+                self.canvas.coords(self.canvas_image, 0, 0)
 
         # Scrollbary mění vnitřní rozměr canvasu — proto centrovat znovu po jejich grid_remove/grid.
         self.update_scrollbars()
-        if center:
+        if center and not use_viewport:
             self.canvas.update_idletasks()
             self._center_image_for_size(width, height)
 
-        self._set_image_scrollregion_only()
+        if use_viewport:
+            self.canvas.config(scrollregion=(0, 0, width, height))
+        else:
+            self._set_image_scrollregion_only()
 
-        # 4. Naplánování HQ renderu (Debounce)
-        # Pokud jsme teď jeli v rychlém režimu, řekneme: 
-        # "Za 150ms to překresli do hezka, pokud do té doby uživatel nic neudělá."
-        # Animace: žádný HQ debounce — soupeřil by s frame timerem.
         if (
             not high_quality
             and getattr(self, "_running", False)
             and not self._is_animated()
         ):
-            self._hq_timer = self.image_window.after(150, self._render_hq)
-            
-        # --- ZDE MUSÍ BÝT TOTO: ---
+            self._hq_timer = self.image_window.after(_HQ_DELAY_MS, self._render_hq)
+
         if refresh_overlays:
             self._refresh_overlays()
+
+    def _should_use_viewport(self, disp_w: int, disp_h: int, cw: int, ch: int) -> bool:
+        if self._is_animated() or self._crop_active():
+            return False
+        if cw < 64 or ch < 64:
+            return False
+        budget = max(_VIEWPORT_FULL_BUDGET, int(cw) * int(ch) * 3)
+        return int(disp_w) * int(disp_h) > budget
+
+    def _resize_filtered(self, image, size, resample):
+        tw, th = size
+        if tw < 1 or th < 1:
+            return image
+        if image.size == (tw, th):
+            return image
+        sw, sh = image.size
+        # Upscale from a coarse interactive mip → NEAREST (fast + visibly soft like FastStone).
+        if resample == PILImage.NEAREST or (
+            resample != PILImage.LANCZOS and (tw > sw or th > sh)
+        ):
+            return image.resize((tw, th), PILImage.NEAREST)
+        if resample != PILImage.LANCZOS and (tw * 2 < sw or th * 2 < sh):
+            return image.resize((tw, th), PILImage.BOX)
+        return image.resize((tw, th), resample)
+
+    def _paint_viewport_tile(
+        self,
+        disp_w: int,
+        disp_h: int,
+        method,
+        *,
+        center: bool,
+        interactive: bool = False,
+        mip_bias=None,
+    ):
+        """Crop+scale visible(+overscan) region; scrollregion stays full disp size."""
+        try:
+            cw = max(1, self.canvas.winfo_width())
+            ch = max(1, self.canvas.winfo_height())
+        except Exception:
+            return
+
+        if center:
+            # Reset view to top-left of the virtual image (matches prior large-zoom behavior).
+            try:
+                self.canvas.xview_moveto(0)
+                self.canvas.yview_moveto(0)
+            except Exception:
+                pass
+
+        try:
+            vx0 = float(self.canvas.canvasx(0))
+            vy0 = float(self.canvas.canvasy(0))
+            vx1 = float(self.canvas.canvasx(cw))
+            vy1 = float(self.canvas.canvasy(ch))
+        except Exception:
+            vx0, vy0, vx1, vy1 = 0.0, 0.0, float(cw), float(ch)
+
+        mx = max(float(_VIEWPORT_OVERSCAN_MIN), cw * _VIEWPORT_OVERSCAN_FRAC)
+        my = max(float(_VIEWPORT_OVERSCAN_MIN), ch * _VIEWPORT_OVERSCAN_FRAC)
+        t_l = max(0.0, vx0 - mx)
+        t_t = max(0.0, vy0 - my)
+        t_r = min(float(disp_w), vx1 + mx)
+        t_b = min(float(disp_h), vy1 + my)
+        if t_r <= t_l + 1e-6 or t_b <= t_t + 1e-6:
+            t_l, t_t = 0.0, 0.0
+            t_r = min(float(disp_w), float(cw) + mx)
+            t_b = min(float(disp_h), float(ch) + my)
+
+        out_w = max(1, int(math.ceil(t_r - t_l)))
+        out_h = max(1, int(math.ceil(t_b - t_t)))
+        z = float(self.zoom_factor) if self.zoom_factor else 1.0
+        iw, ih = self.original_image.size
+        sx0 = max(0.0, t_l / z)
+        sy0 = max(0.0, t_t / z)
+        sx1 = min(float(iw), t_r / z)
+        sy1 = min(float(ih), t_b / z)
+        full_box = (
+            max(0, min(iw - 1, int(math.floor(sx0)))),
+            max(0, min(ih - 1, int(math.floor(sy0)))),
+            max(1, min(iw, int(math.ceil(sx1)))),
+            max(1, min(ih, int(math.ceil(sy1)))),
+        )
+        if full_box[2] <= full_box[0]:
+            full_box = (full_box[0], full_box[1], full_box[0] + 1, full_box[3])
+        if full_box[3] <= full_box[1]:
+            full_box = (full_box[0], full_box[1], full_box[2], full_box[1] + 1)
+
+        mip, _lvl, box = self._pick_mip(
+            full_box, out_w, out_h, interactive=interactive, bias=mip_bias
+        )
+        cropped = mip.crop(box)
+        scaled = self._resize_filtered(cropped, (out_w, out_h), method)
+        self.photo = ImageTk.PhotoImage(scaled)
+        self.canvas.itemconfig(self.canvas_image, image=self.photo)
+        self.canvas.coords(self.canvas_image, t_l, t_t)
+        self._tile_meta = (t_l, t_t, float(out_w), float(out_h), disp_w, disp_h)
+        self.canvas.config(scrollregion=(0, 0, disp_w, disp_h))
+
+    def _maybe_refresh_viewport_tile(self, *, force: bool = False):
+        meta = getattr(self, "_tile_meta", None)
+        if meta is None:
+            return
+        t_l, t_t, tw, th, disp_w, disp_h = meta
+        try:
+            cw = max(1, self.canvas.winfo_width())
+            ch = max(1, self.canvas.winfo_height())
+            vx0 = float(self.canvas.canvasx(0))
+            vy0 = float(self.canvas.canvasy(0))
+            vx1 = float(self.canvas.canvasx(cw))
+            vy1 = float(self.canvas.canvasy(ch))
+        except Exception:
+            return
+        m = float(_VIEWPORT_EDGE_MARGIN)
+        needs = force or (
+            vx0 < t_l + m
+            or vy0 < t_t + m
+            or vx1 > t_l + tw - m
+            or vy1 > t_t + th - m
+        )
+        if not needs:
+            return
+        if self._viewport_refresh_after is not None:
+            return
+        try:
+            self._viewport_refresh_after = self.image_window.after(
+                _VIEWPORT_REFRESH_MS, self._flush_viewport_refresh
+            )
+        except Exception:
+            self._viewport_refresh_after = None
+            self.update_image(
+                high_quality=False, center=False, mip_bias=_MIP_PAN_BIAS
+            )
+
+    def _flush_viewport_refresh(self):
+        self._viewport_refresh_after = None
+        if not getattr(self, "_running", False):
+            return
+        self.update_image(high_quality=False, center=False, mip_bias=_MIP_PAN_BIAS)
 
     def _render_hq(self):
         """Voláno časovačem, když je klid."""
@@ -1320,18 +1632,24 @@ class ImageViewerLegacy:
         """Draw bottom-right viewport overview for zoomed/panned legacy Canvas viewer."""
         self.canvas.delete("minimap")
 
-        image_bbox = self.canvas.bbox(self.canvas_image)
-        if not image_bbox:
-            return
+        meta = getattr(self, "_tile_meta", None)
+        if meta is not None:
+            _t_l, _t_t, _tw, _th, disp_w, disp_h = meta
+            img_x1, img_y1 = 0.0, 0.0
+            img_w, img_h = float(disp_w), float(disp_h)
+        else:
+            image_bbox = self.canvas.bbox(self.canvas_image)
+            if not image_bbox:
+                return
+            img_x1, img_y1, img_x2, img_y2 = image_bbox
+            img_w = img_x2 - img_x1
+            img_h = img_y2 - img_y1
 
         canvas_w = self.canvas.winfo_width()
         canvas_h = self.canvas.winfo_height()
         if canvas_w <= 1 or canvas_h <= 1:
             return
 
-        img_x1, img_y1, img_x2, img_y2 = image_bbox
-        img_w = img_x2 - img_x1
-        img_h = img_y2 - img_y1
         if img_w <= 0 or img_h <= 0:
             return
 
@@ -1358,6 +1676,8 @@ class ImageViewerLegacy:
             tags="minimap",
         )
 
+        img_x2 = img_x1 + img_w
+        img_y2 = img_y1 + img_h
         vp_l = max(img_x1, min(img_x2, view_x1))
         vp_t = max(img_y1, min(img_y2, view_y1))
         vp_r = max(img_x1, min(img_x2, view_x2))
@@ -1382,14 +1702,19 @@ class ImageViewerLegacy:
     def update_scrollbars(self):
         canvas_width = self.canvas.winfo_width()
         canvas_height = self.canvas.winfo_height()
-        image_bbox = self.canvas.bbox(self.canvas_image)
-
-        if image_bbox:
+        meta = getattr(self, "_tile_meta", None)
+        if meta is not None:
+            image_width = float(meta[4])
+            image_height = float(meta[5])
+        else:
+            image_bbox = self.canvas.bbox(self.canvas_image)
+            if not image_bbox:
+                return
             image_width = image_bbox[2] - image_bbox[0]
             image_height = image_bbox[3] - image_bbox[1]
 
-            self.hbar.grid() if image_width > canvas_width else self.hbar.grid_remove()
-            self.vbar.grid() if image_height > canvas_height else self.vbar.grid_remove()
+        self.hbar.grid() if image_width > canvas_width else self.hbar.grid_remove()
+        self.vbar.grid() if image_height > canvas_height else self.vbar.grid_remove()
 
     def show_context_menu(self, event):
         menu = tk.Menu(self.image_window, tearoff=0)

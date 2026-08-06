@@ -2769,6 +2769,55 @@ def list_audio_devices():
         return []
 
 
+def collect_file_info_display(app) -> dict:
+    """Snapshot View → Show for files checkbox states (excludes derived all_fields)."""
+    keys = ("name", "path", "file_size", "date_time", "dimensions", "keywords")
+    defaults = {
+        "name": True,
+        "path": False,
+        "file_size": False,
+        "date_time": False,
+        "dimensions": False,
+        "keywords": True,
+    }
+    out = {}
+    vars_map = getattr(app, "file_info_vars", {}) or {}
+    for key in keys:
+        var = vars_map.get(key)
+        if var is None:
+            continue
+        try:
+            out[key] = bool(var.get())
+        except Exception:
+            out[key] = defaults.get(key, False)
+    return out
+
+
+def apply_file_info_display(app, saved) -> None:
+    """Restore View → Show for files checkbox states from settings."""
+    keys = ("name", "path", "file_size", "date_time", "dimensions", "keywords")
+    defaults = {
+        "name": True,
+        "path": False,
+        "file_size": False,
+        "date_time": False,
+        "dimensions": False,
+        "keywords": True,
+    }
+    if not isinstance(saved, dict):
+        saved = {}
+    vars_map = getattr(app, "file_info_vars", {}) or {}
+    if not vars_map:
+        return
+    for key in keys:
+        var = vars_map.get(key)
+        if var is None:
+            continue
+        var.set(bool(saved.get(key, defaults.get(key, False))))
+    all_checked = all(vars_map[k].get() for k in keys if k in vars_map)
+    if "all_fields" in vars_map:
+        vars_map["all_fields"].set(all_checked)
+
 
 def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capture_method,video_output,audio_output,hardware_decoding,audio_device,thumbnail_size,thumbnail_time):
     selected_audio_device = app.audio_device_var.get()
@@ -2857,6 +2906,7 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
         "seedvr2_cuda_device": str(getattr(app, "seedvr2_cuda_device", "0") or "0"),
         "seedvr2_dit_model": getattr(app, "seedvr2_dit_model", "") or DEFAULT_DIT_MODEL,
         "seedvr2_keep_vram": bool(getattr(app, "seedvr2_keep_vram", False)),
+        "file_info_display": collect_file_info_display(app),
     }
     # Save splitter positions (fractions 0-1) when panes are visible
     try:

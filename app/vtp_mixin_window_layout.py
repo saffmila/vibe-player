@@ -607,7 +607,8 @@ class VtpWindowLayoutMixin:
         
         # NOTE: Make sure you call the correct update function here.
         # If the main update function is named differently, change it.
-        self.update_thumbnail_info() 
+        self.update_thumbnail_info()
+        self.save_preferences()
 
     def sync_all_fields_checkbox(self):
         """
@@ -626,6 +627,7 @@ class VtpWindowLayoutMixin:
 
         # NOTE: Make sure you call the correct update function here too.
         self.update_thumbnail_info()
+        self.save_preferences()
 
     def show_error_message(self, title, message):
         """Display a modal error dialog. Reuses an open one instead of stacking copies."""
