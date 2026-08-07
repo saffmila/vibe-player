@@ -28,10 +28,10 @@ from seedvr2_config import COMFY_REPO_URL, default_setup_runner_dir, detect_runn
 # Pin to a released tag (not floating main). Bump intentionally when upgrading.
 SEEDVR2_RUNNER_REF = "v2.5.23"
 SEEDVR2_RUNNER_REPO = "numz/ComfyUI-SeedVR2_VideoUpscaler"
-SEEDVR2_TORCH_INDEX = "https://download.pytorch.org/whl/cu121"
+SEEDVR2_TORCH_INDEX = "https://download.pytorch.org/whl/cu130"
 
 # Rough disk budget shown in the confirm UI (sources + CUDA torch + venv).
-SEEDVR2_SETUP_DISK_ESTIMATE = "~4–6 GB"
+SEEDVR2_SETUP_DISK_ESTIMATE = "~6–8 GB"
 
 ProgressCb = Callable[[int, int, str], None]
 StopCb = Callable[[], bool]
@@ -388,13 +388,19 @@ def ensure_runner_venv(
         vpy,
         [
             "install",
-            "torch",
-            "torchvision",
+            "torch==2.9.1",
+            "torchvision==0.24.1",
+            "torchaudio==2.9.1",
             "--index-url",
             SEEDVR2_TORCH_INDEX,
         ],
         should_stop,
     )
+    # Windows Triton build used by ComfyUI / RTX 50-series stacks.
+    try:
+        _run_pip(vpy, ["install", "triton-windows"], should_stop)
+    except Exception as exc:
+        logging.warning("[SeedVR2 Setup] triton-windows install skipped: %s", exc)
     if req.is_file():
         pkgs = _filter_requirements(req)
         if pkgs:

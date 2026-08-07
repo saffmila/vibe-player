@@ -50,6 +50,51 @@ SEEDVR2_VIDEO_FORMATS = frozenset(
     }
 )
 
+
+def _preferred_attention_mode(
+    python_exe: str | None = None,
+    *,
+    keep_vram: bool = False,
+) -> str:
+    """
+    Pick a stable attention backend for the SeedVR runner venv.
+
+    SageAttention 2 uses Triton kernels that break when DiT/VAE caching
+    offloads tensors to CPU (``Keep model in VRAM`` path) — typical error:
+    ``Pointer argument cannot be accessed from Triton (cpu tensor?)``.
+
+    Prefer Flash Attention 2 (CUDA ext) then SDPA. Sage only when explicitly
+    requested via options.
+    """
+    py = (python_exe or "").strip()
+    if py and os.path.isfile(py):
+        # keep_vram → avoid sageattn_2 (Triton + CPU offload).
+        code = (
+            "import importlib.util as u\n"
+            "keep = " + ("True" if keep_vram else "False") + "\n"
+            "if (not keep) and u.find_spec('sageattn3'):\n"
+            "    print('sageattn_3')\n"
+            "elif u.find_spec('flash_attn'):\n"
+            "    print('flash_attn_2')\n"
+            "else:\n"
+            "    print('sdpa')\n"
+        )
+        try:
+            out = subprocess.check_output(
+                [py, "-c", code],
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+            if out in {"sageattn_3", "flash_attn_2", "sdpa"}:
+                return out
+        except Exception:
+            pass
+    return "sdpa"
+
+
 SEEDVR2_PROJECT_URL = "https://github.com/ByteDance-Seed/SeedVR"
 SEEDVR2_WEIGHTS_URL = "https://huggingface.co/models?other=seedvr"
 SEEDVR2_RUNNER_URL = COMFY_REPO_URL
@@ -70,7 +115,7 @@ OOM_HELP_MESSAGE = (
     "• Prefer FP8 3B model (not FP16 / 7B) on 24 GB cards\n"
     "• Lower Scale (2×), or Prescale → Optimal / Aggressive\n"
     "• Enable “Low VRAM (tiled VAE)”\n"
-    "• Use the RTX 4090 — current runner torch does not support RTX 5090\n"
+    "• Use the RTX 4090 for heavy FP16 jobs if 5090 VRAM is tight\n"
     "• Close other GPU apps; turn off Keep-in-VRAM and retry"
 )
 
@@ -123,6 +168,14 @@ def _format_runner_failure(tail: str) -> tuple[str, str]:
     """Return (error_code, user_message) for a failed runner log tail."""
     if _is_oom_text(tail):
         return "oom", OOM_HELP_MESSAGE
+    low = (tail or "").lower()
+    if "cannot be accessed from triton" in low or "cpu tensor?" in low:
+        return (
+            "attention_backend",
+            "SeedVR attention backend failed (SageAttention/Triton + CPU offload).\n\n"
+            "Retry after restart — the app now prefers Flash Attention 2.\n"
+            "Or turn off “Keep model in VRAM” and try again.",
+        )
     short = (tail or "").strip()
     if len(short) > 900:
         short = short[-900:]
@@ -684,9 +737,6 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
             vae_tiled = True
         else:
             vae_tiled = bool(vae_tiled)
-        # High output short-side → force tiling even if user left it off.
-        if resolution >= 1440:
-            vae_tiled = True
 
         try:
             encode_tile = int(opts.get("vae_encode_tile_size") or 1024)
@@ -696,8 +746,18 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
             decode_tile = int(opts.get("vae_decode_tile_size") or 768)
         except (TypeError, ValueError):
             decode_tile = 768
-        encode_tile = max(256, min(2048, encode_tile))
-        decode_tile = max(256, min(2048, decode_tile))
+        attention_mode = str(opts.get("attention_mode") or "").strip()
+        if not attention_mode:
+            attention_mode = _preferred_attention_mode(
+                python_exe, keep_vram=bool(keep_vram)
+            )
+        # SageAttention 2 + Triton crashes when weights are CPU-offloaded.
+        if keep_vram and attention_mode.startswith("sageattn"):
+            logging.warning(
+                "[SeedVR2] Forcing flash_attn_2/sdpa — sageattn incompatible with Keep-VRAM CPU offload"
+            )
+            attention_mode = _preferred_attention_mode(python_exe, keep_vram=True)
+        logging.info("[SeedVR2] attention_mode=%s (keep_vram=%s, vae_tiled=%s)", attention_mode, keep_vram, vae_tiled)
 
         staged = ensure_model_visible_to_runner(self.runner_dir, self.weights_dir, dit_model)
         if staged is None and not (Path(self.weights_dir) / dit_model).is_file():
@@ -761,6 +821,7 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
                 uniform_batch_size=uniform_batch,
                 encode_tile=encode_tile,
                 decode_tile=decode_tile,
+                attention_mode=attention_mode,
                 is_video=is_video,
                 progress_cb=progress_cb,
                 should_stop=should_stop,
@@ -782,6 +843,8 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
             cuda_device,
             "--dit_model",
             dit_model,
+            "--attention_mode",
+            attention_mode,
         ]
         if uniform_batch:
             cmd.append("--uniform_batch_size")
@@ -939,6 +1002,7 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
         uniform_batch_size: bool = False,
         encode_tile: int = 1024,
         decode_tile: int = 768,
+        attention_mode: str = "sdpa",
         is_video: bool = False,
         progress_cb: Callable[[float, str], None] | None,
         should_stop: Callable[[], bool] | None,
@@ -981,6 +1045,7 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
             "video_backend": video_backend,
             "vae_tiled": bool(vae_tiled),
             "uniform_batch_size": bool(uniform_batch_size),
+            "attention_mode": attention_mode or "sdpa",
         }
         if is_video:
             job_opts["output_format"] = "mp4"
@@ -1013,8 +1078,8 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
             }
         err = result.get("error") or "runner_failed"
         msg = result.get("message") or "Persistent worker failed"
-        if _is_oom_text(msg):
-            err, msg = "oom", OOM_HELP_MESSAGE
+        if _is_oom_text(msg) or "cannot be accessed from triton" in msg.lower():
+            err, msg = _format_runner_failure(msg)
         return {
             "ok": False,
             "output_path": None,

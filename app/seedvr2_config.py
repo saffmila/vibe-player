@@ -69,7 +69,10 @@ CHUNK_SIZE_LABELS = tuple(
 TEMPORAL_OVERLAP_DEFAULT = 3
 VAE_ENCODE_TILE_DEFAULT = 1024
 VAE_DECODE_TILE_DEFAULT = 768
-VAE_TILE_CHOICES = (512, 768, 1024, 1280)
+# Visible Advanced menu values — keep in sync with dialog; no silent code overrides.
+VAE_TILE_CHOICES = (256, 512, 768, 1024, 1280, 1536, 2048)
+# Default Low VRAM: on below this total VRAM, off on 32 GB-class cards.
+VAE_TILED_VRAM_THRESHOLD_MB = 28 * 1024
 
 BYTEDANCE_REPO_URL = "https://github.com/ByteDance-Seed/SeedVR"
 COMFY_REPO_URL = "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler"
@@ -108,6 +111,33 @@ def default_runner_dir() -> str:
     return ""
 
 
+def default_vae_tiled_for_vram_mb(total_mb: int | None) -> bool:
+    """
+    Suggested default for Low VRAM (tiled VAE).
+
+    Cards under ~28 GB total → tiled on; 32 GB-class → off.
+    User checkbox always wins once saved.
+    """
+    if total_mb is None or int(total_mb) <= 0:
+        return True
+    return int(total_mb) < VAE_TILED_VRAM_THRESHOLD_MB
+
+
+def default_vae_tiled_for_cuda(cuda_index: str | int | None = None) -> bool:
+    """Pick Low VRAM default from nvidia-smi total VRAM for ``cuda_index``."""
+    try:
+        want = int(str(cuda_index if cuda_index is not None else "0").strip())
+    except (TypeError, ValueError):
+        want = 0
+    for gpu in list_cuda_gpus():
+        try:
+            if int(gpu.get("index", -1)) == want:
+                return default_vae_tiled_for_vram_mb(gpu.get("total_mb"))
+        except (TypeError, ValueError):
+            continue
+    return True
+
+
 def settings_path() -> Path:
     return Path(SETTINGS_FILENAME).resolve()
 
@@ -121,7 +151,7 @@ def load_seedvr2_settings() -> dict:
         KEY_CUDA_DEVICE: "0",
         KEY_DIT_MODEL: DEFAULT_DIT_MODEL,
         KEY_KEEP_VRAM: False,
-        KEY_VAE_TILED: True,
+        KEY_VAE_TILED: True,  # overwritten below when key absent (VRAM-aware)
         KEY_OUTPUT_FORMAT: OUTPUT_FORMAT_PNG,
         KEY_PRESCALE_MODE: PRESCALE_MODE_OFF,
         KEY_PRESCALE_CUSTOM: PRESCALE_CUSTOM_DEFAULT,
@@ -135,11 +165,13 @@ def load_seedvr2_settings() -> dict:
     }
     path = settings_path()
     if not path.is_file():
+        data[KEY_VAE_TILED] = default_vae_tiled_for_cuda(data.get(KEY_CUDA_DEVICE))
         return data
     try:
         with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
         if not isinstance(raw, dict):
+            data[KEY_VAE_TILED] = default_vae_tiled_for_cuda(data.get(KEY_CUDA_DEVICE))
             return data
         for key in (KEY_WEIGHTS_DIR, KEY_RUNNER_DIR, KEY_PYTHON, KEY_CUDA_DEVICE, KEY_DIT_MODEL):
             val = raw.get(key)
@@ -153,6 +185,8 @@ def load_seedvr2_settings() -> dict:
             data[KEY_KEEP_VRAM] = bool(raw.get(KEY_KEEP_VRAM))
         if KEY_VAE_TILED in raw:
             data[KEY_VAE_TILED] = bool(raw.get(KEY_VAE_TILED))
+        else:
+            data[KEY_VAE_TILED] = default_vae_tiled_for_cuda(data.get(KEY_CUDA_DEVICE))
         fmt = raw.get(KEY_OUTPUT_FORMAT)
         if isinstance(fmt, str) and fmt.strip().lower() in {
             OUTPUT_FORMAT_PNG,

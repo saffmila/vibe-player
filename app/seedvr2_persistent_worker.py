@@ -74,7 +74,7 @@ def _build_args(job: dict) -> SimpleNamespace:
         vae_decode_tile_overlap=128,
         tile_debug="false",
         allow_vram_overflow=False,
-        attention_mode="sdpa",
+        attention_mode=str(opts.get("attention_mode") or "sdpa"),
         compile_dit=False,
         compile_vae=False,
         compile_backend="inductor",

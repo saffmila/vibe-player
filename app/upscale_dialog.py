@@ -504,15 +504,14 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             variable=self.keep_vram_var,
         ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 2))
 
-        self.vae_tiled_var = ctk.BooleanVar(
-            value=True if KEY_VAE_TILED not in cfg else bool(cfg.get(KEY_VAE_TILED))
-        )
+        self.vae_tiled_var = ctk.BooleanVar(value=bool(cfg.get(KEY_VAE_TILED)))
         ctk.CTkCheckBox(
             adv,
             text="Low VRAM (tiled VAE encode/decode)",
             variable=self.vae_tiled_var,
             command=self._on_vae_tiled_changed,
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(2, 4))
+        self._vae_tiled_warn_job = None
 
         # --- Processing knobs (batch / overlap / chunk / tiles) ---
         self._batch_label_by_val = {v: lab for lab, v in BATCH_SIZE_LABELS}
@@ -721,7 +720,88 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
                     w.grid_remove()
             except Exception:
                 pass
+        # Soft warn when turning tiling off for high output short-edge.
+        if (
+            not tiled
+            and getattr(self, "_autosave_enabled", False)
+            and self._should_warn_untiled_high_res()
+        ):
+            job = getattr(self, "_vae_tiled_warn_job", None)
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except Exception:
+                    pass
+            self._vae_tiled_warn_job = self.after(50, self._warn_untiled_high_res)
         self._schedule_autosave()
+
+    def _warn_untiled_high_res(self):
+        self._vae_tiled_warn_job = None
+        if bool(self.vae_tiled_var.get()):
+            return
+        messagebox.showwarning(
+            "Upscale",
+            "Low VRAM is off and output short edge is about 1440px or larger.\n\n"
+            "That can run out of VRAM. If it does: lower batch size, "
+            "re-enable Low VRAM, or use smaller VAE tiles.",
+            parent=self,
+        )
+
+    def _probe_media_size(self, path: str) -> tuple[int, int] | None:
+        """Return (width, height) for image/video when cheaply available."""
+        if not path or not os.path.isfile(path):
+            return None
+        ext = os.path.splitext(path)[1].lower()
+        if ext in IMAGE_FORMATS:
+            try:
+                from PIL import Image
+
+                with Image.open(path) as im:
+                    w, h = im.size
+                if w > 0 and h > 0:
+                    return int(w), int(h)
+            except Exception:
+                pass
+        try:
+            import cv2
+
+            cap = cv2.VideoCapture(path)
+            try:
+                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            finally:
+                cap.release()
+            if w > 0 and h > 0:
+                return w, h
+        except Exception:
+            pass
+        return None
+
+    def _estimated_output_short_edge(self) -> int:
+        """Best-effort output short edge (input short × scale). 0 if unknown."""
+        try:
+            scale = int(float(self.scale_var.get().strip() or "2"))
+        except (TypeError, ValueError):
+            scale = 2
+        scale = max(1, scale)
+        for path in self.paths or []:
+            size = self._probe_media_size(path)
+            if size:
+                return min(size) * scale
+        return 0
+
+    def _should_warn_untiled_high_res(self) -> bool:
+        if bool(self.vae_tiled_var.get()):
+            return False
+        short = self._estimated_output_short_edge()
+        if short >= 1440:
+            return True
+        # Unknown size + 4× often lands at/above 1440 short edge.
+        try:
+            scale = int(float(self.scale_var.get().strip() or "2"))
+        except (TypeError, ValueError):
+            scale = 2
+        return short <= 0 and scale >= 4
 
     def _set_advanced_open(self, open_: bool, *, persist: bool = True, resize: bool = True):
         """Show or hide the advanced panel and optionally resize the window."""
