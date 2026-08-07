@@ -434,6 +434,164 @@ def _cleanup_temp(path: str | None) -> None:
         pass
 
 
+def _ffmpeg_hide_window_kwargs() -> dict:
+    kwargs: dict[str, Any] = {}
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        kwargs["startupinfo"] = startupinfo
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return kwargs
+
+
+def _source_has_audio(path: str) -> bool:
+    """True when ffprobe finds at least one audio stream."""
+    try:
+        from file_operations import get_ffprobe_path
+
+        ffprobe = get_ffprobe_path()
+    except Exception:
+        return False
+    if not path or not os.path.isfile(path):
+        return False
+    cmd = [
+        ffprobe,
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=codec_type",
+        "-of",
+        "csv=p=0",
+        path,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=45,
+            **_ffmpeg_hide_window_kwargs(),
+        )
+        return bool((result.stdout or "").strip())
+    except Exception:
+        return False
+
+
+def _mux_source_audio_into_output(
+    source_path: str,
+    output_path: str,
+    *,
+    progress_cb: Callable[..., None] | None = None,
+) -> str:
+    """
+    Remux source audio into SeedVR's silent video output when present.
+
+    Always-on (no UI toggle): video-only sources are left unchanged. Prefer
+    ``-c:a copy``, fall back to AAC if the container rejects the codec.
+    Returns the final output path (same path on success or soft failure).
+    """
+    if not source_path or not output_path:
+        return output_path
+    if not os.path.isfile(source_path) or not os.path.isfile(output_path):
+        return output_path
+    if not _source_has_audio(source_path):
+        logging.info("[SeedVR2] Source has no audio stream — leaving output as-is")
+        return output_path
+    try:
+        from file_operations import get_ffmpeg_path
+
+        ffmpeg = get_ffmpeg_path()
+    except Exception as exc:
+        logging.warning("[SeedVR2] Skipping audio mux (ffmpeg missing): %s", exc)
+        return output_path
+
+    if progress_cb:
+        try:
+            progress_cb(0.97, "Muxing source audio…", "upscale")
+        except TypeError:
+            progress_cb(0.97, "Muxing source audio…")
+
+    parent = os.path.dirname(output_path) or "."
+    tmp = os.path.join(parent, f".{Path(output_path).stem}_audiomux.tmp.mp4")
+    try:
+        if os.path.isfile(tmp):
+            os.remove(tmp)
+    except OSError:
+        pass
+
+    def _run(audio_args: list[str]) -> subprocess.CompletedProcess:
+        cmd = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            output_path,
+            "-i",
+            source_path,
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "copy",
+            *audio_args,
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            tmp,
+        ]
+        logging.info("[SeedVR2] Audio mux: %s", " ".join(cmd))
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=900,
+            **_ffmpeg_hide_window_kwargs(),
+        )
+
+    result = _run(["-c:a", "copy"])
+    if result.returncode != 0 or not os.path.isfile(tmp) or os.path.getsize(tmp) < 64:
+        logging.info(
+            "[SeedVR2] Audio stream copy failed — retrying with AAC (%s)",
+            (result.stderr or result.stdout or "")[:240],
+        )
+        try:
+            if os.path.isfile(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        result = _run(["-c:a", "aac", "-b:a", "192k"])
+
+    if result.returncode != 0 or not os.path.isfile(tmp) or os.path.getsize(tmp) < 64:
+        logging.warning(
+            "[SeedVR2] Audio mux failed — keeping silent video: %s",
+            (result.stderr or result.stdout or "")[:500],
+        )
+        try:
+            if os.path.isfile(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        return output_path
+
+    try:
+        os.replace(tmp, output_path)
+        logging.info("[SeedVR2] Muxed source audio into %s", output_path)
+    except OSError as exc:
+        logging.warning("[SeedVR2] Could not replace output with muxed file: %s", exc)
+        try:
+            if os.path.isfile(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+    return output_path
+
+
 # Back-compat alias matching the Gemini/spec helper name.
 def prepare_prescaled_media(file_path: str, max_dim: int) -> str:
     """
@@ -946,6 +1104,7 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
         if keep_vram:
             return self._process_persistent(
                 input_path=work_path,
+                audio_source_path=input_path,
                 output_path=output_path,
                 python_exe=python_exe,
                 cli_path=cli_path,
@@ -1125,6 +1284,13 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
             except Exception as exc:
                 logging.warning("[SeedVR2] Could not rename output: %s", exc)
 
+        if is_video:
+            final_path = _mux_source_audio_into_output(
+                input_path,
+                final_path,
+                progress_cb=progress_cb,
+            )
+
         if progress_cb:
             progress_cb(1.0, "SeedVR 2: done", "upscale")
         return {
@@ -1156,6 +1322,7 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
         is_video: bool = False,
         preview_path: str | None = None,
         chunk_preview: bool = True,
+        audio_source_path: str | None = None,
         progress_cb: Callable[[float, str], None] | None,
         should_stop: Callable[[], bool] | None,
     ) -> dict[str, Any]:
@@ -1223,11 +1390,18 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
             should_stop=should_stop,
         )
         if result.get("ok") and result.get("output_path"):
+            out = str(result["output_path"])
+            if is_video:
+                out = _mux_source_audio_into_output(
+                    audio_source_path or input_path,
+                    out,
+                    progress_cb=progress_cb,
+                )
             if progress_cb:
                 progress_cb(1.0, "SeedVR 2: done (model kept in VRAM)", "upscale")
             return {
                 "ok": True,
-                "output_path": result["output_path"],
+                "output_path": out,
                 "error": None,
                 "message": None,
             }

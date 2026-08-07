@@ -577,12 +577,14 @@ class FileOpProgressDialog(ctk.CTkToplevel):
             font=ctk.CTkFont(weight="bold"),
         )
         self.status_label.pack(fill="x", padx=16, pady=(8, 6))
-        ctk.CTkLabel(
+        self.detail_label = ctk.CTkLabel(
             self,
             textvariable=self.detail_var,
-            anchor="w",
+            anchor="center",
+            justify="center",
             wraplength=480,
-        ).pack(fill="x", padx=16, pady=(0, 10))
+        )
+        self.detail_label.pack(fill="x", padx=16, pady=(0, 10))
 
         self.progress = ctk.CTkProgressBar(self, orientation="horizontal", mode="determinate")
         self.progress.pack(fill="x", padx=16, pady=(0, 12))
@@ -1220,6 +1222,7 @@ def build_view_menu(app):
         ("All Fields", "all_fields"),
         ("Name", "name"),
         ("Path", "path"),
+        ("Duration", "duration"),
         ("File Size", "file_size"),
         ("Date/Time", "date_time"),
         ("Dimensions", "dimensions"),
@@ -1229,6 +1232,7 @@ def build_view_menu(app):
 
     default_vals = {
         "name": ctk.BooleanVar(value=True),
+        "duration": ctk.BooleanVar(value=True),
         "file_size": ctk.BooleanVar(value=False),
         "date_time": ctk.BooleanVar(value=False),
         "dimensions": ctk.BooleanVar(value=False),
@@ -1495,6 +1499,7 @@ def build_edit_menuOld(app):
         ("All Fields", "all_fields"),
         ("Name", "name"),
         ("Path", "path"),
+        ("Duration", "duration"),
         ("File Size", "file_size"),
         ("Date/Time", "date_time"),
         ("Dimensions", "dimensions"),
@@ -1504,6 +1509,7 @@ def build_edit_menuOld(app):
 
     default_vals = {
         "name": ctk.BooleanVar(value=True),
+        "duration": ctk.BooleanVar(value=True),
         "file_size": ctk.BooleanVar(value=False),
         "date_time": ctk.BooleanVar(value=False),
         "dimensions": ctk.BooleanVar(value=False),
@@ -2771,10 +2777,11 @@ def list_audio_devices():
 
 def collect_file_info_display(app) -> dict:
     """Snapshot View → Show for files checkbox states (excludes derived all_fields)."""
-    keys = ("name", "path", "file_size", "date_time", "dimensions", "keywords")
+    keys = ("name", "path", "duration", "file_size", "date_time", "dimensions", "keywords")
     defaults = {
         "name": True,
         "path": False,
+        "duration": True,
         "file_size": False,
         "date_time": False,
         "dimensions": False,
@@ -2795,10 +2802,11 @@ def collect_file_info_display(app) -> dict:
 
 def apply_file_info_display(app, saved) -> None:
     """Restore View → Show for files checkbox states from settings."""
-    keys = ("name", "path", "file_size", "date_time", "dimensions", "keywords")
+    keys = ("name", "path", "duration", "file_size", "date_time", "dimensions", "keywords")
     defaults = {
         "name": True,
         "path": False,
+        "duration": True,
         "file_size": False,
         "date_time": False,
         "dimensions": False,

@@ -4771,7 +4771,39 @@ class VtpGridMixin:
 
 
 
-    # The user's function with the missing 'path' logic added.
+    @staticmethod
+    def _format_thumb_duration(seconds) -> str:
+        """Compact player-style duration for thumbnail labels (``0:37`` / ``1:02:03``)."""
+        try:
+            seconds = float(seconds or 0)
+        except (TypeError, ValueError):
+            return ""
+        if seconds <= 0:
+            return ""
+        total = int(round(seconds))
+        hours, rem = divmod(total, 3600)
+        minutes, secs = divmod(rem, 60)
+        if hours:
+            return f"{hours}:{minutes:02d}:{secs:02d}"
+        return f"{minutes}:{secs:02d}"
+
+    @staticmethod
+    def _format_thumb_filesize(num_bytes) -> str:
+        """Human-readable size for thumbnail labels (``12.4 MB``)."""
+        try:
+            size = float(num_bytes)
+        except (TypeError, ValueError):
+            return ""
+        if size < 0:
+            return ""
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if size < 1024.0 or unit == "TB":
+                if unit == "B":
+                    return f"{int(size)} B"
+                return f"{size:.1f} {unit}"
+            size /= 1024.0
+        return f"{size:.1f} TB"
+
     def joininfotexts(self, file_path, file_name, db_entry=None):
         """
         Constructs a list of informational texts about a file based on user-selected options.
@@ -4785,6 +4817,8 @@ class VtpGridMixin:
         width = None
         height = None
         info_texts = []
+        lower = (file_path or "").lower()
+        is_video = lower.endswith(VIDEO_FORMATS)
 
         # Check if the 'name' option is enabled in the menu.
         if self.file_info_vars.get("name").get():
@@ -4797,9 +4831,44 @@ class VtpGridMixin:
             # If checked, add the full file path to the list.
             info_texts.append((file_path, meta_color))
 
+        # Duration — primary video browsing cue (images skip silently).
+        # Prefer DB (filled during thumbnail generation); probe once if missing.
+        duration_var = self.file_info_vars.get("duration")
+        if duration_var is not None and duration_var.get() and is_video:
+            if db_entry is None:
+                db_entry = self.database.get_entry(file_path)
+            duration = None
+            if db_entry:
+                duration = db_entry.get("duration")
+            try:
+                duration = float(duration) if duration is not None else 0.0
+            except (TypeError, ValueError):
+                duration = 0.0
+            if duration <= 0:
+                try:
+                    duration = float(get_video_duration_mediainfo(file_path) or 0.0)
+                except Exception:
+                    duration = 0.0
+                if duration > 0 and hasattr(self, "database") and self.database:
+                    try:
+                        self.database.update_file_metadata(file_path, duration=duration)
+                        if db_entry is not None:
+                            db_entry["duration"] = duration
+                    except Exception:
+                        pass
+            formatted = self._format_thumb_duration(duration)
+            if formatted:
+                # Clock glyph = "this is duration" without s/min clutter.
+                info_texts.append((f"⏱ {formatted}", meta_color))
+
         # Check if the 'file_size' option is enabled.
         if self.file_info_vars.get("file_size").get():
-            info_texts.append((f"{os.path.getsize(file_path)} bytes", meta_color))
+            try:
+                size_text = self._format_thumb_filesize(os.path.getsize(file_path))
+            except OSError:
+                size_text = ""
+            if size_text:
+                info_texts.append((size_text, meta_color))
 
         # Check if the 'date_time' option is enabled.
         if self.file_info_vars.get("date_time").get():
@@ -4816,7 +4885,6 @@ class VtpGridMixin:
 
             # Historical bug: create_image_thumbnail stored thumbnail size after
             # Image.thumbnail() mutated the PIL image. Heal those rows once.
-            lower = file_path.lower()
             if lower.endswith(IMAGE_FORMATS):
                 _THUMB_SIZES = {
                     (160, 120),
@@ -4963,7 +5031,7 @@ class VtpGridMixin:
                     fg_color=label_fg_color, # Apply the determined background color
                     text_color=label_text_color # Apply the determined text color
                 )
-                name_label.pack(pady=(9, 3))
+                name_label.pack(pady=(6, 2))
 
             # Now, this part is safe. 'name_label' is either a CTkLabel widget or None.
             # This prevents the UnboundLocalError crash.

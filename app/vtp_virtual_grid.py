@@ -125,13 +125,13 @@ class VtpVirtualGridMixin:
         self.vg_wide_label_row_gap = 7
 
         # Standard thumbnail: vertical padding (top, bottom) per info line under the image
-        self.vg_std_label_row_pady = (9, 3)
+        self.vg_std_label_row_pady = (6, 2)
         # Extra px added to measured caption block (font/wrap / Tk vs heuristic)
         self.vg_std_label_height_fudge = 14
         # Extra per rendered text line to avoid platform-specific clipping.
         self.vg_std_label_line_reserve_px = 1
         # Per stacked info label beyond the first (spacing Tk adds between widgets)
-        self.vg_std_label_stack_margin = 6
+        self.vg_std_label_stack_margin = 4
         # Hard cap so one extreme title does not blow up row height
         self.vg_std_label_max_px = 280
         # Extra space below folder title before first stats line; None = use label_row_gap
@@ -993,7 +993,7 @@ class VtpVirtualGridMixin:
         return os.path.normcase(os.path.normpath(file_path or ""))
 
     def _vg_file_info_state_key(self) -> tuple:
-        keys = ("name", "path", "file_size", "date_time", "dimensions", "keywords")
+        keys = ("name", "path", "duration", "file_size", "date_time", "dimensions", "keywords")
         state = []
         vars_map = getattr(self, "file_info_vars", {})
         for key in keys:
@@ -1176,11 +1176,11 @@ class VtpVirtualGridMixin:
         parts: list[tuple[str, str]] | None = None,
     ) -> int:
         """Estimate stacked caption height using actual Tk font metrics."""
-        top, bot = getattr(self, "vg_std_label_row_pady", (9, 3))
+        top, bot = getattr(self, "vg_std_label_row_pady", (6, 2))
         pad_block = top + bot
         fudge = int(getattr(self, "vg_std_label_height_fudge", 14))
         line_reserve = int(getattr(self, "vg_std_label_line_reserve_px", 1))
-        stack_margin = int(getattr(self, "vg_std_label_stack_margin", 6))
+        stack_margin = int(getattr(self, "vg_std_label_stack_margin", 4))
         try:
             fs = int(self._get_effective_thumb_font_size())
         except Exception:
@@ -1274,7 +1274,7 @@ class VtpVirtualGridMixin:
         thumb_w = self.thumbnail_size[0]
         font_size = self._get_effective_thumb_font_size()
         lbl_font = ("Helvetica", font_size)
-        top, bot = getattr(self, "vg_std_label_row_pady", (9, 3))
+        top, bot = getattr(self, "vg_std_label_row_pady", (6, 2))
         measure_font = self._vg_get_label_font(int(font_size))
         try:
             data_idx = self._vg_data_index_by_path.get(self._vg_norm_path(file_path), -1)
