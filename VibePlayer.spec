@@ -20,6 +20,12 @@ _datas = [
     ("app/tag_engine", "tag_engine"),
     # Pluginy
     ("app/plugins", "plugins"),
+    # SeedVR2: plugins import these; runner venv also runs worker/bootstrap as
+    # scripts and needs the .py files on disk next to the exe (not only in PYZ).
+    ("app/seedvr2_progress.py", "."),
+    ("app/seedvr2_persistent_worker.py", "."),
+    ("app/seedvr2_cli_bootstrap.py", "."),
+    ("app/seedvr2_preview_hook.py", "."),
     # Nastroje jako FFmpeg
     ("tools/ffmpeg/bin", "tools/ffmpeg/bin"),
     # Splash screen (pokud je uvnitr app)
@@ -43,8 +49,19 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=_datas,
-    # Sem se píšou moduly, které PyInstaller sám nenašel
-    hiddenimports=['PIL._tkinter_finder', 'psd_tools'], 
+    # Sem se píšou moduly, které PyInstaller sám nenašel.
+    # seedvr2_progress is only imported from plugins/ (datas), so Analysis
+    # does not pick it up unless listed here.
+    hiddenimports=[
+        'PIL._tkinter_finder',
+        'psd_tools',
+        'seedvr2_progress',
+        'seedvr2_config',
+        'seedvr2_runner_setup',
+        'seedvr2_weights_setup',
+        'seedvr2_worker_host',
+        'seedvr2_preview_hook',
+    ], 
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
