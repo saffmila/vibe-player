@@ -376,6 +376,12 @@ class VtpUpscaleMixin:
                         self.after(0, _show_source)
                     except Exception:
                         pass
+                if preview_path:
+                    file_opts["preview_path"] = preview_path
+                if "chunk_preview" not in file_opts:
+                    file_opts["chunk_preview"] = bool(
+                        getattr(self, "seedvr2_chunk_preview", True)
+                    )
 
                 self._upscale_progress_update(
                     progress,
@@ -399,6 +405,17 @@ class VtpUpscaleMixin:
                     detail = f"{name}\n{line}"
                     self._upscale_progress_update(progress, i - 1, t, detail, phase=resolved_phase)
                     self.after(0, lambda m=line: self.status_bar.set_action_message(m[:120]))
+                    low = line.lower()
+                    if progress is not None and ("chunk preview" in low or "preview updated" in low):
+                        def _cap(m=line, n=name, p=getattr(self, "_upscale_preview_path", None)):
+                            try:
+                                if p:
+                                    progress.set_preview_path(p)
+                                progress.set_preview_caption(f"{n}  ·  {m}")
+                            except Exception:
+                                pass
+
+                        self.after(0, _cap)
                     try:
                         overall = ((i - 1) + max(0.0, min(1.0, float(frac)))) / max(1, t)
                         self.after(0, lambda v=overall: self.status_bar.set_progress(v))

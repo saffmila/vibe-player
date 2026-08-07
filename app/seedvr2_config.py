@@ -33,6 +33,7 @@ KEY_TEMPORAL_OVERLAP = "seedvr2_temporal_overlap"
 KEY_CHUNK_SIZE = "seedvr2_chunk_size"
 KEY_VAE_ENCODE_TILE = "seedvr2_vae_encode_tile"
 KEY_VAE_DECODE_TILE = "seedvr2_vae_decode_tile"
+KEY_CHUNK_PREVIEW = "seedvr2_chunk_preview"
 
 # Long-edge presets (px). Downscale-only before SeedVR to clear soft/compressed detail.
 PRESCALE_MODE_OFF = "off"
@@ -162,6 +163,7 @@ def load_seedvr2_settings() -> dict:
         KEY_CHUNK_SIZE: CHUNK_SIZE_AUTO,
         KEY_VAE_ENCODE_TILE: VAE_ENCODE_TILE_DEFAULT,
         KEY_VAE_DECODE_TILE: VAE_DECODE_TILE_DEFAULT,
+        KEY_CHUNK_PREVIEW: True,
     }
     path = settings_path()
     if not path.is_file():
@@ -241,6 +243,8 @@ def load_seedvr2_settings() -> dict:
             data[KEY_VAE_DECODE_TILE] = dt if dt in VAE_TILE_CHOICES else VAE_DECODE_TILE_DEFAULT
         except (TypeError, ValueError):
             pass
+        if KEY_CHUNK_PREVIEW in raw:
+            data[KEY_CHUNK_PREVIEW] = bool(raw.get(KEY_CHUNK_PREVIEW))
         if not data.get(KEY_RUNNER_DIR):
             data[KEY_RUNNER_DIR] = default_runner_dir()
     except Exception as exc:
@@ -293,6 +297,7 @@ def save_seedvr2_settings(
     chunk_size: int | None = None,
     vae_encode_tile: int | None = None,
     vae_decode_tile: int | None = None,
+    chunk_preview: bool | None = None,
 ) -> dict:
     """Merge SeedVR2 keys into settings.json and return the updated seedvr subset."""
     path = settings_path()
@@ -380,6 +385,8 @@ def save_seedvr2_settings(
             )
         except (TypeError, ValueError):
             current[KEY_VAE_DECODE_TILE] = VAE_DECODE_TILE_DEFAULT
+    if chunk_preview is not None:
+        current[KEY_CHUNK_PREVIEW] = bool(chunk_preview)
 
     settings.update(current)
     try:

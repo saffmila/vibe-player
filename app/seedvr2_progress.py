@@ -52,6 +52,11 @@ class SeedVR2ProgressState:
 
         low = text.lower()
 
+        if "chunk preview" in low:
+            self.phase = "upscale"
+            self.message = text[:120]
+            return self.frac, self.message, self.phase
+
         m = _RE_VIDEO_INFO.search(text)
         if m:
             self.total_frames = int(m.group(1))

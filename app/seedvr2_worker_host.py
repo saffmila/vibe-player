@@ -244,9 +244,19 @@ class SeedVR2WorkerHost:
                         progress_cb(frac, str(evt.get("msg") or "Working…"), phase)
                     continue
                 if kind == "preview":
-                    # UI polls the file; optional nudge via progress text.
+                    # JPEG was rewritten on disk; dialog polls mtime. Nudge caption.
                     if progress_cb:
-                        progress_cb(0.5, "Live preview ready…", "upscale")
+                        try:
+                            frac = float(
+                                evt.get("frac") if evt.get("frac") is not None else 0.5
+                            )
+                        except (TypeError, ValueError):
+                            frac = 0.5
+                        progress_cb(
+                            max(0.0, min(1.0, frac)),
+                            str(evt.get("msg") or "Chunk preview"),
+                            "upscale",
+                        )
                     continue
                 if kind == "result":
                     if evt.get("ok"):

@@ -175,6 +175,7 @@ def main() -> int:
             continue
 
         args = _build_args(req)
+        opts = req.get("options") or {}
         device_list = [d.strip() for d in str(args.cuda_device).split(",") if d.strip()] or ["0"]
         key = (str(args.model_dir), str(args.dit_model), str(args.cuda_device))
 
@@ -221,6 +222,30 @@ def main() -> int:
             dbg = getattr(seedvr_cli, "debug", None)
             orig_log = getattr(dbg, "log", None) if dbg is not None else None
             hooked = False
+            restore_preview = None
+            preview_path = str(opts.get("preview_path") or "").strip()
+            chunk_preview = bool(opts.get("chunk_preview", True))
+            if preview_path and chunk_preview:
+                try:
+                    from seedvr2_preview_hook import install_chunk_preview_hooks
+
+                    def _on_chunk_preview(n: int) -> None:
+                        _emit(
+                            {
+                                "event": "preview",
+                                "path": preview_path,
+                                "chunk": int(n),
+                                "msg": f"Chunk {n} preview",
+                            }
+                        )
+
+                    restore_preview = install_chunk_preview_hooks(
+                        seedvr_cli,
+                        preview_path,
+                        on_preview=_on_chunk_preview,
+                    )
+                except Exception as exc:
+                    print(f"[seedvr2] Chunk preview hook skipped: {exc}", file=sys.stderr, flush=True)
 
             if dbg is not None and callable(orig_log):
 
@@ -275,6 +300,11 @@ def main() -> int:
             finally:
                 if hooked and dbg is not None and orig_log is not None:
                     dbg.log = orig_log  # type: ignore[method-assign]
+                if restore_preview is not None:
+                    try:
+                        restore_preview()
+                    except Exception:
+                        pass
 
             if frames <= 0 and not Path(output_path).is_file():
                 _emit(

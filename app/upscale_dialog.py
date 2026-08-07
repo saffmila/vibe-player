@@ -24,6 +24,7 @@ from seedvr2_config import (
     KEY_ADVANCED_OPEN,
     KEY_BATCH_SIZE,
     KEY_CHUNK_SIZE,
+    KEY_CHUNK_PREVIEW,
     KEY_CUDA_DEVICE,
     KEY_DIT_MODEL,
     KEY_KEEP_VRAM,
@@ -58,10 +59,28 @@ from seedvr2_config import (
 from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS
 
 
-UPSCALE_DIALOG_WIDTH = 640
-UPSCALE_BASIC_HEIGHT = 380
-UPSCALE_ADVANCED_EXTRA = 520
-UPSCALE_ADVANCED_EXTRA_VIDEO = 620
+UPSCALE_DIALOG_WIDTH = 560
+UPSCALE_DIALOG_WIDTH_ADVANCED = 600  # scrollbar + room for card border/radius
+# Soft floors; _fit_window() prefers measured size (simple mode must stay tight).
+UPSCALE_BASIC_HEIGHT = 320
+UPSCALE_ADVANCED_EXTRA = 400
+UPSCALE_ADVANCED_EXTRA_VIDEO = 440
+
+# Compact control sizing (~70% of default CTk chrome).
+_UI_LABEL = 12
+_UI_TITLE = 14
+_UI_SUB = 11
+_UI_CTRL_H = 26
+_UI_BTN_H = 28
+_UI_BTN_W = 88
+_UI_MENU_W = 300
+_UI_PAD_Y = 2
+# Right inset so CTk rounded card borders aren't clipped by the scroll canvas.
+_UI_SECTION_PADX = (0, 12)
+_UI_SECTION_PADX_SCROLL = (0, 14)
+_UI_SECTION_BG = ("gray88", "#2a2a2a")
+_UI_SECTION_TITLE = "#8ab4c8"
+_UI_BODY_BG = ("gray92", "#1a1a1a")
 
 
 class SeedVR2RunnerInstallDialog(ctk.CTkToplevel):
@@ -287,7 +306,7 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         self._advanced_open = False
 
         self.resizable(True, True)
-        self.minsize(480, 320)
+        self.minsize(UPSCALE_DIALOG_WIDTH, 360)
         self.transient(parent)
         self.grab_set()
 
@@ -343,30 +362,121 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             if self._n_vid:
                 subtitle += " — video jobs can take a long time"
         self.title(header)
-        ctk.CTkLabel(self, text=header, text_color="#00bfff").pack(pady=(12, 4))
-        ctk.CTkLabel(self, text=subtitle, text_color="#aaaaaa").pack(pady=(0, 8))
+        self._title_lbl = ctk.CTkLabel(
+            self,
+            text=header,
+            text_color="#00bfff",
+            font=ctk.CTkFont(size=_UI_TITLE, weight="bold"),
+        )
+        self._title_lbl.pack(pady=(8, 0))
+        self._subtitle_lbl = ctk.CTkLabel(
+            self,
+            text=subtitle,
+            text_color="#999999",
+            font=ctk.CTkFont(size=_UI_SUB),
+        )
+        self._subtitle_lbl.pack(pady=(0, 4))
 
-        # --- Basic options (always visible) ---
-        basic = ctk.CTkFrame(self, fg_color="transparent")
-        basic.pack(fill="x", padx=16, pady=4)
+        # --- Action bar (bottom only) ---
+        self._button_bar = ctk.CTkFrame(self, fg_color="transparent")
+        self._button_bar.pack(side="bottom", fill="x", padx=12, pady=(6, 10))
+        ctk.CTkButton(
+            self._button_bar,
+            text="Cancel",
+            width=_UI_BTN_W,
+            height=_UI_BTN_H,
+            font=ctk.CTkFont(size=_UI_LABEL),
+            command=self._on_close,
+        ).pack(side="right")
+        ctk.CTkButton(
+            self._button_bar,
+            text="Start",
+            width=_UI_BTN_W,
+            height=_UI_BTN_H,
+            font=ctk.CTkFont(size=_UI_LABEL),
+            command=self._confirm,
+        ).pack(side="right", padx=(0, 6))
+        self.advanced_btn = ctk.CTkButton(
+            self._button_bar,
+            text="Advanced ▼",
+            width=120,
+            height=_UI_BTN_H,
+            font=ctk.CTkFont(size=_UI_LABEL),
+            command=self._toggle_advanced,
+        )
+        self.advanced_btn.pack(side="left")
+
+        # --- Main body: one scroll so Output aligns with Engine / Processing / Paths ---
+        self._body = ctk.CTkFrame(self, fg_color="transparent")
+        self._body.pack(fill="both", expand=True, padx=12, pady=(2, 0))
+
+        self._sections_scroll = ctk.CTkScrollableFrame(
+            self._body, fg_color="transparent", corner_radius=0
+        )
+        self._sections_scroll.pack(fill="both", expand=True)
+        self._sections_scroll.grid_columnconfigure(0, weight=1)
+
+        # Inset host — keeps card borders/radii clear of the canvas & scrollbar clip.
+        self._sections_pad = ctk.CTkFrame(
+            self._sections_scroll, fg_color="transparent", corner_radius=0
+        )
+        self._sections_pad.pack(fill="x", expand=True, padx=_UI_SECTION_PADX)
+
+        # Output card lives in the same scroll host as advanced cards (no width tooth).
+        self._basic_wrap = ctk.CTkFrame(
+            self._sections_pad,
+            fg_color=_UI_SECTION_BG,
+            corner_radius=8,
+            border_width=1,
+            border_color=("gray70", "#3d3d3d"),
+        )
+        self._basic_wrap.pack(fill="x", pady=(0, 4))
+        ctk.CTkLabel(
+            self._basic_wrap,
+            text="Output",
+            text_color=_UI_SECTION_TITLE,
+            font=ctk.CTkFont(size=_UI_SUB, weight="bold"),
+            anchor="w",
+        ).pack(fill="x", padx=10, pady=(8, 0))
+        basic = ctk.CTkFrame(self._basic_wrap, fg_color="transparent")
+        basic.pack(fill="x", padx=10, pady=(4, 10))
         basic.grid_columnconfigure(1, weight=1)
         self._basic = basic
 
         def _path_row(parent, row: int, label: str, variable: ctk.StringVar, browse_cmd):
-            ctk.CTkLabel(parent, text=label).grid(row=row, column=0, sticky="w", pady=4)
+            ctk.CTkLabel(
+                parent,
+                text=label,
+                font=ctk.CTkFont(size=_UI_LABEL),
+            ).grid(row=row, column=0, sticky="w", pady=_UI_PAD_Y)
             row_fr = ctk.CTkFrame(parent, fg_color="transparent")
-            row_fr.grid(row=row, column=1, sticky="ew", pady=4, padx=(8, 0))
-            ctk.CTkEntry(row_fr, textvariable=variable, width=280).pack(
-                side="left", fill="x", expand=True
-            )
-            ctk.CTkButton(row_fr, text="…", width=36, command=browse_cmd).pack(
-                side="left", padx=(6, 0)
-            )
+            row_fr.grid(row=row, column=1, sticky="ew", pady=_UI_PAD_Y, padx=(8, 0))
+            ctk.CTkEntry(
+                row_fr,
+                textvariable=variable,
+                height=_UI_CTRL_H,
+                font=ctk.CTkFont(size=_UI_LABEL),
+            ).pack(side="left", fill="x", expand=True)
+            ctk.CTkButton(
+                row_fr,
+                text="…",
+                width=28,
+                height=_UI_CTRL_H,
+                font=ctk.CTkFont(size=_UI_LABEL),
+                command=browse_cmd,
+            ).pack(side="left", padx=(4, 0))
 
-        ctk.CTkLabel(basic, text="Scale").grid(row=0, column=0, sticky="w", pady=4)
+        ctk.CTkLabel(basic, text="Scale", font=ctk.CTkFont(size=_UI_LABEL)).grid(
+            row=0, column=0, sticky="w", pady=_UI_PAD_Y
+        )
         ctk.CTkOptionMenu(
-            basic, variable=self.scale_var, values=["2", "4"], width=320
-        ).grid(row=0, column=1, sticky="ew", pady=4, padx=(8, 0))
+            basic,
+            variable=self.scale_var,
+            values=["2", "4"],
+            width=_UI_MENU_W,
+            height=_UI_CTRL_H,
+            font=ctk.CTkFont(size=_UI_LABEL),
+        ).grid(row=0, column=1, sticky="ew", pady=_UI_PAD_Y, padx=(8, 0))
 
         saved_mode = str(cfg.get(KEY_PRESCALE_MODE) or PRESCALE_MODE_OFF).lower()
         label_by_mode = {mode: label for label, mode in PRESCALE_MODE_LABELS}
@@ -380,30 +490,39 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             value=str(int(cfg.get(KEY_PRESCALE_CUSTOM) or 1280))
         )
 
-        ctk.CTkLabel(basic, text="Prescale").grid(row=1, column=0, sticky="w", pady=4)
+        ctk.CTkLabel(basic, text="Prescale", font=ctk.CTkFont(size=_UI_LABEL)).grid(
+            row=1, column=0, sticky="w", pady=_UI_PAD_Y
+        )
         ctk.CTkOptionMenu(
             basic,
             variable=self.prescale_var,
             values=[label for label, _mode in PRESCALE_MODE_LABELS],
             command=lambda _v: self._on_prescale_mode_changed(),
-            width=320,
-        ).grid(row=1, column=1, sticky="ew", pady=4, padx=(8, 0))
+            width=_UI_MENU_W,
+            height=_UI_CTRL_H,
+            font=ctk.CTkFont(size=_UI_LABEL),
+        ).grid(row=1, column=1, sticky="ew", pady=_UI_PAD_Y, padx=(8, 0))
 
         self.prescale_custom_row = ctk.CTkFrame(basic, fg_color="transparent")
-        self.prescale_custom_row.grid(row=2, column=0, columnspan=2, sticky="ew", pady=2)
-        ctk.CTkLabel(self.prescale_custom_row, text="Long edge (px)").pack(
-            side="left", padx=(0, 8)
-        )
+        self.prescale_custom_row.grid(row=2, column=0, columnspan=2, sticky="ew", pady=1)
+        ctk.CTkLabel(
+            self.prescale_custom_row,
+            text="Long edge (px)",
+            font=ctk.CTkFont(size=_UI_LABEL),
+        ).pack(side="left", padx=(0, 6))
         ctk.CTkEntry(
             self.prescale_custom_row,
             textvariable=self.prescale_custom_var,
-            width=100,
+            width=80,
+            height=_UI_CTRL_H,
+            font=ctk.CTkFont(size=_UI_LABEL),
         ).pack(side="left")
         ctk.CTkLabel(
             self.prescale_custom_row,
             text="Downscale only if larger",
-            text_color="#888888",
-        ).pack(side="left", padx=(10, 0))
+            text_color="#777777",
+            font=ctk.CTkFont(size=_UI_SUB),
+        ).pack(side="left", padx=(8, 0))
 
         saved_fmt = str(cfg.get(KEY_OUTPUT_FORMAT) or OUTPUT_FORMAT_PNG).lower()
         if saved_fmt in ("jpeg", OUTPUT_FORMAT_JPEG):
@@ -419,156 +538,128 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         )
 
         # Save-as adapts: images → PNG/JPEG; videos → MP4; mixed → both.
-        self._save_as_label = ctk.CTkLabel(basic, text="Save as")
-        self._save_as_label.grid(row=3, column=0, sticky="w", pady=4)
+        self._save_as_label = ctk.CTkLabel(
+            basic, text="Save as", font=ctk.CTkFont(size=_UI_LABEL)
+        )
+        self._save_as_label.grid(row=3, column=0, sticky="w", pady=_UI_PAD_Y)
         self._save_as_image_menu = ctk.CTkOptionMenu(
             basic,
             variable=self.output_format_var,
             values=[label for label, _m in OUTPUT_FORMAT_LABELS],
-            width=320,
+            width=_UI_MENU_W,
+            height=_UI_CTRL_H,
+            font=ctk.CTkFont(size=_UI_LABEL),
         )
         self._save_as_video_label = ctk.CTkLabel(
             basic,
             text="MP4 (video output)",
-            text_color="#cccccc",
+            text_color="#bbbbbb",
             anchor="w",
+            font=ctk.CTkFont(size=_UI_LABEL),
         )
         self._save_as_mixed_label = ctk.CTkLabel(
             basic,
             text="Images: format below · Videos: always MP4",
-            text_color="#888888",
+            text_color="#777777",
             anchor="w",
+            font=ctk.CTkFont(size=_UI_SUB),
         )
         self._layout_save_as_row()
 
         _path_row(basic, 4, "Output folder", self.output_dir_var, self._browse_output)
         self._on_prescale_mode_changed()
 
-        # --- Action bar ---
-        buttons = ctk.CTkFrame(self, fg_color="transparent")
-        buttons.pack(side="bottom", fill="x", padx=16, pady=12)
-        ctk.CTkButton(buttons, text="Cancel", width=100, command=self._on_close).pack(
-            side="right"
+        # Advanced cards share the same scroll as Output (packed when Advanced opens).
+        self._advanced_block = ctk.CTkFrame(
+            self._sections_pad, fg_color="transparent", corner_radius=0
         )
-        ctk.CTkButton(buttons, text="Start", width=100, command=self._confirm).pack(
-            side="right", padx=(0, 8)
-        )
-        self.advanced_btn = ctk.CTkButton(
-            buttons,
-            text="Advanced Settings ▼",
-            width=160,
-            command=self._toggle_advanced,
-        )
-        self.advanced_btn.pack(side="left")
 
-        # --- Collapsible advanced panel ---
-        self.advanced = ctk.CTkFrame(self, fg_color=("gray90", "gray17"), corner_radius=8)
-        adv = ctk.CTkFrame(self.advanced, fg_color="transparent")
-        adv.pack(fill="both", expand=True, padx=12, pady=10)
-        adv.grid_columnconfigure(1, weight=1)
+        def _adv_section(title: str) -> ctk.CTkFrame:
+            wrap = ctk.CTkFrame(
+                self._advanced_block,
+                fg_color=_UI_SECTION_BG,
+                corner_radius=8,
+                border_width=1,
+                border_color=("gray70", "#3d3d3d"),
+            )
+            wrap.pack(fill="x", pady=(0, 4))
+            ctk.CTkLabel(
+                wrap,
+                text=title,
+                text_color=_UI_SECTION_TITLE,
+                font=ctk.CTkFont(size=_UI_SUB, weight="bold"),
+                anchor="w",
+            ).pack(fill="x", padx=10, pady=(8, 0))
+            body = ctk.CTkFrame(wrap, fg_color="transparent")
+            body.pack(fill="x", padx=10, pady=(4, 10))
+            body.grid_columnconfigure(1, weight=1)
+            return body
 
-        ctk.CTkLabel(adv, text="Backend").grid(row=0, column=0, sticky="w", pady=4)
+        # Block 1 — engine / device / model
+        eng = _adv_section("Engine")
+        ctk.CTkLabel(eng, text="Backend", font=ctk.CTkFont(size=_UI_LABEL)).grid(
+            row=0, column=0, sticky="w", pady=_UI_PAD_Y
+        )
         self.backend_menu = ctk.CTkOptionMenu(
-            adv,
+            eng,
             variable=self.backend_var,
             values=names,
             command=lambda _v: self._refresh_status(),
-            width=320,
+            width=_UI_MENU_W,
+            height=_UI_CTRL_H,
+            font=ctk.CTkFont(size=_UI_LABEL),
         )
-        self.backend_menu.grid(row=0, column=1, sticky="ew", pady=4, padx=(8, 0))
+        self.backend_menu.grid(row=0, column=1, sticky="ew", pady=_UI_PAD_Y, padx=(8, 0))
 
-        ctk.CTkLabel(adv, text="GPU").grid(row=1, column=0, sticky="w", pady=4)
+        ctk.CTkLabel(eng, text="GPU", font=ctk.CTkFont(size=_UI_LABEL)).grid(
+            row=1, column=0, sticky="w", pady=_UI_PAD_Y
+        )
         self.gpu_menu = ctk.CTkOptionMenu(
-            adv,
+            eng,
             variable=self.gpu_var,
             values=self._gpu_labels or ["cuda:0"],
-            width=320,
+            width=_UI_MENU_W,
+            height=_UI_CTRL_H,
+            font=ctk.CTkFont(size=_UI_LABEL),
         )
-        self.gpu_menu.grid(row=1, column=1, sticky="ew", pady=4, padx=(8, 0))
+        self.gpu_menu.grid(row=1, column=1, sticky="ew", pady=_UI_PAD_Y, padx=(8, 0))
 
-        ctk.CTkLabel(adv, text="Model").grid(row=2, column=0, sticky="w", pady=4)
+        ctk.CTkLabel(eng, text="Model", font=ctk.CTkFont(size=_UI_LABEL)).grid(
+            row=2, column=0, sticky="w", pady=_UI_PAD_Y
+        )
         self.model_var = ctk.StringVar(value="")
         self.model_menu = ctk.CTkOptionMenu(
-            adv,
+            eng,
             variable=self.model_var,
             values=["(no models found)"],
-            width=420,
+            width=_UI_MENU_W,
+            height=_UI_CTRL_H,
+            font=ctk.CTkFont(size=_UI_LABEL),
         )
-        self.model_menu.grid(row=2, column=1, sticky="ew", pady=4, padx=(8, 0))
+        self.model_menu.grid(row=2, column=1, sticky="ew", pady=_UI_PAD_Y, padx=(8, 0))
         self._reload_model_list(prefer=cfg.get(KEY_DIT_MODEL) or DEFAULT_DIT_MODEL)
 
         self.keep_vram_var = ctk.BooleanVar(value=bool(cfg.get(KEY_KEEP_VRAM)))
         ctk.CTkCheckBox(
-            adv,
+            eng,
             text="Keep model in VRAM (until app exit)",
             variable=self.keep_vram_var,
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 2))
+            font=ctk.CTkFont(size=_UI_LABEL),
+            checkbox_width=18,
+            checkbox_height=18,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 1))
 
         self.vae_tiled_var = ctk.BooleanVar(value=bool(cfg.get(KEY_VAE_TILED)))
         ctk.CTkCheckBox(
-            adv,
+            eng,
             text="Low VRAM (tiled VAE encode/decode)",
             variable=self.vae_tiled_var,
             command=self._on_vae_tiled_changed,
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(2, 4))
+            font=ctk.CTkFont(size=_UI_LABEL),
+            checkbox_width=18,
+            checkbox_height=18,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(1, 2))
         self._vae_tiled_warn_job = None
-
-        # --- Processing knobs (batch / overlap / chunk / tiles) ---
-        self._batch_label_by_val = {v: lab for lab, v in BATCH_SIZE_LABELS}
-        self._batch_val_by_label = {lab: v for lab, v in BATCH_SIZE_LABELS}
-        saved_batch = int(cfg.get(KEY_BATCH_SIZE) or BATCH_SIZE_AUTO)
-        self.batch_var = ctk.StringVar(
-            value=self._batch_label_by_val.get(
-                saved_batch, self._batch_label_by_val[BATCH_SIZE_AUTO]
-            )
-        )
-        ctk.CTkLabel(adv, text="Batch size").grid(row=5, column=0, sticky="w", pady=4)
-        ctk.CTkOptionMenu(
-            adv,
-            variable=self.batch_var,
-            values=[lab for lab, _v in BATCH_SIZE_LABELS],
-            width=320,
-        ).grid(row=5, column=1, sticky="ew", pady=4, padx=(8, 0))
-
-        self.uniform_batch_var = ctk.BooleanVar(
-            value=True if KEY_UNIFORM_BATCH not in cfg else bool(cfg.get(KEY_UNIFORM_BATCH))
-        )
-        ctk.CTkCheckBox(
-            adv,
-            text="Uniform batch size (pad last batch — better for video)",
-            variable=self.uniform_batch_var,
-        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(2, 4))
-
-        self._video_opts_start_row = 7
-        saved_overlap = int(cfg.get(KEY_TEMPORAL_OVERLAP) or TEMPORAL_OVERLAP_DEFAULT)
-        self.overlap_var = ctk.StringVar(value=str(max(0, min(16, saved_overlap))))
-        self._overlap_label = ctk.CTkLabel(adv, text="Temporal overlap")
-        self._overlap_label.grid(row=7, column=0, sticky="w", pady=4)
-        self._overlap_menu = ctk.CTkOptionMenu(
-            adv,
-            variable=self.overlap_var,
-            values=[str(i) for i in range(0, 9)],
-            width=320,
-        )
-        self._overlap_menu.grid(row=7, column=1, sticky="ew", pady=4, padx=(8, 0))
-
-        self._chunk_label_by_val = {v: lab for lab, v in CHUNK_SIZE_LABELS}
-        self._chunk_val_by_label = {lab: v for lab, v in CHUNK_SIZE_LABELS}
-        saved_chunk = int(cfg.get(KEY_CHUNK_SIZE) or CHUNK_SIZE_AUTO)
-        self.chunk_var = ctk.StringVar(
-            value=self._chunk_label_by_val.get(
-                saved_chunk, self._chunk_label_by_val[CHUNK_SIZE_AUTO]
-            )
-        )
-        self._chunk_label = ctk.CTkLabel(adv, text="Chunk size")
-        self._chunk_label.grid(row=8, column=0, sticky="w", pady=4)
-        self._chunk_menu = ctk.CTkOptionMenu(
-            adv,
-            variable=self.chunk_var,
-            values=[lab for lab, _v in CHUNK_SIZE_LABELS],
-            width=320,
-        )
-        self._chunk_menu.grid(row=8, column=1, sticky="ew", pady=4, padx=(8, 0))
 
         tile_vals = [str(v) for v in VAE_TILE_CHOICES]
         enc = int(cfg.get(KEY_VAE_ENCODE_TILE) or VAE_ENCODE_TILE_DEFAULT)
@@ -579,44 +670,167 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             dec = VAE_DECODE_TILE_DEFAULT
         self.encode_tile_var = ctk.StringVar(value=str(enc))
         self.decode_tile_var = ctk.StringVar(value=str(dec))
-        self._encode_tile_label = ctk.CTkLabel(adv, text="VAE encode tile")
-        self._encode_tile_label.grid(row=9, column=0, sticky="w", pady=4)
+        self._encode_tile_label = ctk.CTkLabel(
+            eng, text="VAE encode tile", font=ctk.CTkFont(size=_UI_LABEL)
+        )
+        self._encode_tile_label.grid(row=5, column=0, sticky="w", pady=_UI_PAD_Y)
         self._encode_tile_menu = ctk.CTkOptionMenu(
-            adv, variable=self.encode_tile_var, values=tile_vals, width=320
+            eng,
+            variable=self.encode_tile_var,
+            values=tile_vals,
+            width=_UI_MENU_W,
+            height=_UI_CTRL_H,
+            font=ctk.CTkFont(size=_UI_LABEL),
         )
-        self._encode_tile_menu.grid(row=9, column=1, sticky="ew", pady=4, padx=(8, 0))
-        self._decode_tile_label = ctk.CTkLabel(adv, text="VAE decode tile")
-        self._decode_tile_label.grid(row=10, column=0, sticky="w", pady=4)
+        self._encode_tile_menu.grid(
+            row=5, column=1, sticky="ew", pady=_UI_PAD_Y, padx=(8, 0)
+        )
+        self._decode_tile_label = ctk.CTkLabel(
+            eng, text="VAE decode tile", font=ctk.CTkFont(size=_UI_LABEL)
+        )
+        self._decode_tile_label.grid(row=6, column=0, sticky="w", pady=_UI_PAD_Y)
         self._decode_tile_menu = ctk.CTkOptionMenu(
-            adv, variable=self.decode_tile_var, values=tile_vals, width=320
+            eng,
+            variable=self.decode_tile_var,
+            values=tile_vals,
+            width=_UI_MENU_W,
+            height=_UI_CTRL_H,
+            font=ctk.CTkFont(size=_UI_LABEL),
         )
-        self._decode_tile_menu.grid(row=10, column=1, sticky="ew", pady=4, padx=(8, 0))
+        self._decode_tile_menu.grid(
+            row=6, column=1, sticky="ew", pady=_UI_PAD_Y, padx=(8, 0)
+        )
 
-        _path_row(adv, 11, "Weights folder", self.weights_dir_var, self._browse_weights)
-        _path_row(adv, 12, "Runner folder", self.runner_dir_var, self._browse_runner)
+        # Block 2 — processing (video temporal / batch — hidden for image-only)
+        proc = _adv_section("Processing")
+        self._processing_wrap = proc.master
+        self._batch_label_by_val = {v: lab for lab, v in BATCH_SIZE_LABELS}
+        self._batch_val_by_label = {lab: v for lab, v in BATCH_SIZE_LABELS}
+        saved_batch = int(cfg.get(KEY_BATCH_SIZE) or BATCH_SIZE_AUTO)
+        self.batch_var = ctk.StringVar(
+            value=self._batch_label_by_val.get(
+                saved_batch, self._batch_label_by_val[BATCH_SIZE_AUTO]
+            )
+        )
+        self._batch_label = ctk.CTkLabel(
+            proc, text="Batch size", font=ctk.CTkFont(size=_UI_LABEL)
+        )
+        self._batch_label.grid(row=0, column=0, sticky="w", pady=_UI_PAD_Y)
+        self._batch_menu = ctk.CTkOptionMenu(
+            proc,
+            variable=self.batch_var,
+            values=[lab for lab, _v in BATCH_SIZE_LABELS],
+            width=_UI_MENU_W,
+            height=_UI_CTRL_H,
+            font=ctk.CTkFont(size=_UI_LABEL),
+        )
+        self._batch_menu.grid(
+            row=0, column=1, sticky="ew", pady=_UI_PAD_Y, padx=(8, 0)
+        )
 
-        link_row = ctk.CTkFrame(adv, fg_color="transparent")
-        link_row.grid(row=13, column=0, columnspan=2, sticky="ew", pady=(20, 10))
+        self.uniform_batch_var = ctk.BooleanVar(
+            value=True if KEY_UNIFORM_BATCH not in cfg else bool(cfg.get(KEY_UNIFORM_BATCH))
+        )
+        self._uniform_batch_cb = ctk.CTkCheckBox(
+            proc,
+            text="Uniform batch size (pad last batch — better for video)",
+            variable=self.uniform_batch_var,
+            font=ctk.CTkFont(size=_UI_LABEL),
+            checkbox_width=18,
+            checkbox_height=18,
+        )
+        self._uniform_batch_cb.grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 2))
+
+        saved_overlap = int(cfg.get(KEY_TEMPORAL_OVERLAP) or TEMPORAL_OVERLAP_DEFAULT)
+        self.overlap_var = ctk.StringVar(value=str(max(0, min(16, saved_overlap))))
+        self._overlap_label = ctk.CTkLabel(
+            proc, text="Temporal overlap", font=ctk.CTkFont(size=_UI_LABEL)
+        )
+        self._overlap_label.grid(row=2, column=0, sticky="w", pady=_UI_PAD_Y)
+        self._overlap_menu = ctk.CTkOptionMenu(
+            proc,
+            variable=self.overlap_var,
+            values=[str(i) for i in range(0, 9)],
+            width=_UI_MENU_W,
+            height=_UI_CTRL_H,
+            font=ctk.CTkFont(size=_UI_LABEL),
+        )
+        self._overlap_menu.grid(
+            row=2, column=1, sticky="ew", pady=_UI_PAD_Y, padx=(8, 0)
+        )
+
+        self._chunk_label_by_val = {v: lab for lab, v in CHUNK_SIZE_LABELS}
+        self._chunk_val_by_label = {lab: v for lab, v in CHUNK_SIZE_LABELS}
+        saved_chunk = int(cfg.get(KEY_CHUNK_SIZE) or CHUNK_SIZE_AUTO)
+        self.chunk_var = ctk.StringVar(
+            value=self._chunk_label_by_val.get(
+                saved_chunk, self._chunk_label_by_val[CHUNK_SIZE_AUTO]
+            )
+        )
+        self._chunk_label = ctk.CTkLabel(
+            proc, text="Chunk size", font=ctk.CTkFont(size=_UI_LABEL)
+        )
+        self._chunk_label.grid(row=3, column=0, sticky="w", pady=_UI_PAD_Y)
+        self._chunk_menu = ctk.CTkOptionMenu(
+            proc,
+            variable=self.chunk_var,
+            values=[lab for lab, _v in CHUNK_SIZE_LABELS],
+            width=_UI_MENU_W,
+            height=_UI_CTRL_H,
+            font=ctk.CTkFont(size=_UI_LABEL),
+        )
+        self._chunk_menu.grid(
+            row=3, column=1, sticky="ew", pady=_UI_PAD_Y, padx=(8, 0)
+        )
+
+        self.chunk_preview_var = ctk.BooleanVar(
+            value=bool(cfg.get(KEY_CHUNK_PREVIEW, True))
+        )
+        self._chunk_preview_cb = ctk.CTkCheckBox(
+            proc,
+            text="Chunk preview (refresh after each video chunk)",
+            variable=self.chunk_preview_var,
+            font=ctk.CTkFont(size=_UI_LABEL),
+            checkbox_width=18,
+            checkbox_height=18,
+        )
+        self._chunk_preview_cb.grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(2, 2)
+        )
+
+        # Block 3 — paths / install
+        paths = _adv_section("Paths")
+        self._paths_wrap = paths.master
+        _path_row(paths, 0, "Weights folder", self.weights_dir_var, self._browse_weights)
+        _path_row(paths, 1, "Runner folder", self.runner_dir_var, self._browse_runner)
+
+        link_row = ctk.CTkFrame(paths, fg_color="transparent")
+        link_row.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 2))
         link_btns = ctk.CTkFrame(link_row, fg_color="transparent")
         link_btns.pack(anchor="center")
-        ctk.CTkButton(
-            link_btns, text="Open weights folder", width=150, command=self._open_weights_folder
-        ).pack(side="left")
-        ctk.CTkButton(
-            link_btns, text="Download weights…", width=150, command=self._open_download_url
-        ).pack(side="left", padx=(8, 0))
-        ctk.CTkButton(
-            link_btns, text="Install runner…", width=130, command=self._setup_runner
-        ).pack(side="left", padx=(8, 0))
+        for text, cmd, w in (
+            ("Open weights", self._open_weights_folder, 110),
+            ("Download…", self._open_download_url, 100),
+            ("Install runner…", self._setup_runner, 120),
+        ):
+            ctk.CTkButton(
+                link_btns,
+                text=text,
+                width=w,
+                height=_UI_BTN_H,
+                font=ctk.CTkFont(size=_UI_LABEL),
+                command=cmd,
+            ).pack(side="left", padx=(0, 6))
 
         ctk.CTkLabel(
-            adv,
+            paths,
             textvariable=self.status_var,
-            wraplength=560,
+            wraplength=500,
             justify="left",
-            text_color="#cccccc",
+            text_color="#aaaaaa",
             anchor="w",
-        ).grid(row=14, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+            font=ctk.CTkFont(size=_UI_SUB),
+        ).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 0))
 
         self._autosave_job = None
         self._autosave_enabled = False
@@ -632,6 +846,7 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         self.uniform_batch_var.trace_add("write", lambda *_: self._schedule_autosave())
         self.overlap_var.trace_add("write", lambda *_: self._schedule_autosave())
         self.chunk_var.trace_add("write", lambda *_: self._schedule_autosave())
+        self.chunk_preview_var.trace_add("write", lambda *_: self._schedule_autosave())
         self.encode_tile_var.trace_add("write", lambda *_: self._schedule_autosave())
         self.decode_tile_var.trace_add("write", lambda *_: self._schedule_autosave())
         self._refresh_status()
@@ -640,20 +855,56 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         self._autosave_enabled = True
 
         want_open = bool(cfg.get(KEY_ADVANCED_OPEN))
-        if want_open:
-            self._set_advanced_open(True, persist=False, resize=False)
-            self.geometry(
-                f"{UPSCALE_DIALOG_WIDTH}x{UPSCALE_BASIC_HEIGHT + self._advanced_extra_height()}"
-            )
-        else:
-            self._set_advanced_open(False, persist=False, resize=False)
-            self.geometry(f"{UPSCALE_DIALOG_WIDTH}x{UPSCALE_BASIC_HEIGHT}")
-
+        self._set_advanced_open(want_open, persist=False, resize=True)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(50, self._center_on_parent)
+        self.after(80, self._fit_window)
 
     def _advanced_extra_height(self) -> int:
         return UPSCALE_ADVANCED_EXTRA_VIDEO if self._has_video else UPSCALE_ADVANCED_EXTRA
+
+    def _fit_window(self):
+        """Resize so content + button bar are fully visible (no clipping)."""
+        try:
+            self.update_idletasks()
+        except Exception:
+            return
+        open_ = bool(getattr(self, "_advanced_open", False))
+        # Pack pady / margins around the measured widgets.
+        measured = 20
+        for w, pad in (
+            (getattr(self, "_title_lbl", None), 8),
+            (getattr(self, "_subtitle_lbl", None), 4),
+            (getattr(self, "_basic_wrap", None), 8),
+            (getattr(self, "_button_bar", None), 16),
+        ):
+            if w is None:
+                continue
+            try:
+                measured += int(w.winfo_reqheight()) + int(pad)
+            except Exception:
+                pass
+        if open_:
+            measured += int(self._advanced_extra_height())
+            width = UPSCALE_DIALOG_WIDTH_ADVANCED
+            min_h = 520
+            # Prefer measured; soft floor only if reqheight under-reports.
+            h = max(min_h, measured, UPSCALE_BASIC_HEIGHT + self._advanced_extra_height())
+        else:
+            width = UPSCALE_DIALOG_WIDTH
+            min_h = 280
+            # Tight to Output card — do not keep the advanced-era tall floor.
+            h = max(min_h, measured)
+        try:
+            max_h = max(min_h, int(self.winfo_screenheight()) - 100)
+        except Exception:
+            max_h = 900
+        h = max(min_h, min(max_h, h))
+        try:
+            self.minsize(width, min_h)
+            self.geometry(f"{width}x{h}")
+        except Exception:
+            pass
 
     def _layout_save_as_row(self):
         """Show image format menu and/or MP4 hint depending on selection."""
@@ -671,37 +922,56 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         if self._video_only:
             self._save_as_label.configure(text="Save as")
             self._save_as_video_label.grid(
-                row=3, column=1, sticky="ew", pady=4, padx=(8, 0)
+                row=3, column=1, sticky="ew", pady=_UI_PAD_Y, padx=(8, 0)
             )
         elif self._has_video and self._has_image:
             self._save_as_label.configure(text="Images as")
             self._save_as_image_menu.grid(
-                row=3, column=1, sticky="ew", pady=4, padx=(8, 0)
+                row=3, column=1, sticky="ew", pady=_UI_PAD_Y, padx=(8, 0)
             )
         else:
             self._save_as_label.configure(text="Save as")
             self._save_as_image_menu.grid(
-                row=3, column=1, sticky="ew", pady=4, padx=(8, 0)
+                row=3, column=1, sticky="ew", pady=_UI_PAD_Y, padx=(8, 0)
             )
 
     def _update_video_advanced_visibility(self):
-        """Show temporal overlap / chunk only when selection includes video."""
+        """Hide Processing (batch / overlap / chunk) when selection is image-only."""
+        show = bool(self._has_video)
         widgets = (
+            getattr(self, "_batch_label", None),
+            getattr(self, "_batch_menu", None),
+            getattr(self, "_uniform_batch_cb", None),
             getattr(self, "_overlap_label", None),
             getattr(self, "_overlap_menu", None),
             getattr(self, "_chunk_label", None),
             getattr(self, "_chunk_menu", None),
+            getattr(self, "_chunk_preview_cb", None),
         )
         for w in widgets:
             if w is None:
                 continue
             try:
-                if self._has_video:
+                if show:
                     w.grid()
                 else:
                     w.grid_remove()
             except Exception:
                 pass
+        wrap = getattr(self, "_processing_wrap", None)
+        if wrap is None:
+            return
+        try:
+            if show:
+                paths = getattr(self, "_paths_wrap", None)
+                if paths is not None:
+                    wrap.pack(fill="x", pady=(0, 4), before=paths)
+                else:
+                    wrap.pack(fill="x", pady=(0, 4))
+            else:
+                wrap.pack_forget()
+        except Exception:
+            pass
 
     def _on_vae_tiled_changed(self, *_args):
         tiled = bool(self.vae_tiled_var.get())
@@ -803,24 +1073,76 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             scale = 2
         return short <= 0 and scale >= 4
 
+    def _sync_sections_scrollbar(self, visible: bool):
+        """Show scrollbar only in Advanced; keep card borders clear of the clip edge."""
+        scroll = getattr(self, "_sections_scroll", None)
+        pad = getattr(self, "_sections_pad", None)
+        if scroll is None:
+            return
+        try:
+            if visible:
+                scroll._create_grid()
+                # Gap between canvas content and scrollbar track.
+                border_spacing = scroll._apply_widget_scaling(
+                    scroll._parent_frame.cget("corner_radius")
+                    + scroll._parent_frame.cget("border_width")
+                )
+                scroll._parent_canvas.grid_configure(
+                    padx=(border_spacing, 6),
+                    pady=border_spacing,
+                )
+                if pad is not None:
+                    pad.pack_configure(padx=_UI_SECTION_PADX_SCROLL)
+                self._body.pack_configure(padx=(12, 10))
+                return
+            scroll._scrollbar.grid_forget()
+            border_spacing = scroll._apply_widget_scaling(
+                scroll._parent_frame.cget("corner_radius")
+                + scroll._parent_frame.cget("border_width")
+            )
+            scroll._parent_canvas.grid(
+                row=1,
+                column=0,
+                columnspan=2,
+                sticky="nsew",
+                padx=border_spacing,
+                pady=border_spacing,
+            )
+            if pad is not None:
+                pad.pack_configure(padx=_UI_SECTION_PADX)
+            self._body.pack_configure(padx=12)
+        except Exception:
+            pass
+
     def _set_advanced_open(self, open_: bool, *, persist: bool = True, resize: bool = True):
-        """Show or hide the advanced panel and optionally resize the window."""
+        """Show or hide advanced cards inside the shared scroll; footer stays buttons-only."""
         self._advanced_open = bool(open_)
         if self._advanced_open:
-            # Pack above the bottom action bar.
-            self.advanced.pack(fill="both", expand=True, padx=16, pady=(4, 0), before=self.advanced_btn.master)
-            self.advanced_btn.configure(text="Advanced Settings ▲")
-            if resize:
-                self.update_idletasks()
-                self.geometry(
-                    f"{UPSCALE_DIALOG_WIDTH}x{UPSCALE_BASIC_HEIGHT + self._advanced_extra_height()}"
-                )
+            self._advanced_block.pack(
+                fill="x",
+                pady=(0, 4),
+                after=self._basic_wrap,
+            )
+            self._sync_sections_scrollbar(True)
+            self.advanced_btn.configure(text="Advanced ▲")
+            try:
+                self._sections_scroll._parent_canvas.yview_moveto(0)
+            except Exception:
+                pass
         else:
-            self.advanced.pack_forget()
-            self.advanced_btn.configure(text="Advanced Settings ▼")
-            if resize:
-                self.update_idletasks()
-                self.geometry(f"{UPSCALE_DIALOG_WIDTH}x{UPSCALE_BASIC_HEIGHT}")
+            self._advanced_block.pack_forget()
+            self._sync_sections_scrollbar(False)
+            self.advanced_btn.configure(text="Advanced ▼")
+            try:
+                self._sections_scroll._parent_canvas.yview_moveto(0)
+            except Exception:
+                pass
+        if resize:
+            try:
+                self.after_idle(self._fit_window)
+                self.after(50, self._fit_window)
+            except Exception:
+                self._fit_window()
         if persist:
             try:
                 save_seedvr2_settings(advanced_open=self._advanced_open)
@@ -1070,6 +1392,7 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             chunk_size=self._selected_chunk_size(),
             vae_encode_tile=self._selected_encode_tile(),
             vae_decode_tile=self._selected_decode_tile(),
+            chunk_preview=bool(self.chunk_preview_var.get()),
         )
         if self.controller is not None:
             setattr(self.controller, "seedvr2_weights_dir", weights)
@@ -1078,6 +1401,7 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             setattr(self.controller, "seedvr2_dit_model", dit)
             setattr(self.controller, "seedvr2_keep_vram", bool(self.keep_vram_var.get()))
             setattr(self.controller, "seedvr2_vae_tiled", bool(self.vae_tiled_var.get()))
+            setattr(self.controller, "seedvr2_chunk_preview", bool(self.chunk_preview_var.get()))
             setattr(self.controller, "seedvr2_output_format", out_fmt)
             setattr(self.controller, "seedvr2_prescale_mode", self._selected_prescale_mode())
             setattr(self.controller, "seedvr2_prescale_custom", self._selected_prescale_custom())
@@ -1245,7 +1569,6 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         long_edge = resolve_prescale_long_edge(mode, custom_px)
         out_dir = (self.output_dir_var.get() or "").strip() or None
         cuda = self._selected_cuda_index()
-        batch_size = self._selected_batch_size()
         options = {
             "scale": scale,
             "output_dir": out_dir,
@@ -1258,15 +1581,17 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             "prescale_mode": mode,
             "prescale_custom": custom_px,
             "prescale_long_edge": long_edge,
-            "batch_size": batch_size if batch_size > 0 else None,
-            "uniform_batch_size": bool(self.uniform_batch_var.get()),
             "vae_encode_tile_size": self._selected_encode_tile(),
             "vae_decode_tile_size": self._selected_decode_tile(),
         }
         if self._has_video:
+            batch_size = self._selected_batch_size()
+            options["batch_size"] = batch_size if batch_size > 0 else None
+            options["uniform_batch_size"] = bool(self.uniform_batch_var.get())
             options["temporal_overlap"] = self._selected_temporal_overlap()
             chunk = self._selected_chunk_size()
             options["chunk_size"] = chunk if chunk > 0 else None
+            options["chunk_preview"] = bool(self.chunk_preview_var.get())
         self.result = {
             "backend_id": getattr(backend, "id", "upscale"),
             "paths": list(self.paths),

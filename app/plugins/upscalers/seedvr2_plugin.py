@@ -538,6 +538,8 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
             "chunk_size": None,
             "vae_encode_tile_size": 1024,
             "vae_decode_tile_size": 768,
+            "chunk_preview": True,
+            "preview_path": None,
             "output_format": "png",  # images: png|jpg (never keep webp/source)
             "prescale_mode": "off",
             "prescale_long_edge": None,  # int when custom / resolved
@@ -823,13 +825,17 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
                 decode_tile=decode_tile,
                 attention_mode=attention_mode,
                 is_video=is_video,
+                preview_path=str(opts.get("preview_path") or "").strip() or None,
+                chunk_preview=bool(opts.get("chunk_preview", True)),
                 progress_cb=progress_cb,
                 should_stop=should_stop,
             )
 
-        cmd = [
-            python_exe,
-            str(cli_path),
+        runner_root = str(cli_path.parent)
+        preview_path = str(opts.get("preview_path") or "").strip()
+        chunk_preview = bool(opts.get("chunk_preview", True)) and bool(preview_path) and is_video
+        bootstrap = Path(__file__).resolve().parents[2] / "seedvr2_cli_bootstrap.py"
+        cli_args = [
             os.path.abspath(work_path),
             "--model_dir",
             str(self.weights_dir),
@@ -847,21 +853,21 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
             attention_mode,
         ]
         if uniform_batch:
-            cmd.append("--uniform_batch_size")
+            cli_args.append("--uniform_batch_size")
         if is_video:
-            cmd.extend(["--output_format", "mp4"])
+            cli_args.extend(["--output_format", "mp4"])
             if video_backend == "ffmpeg":
-                cmd.extend(["--video_backend", "ffmpeg"])
+                cli_args.extend(["--video_backend", "ffmpeg"])
             if chunk_size > 0:
-                cmd.extend(["--chunk_size", str(chunk_size)])
+                cli_args.extend(["--chunk_size", str(chunk_size)])
             if temporal_overlap > 0:
-                cmd.extend(["--temporal_overlap", str(temporal_overlap)])
+                cli_args.extend(["--temporal_overlap", str(temporal_overlap)])
         elif video_backend == "ffmpeg":
             # Harmless for stills; kept for runner compatibility.
-            cmd.extend(["--video_backend", "ffmpeg"])
+            cli_args.extend(["--video_backend", "ffmpeg"])
         if vae_tiled:
-            cmd.extend(["--vae_encode_tiled", "--vae_decode_tiled"])
-            cmd.extend(
+            cli_args.extend(["--vae_encode_tiled", "--vae_decode_tiled"])
+            cli_args.extend(
                 [
                     "--vae_encode_tile_size",
                     str(encode_tile),
@@ -875,6 +881,13 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
         # Runner prints emoji status lines; Windows cp1250 consoles crash without UTF-8.
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
+        if chunk_preview and bootstrap.is_file():
+            env["SEEDVR2_RUNNER_DIR"] = runner_root
+            env["VIBE_SEEDVR2_PREVIEW_PATH"] = preview_path
+            env["VIBE_SEEDVR2_CHUNK_PREVIEW"] = "1"
+            cmd = [python_exe, str(bootstrap), *cli_args]
+        else:
+            cmd = [python_exe, str(cli_path), *cli_args]
 
         if progress_cb:
             progress_cb(
@@ -1004,6 +1017,8 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
         decode_tile: int = 768,
         attention_mode: str = "sdpa",
         is_video: bool = False,
+        preview_path: str | None = None,
+        chunk_preview: bool = True,
         progress_cb: Callable[[float, str], None] | None,
         should_stop: Callable[[], bool] | None,
     ) -> dict[str, Any]:
@@ -1046,7 +1061,10 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
             "vae_tiled": bool(vae_tiled),
             "uniform_batch_size": bool(uniform_batch_size),
             "attention_mode": attention_mode or "sdpa",
+            "chunk_preview": bool(chunk_preview) and bool(is_video),
         }
+        if preview_path and job_opts["chunk_preview"]:
+            job_opts["preview_path"] = str(preview_path)
         if is_video:
             job_opts["output_format"] = "mp4"
             if chunk_size > 0:
