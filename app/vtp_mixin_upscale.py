@@ -38,8 +38,12 @@ class VtpUpscaleMixin:
         text = message or "Upscale failed."
         self.after(0, lambda: self.status_bar.set_action_message(text))
         title = "Upscale"
-        if error_code == "gpu_pack_missing":
-            title = "GPU Pack"
+        if error_code in ("gpu_pack_missing", "runner_venv_missing", "cuda_unavailable", "runtime_error"):
+            title = "SeedVR 2 setup"
+        elif error_code == "weights_missing":
+            title = "SeedVR 2 weights"
+        elif error_code == "runner_missing":
+            title = "SeedVR 2 runner"
         self.after(0, lambda: messagebox.showwarning(title, text))
 
     def selected_paths_for_upscale(self, clicked_path: str | None = None) -> list[str]:
@@ -446,6 +450,9 @@ class VtpUpscaleMixin:
                 error = result.get("error")
                 blocking = (
                     "gpu_pack_missing",
+                    "runner_venv_missing",
+                    "cuda_unavailable",
+                    "runtime_error",
                     "weights_missing",
                     "runner_missing",
                     "not_implemented",

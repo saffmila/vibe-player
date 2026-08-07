@@ -2,7 +2,7 @@ module.exports = {
   // Pinokio launcher schema (see https://desktop.pinokio.co/docs/)
   version: "8.0.0",
   title: "Vibe Player",
-  description: "Local video manager with AI autotagging, powered by VLC",
+  description: "Local video manager with AI autotagging and optional SeedVR2 upscale, powered by VLC",
   icon: "icon.png",
   // VLC cannot be installed by Pinokio; show it before Install
   pre: [{

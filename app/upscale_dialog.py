@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import threading
-import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
@@ -60,11 +59,11 @@ from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS
 
 
 UPSCALE_DIALOG_WIDTH = 560
-UPSCALE_DIALOG_WIDTH_ADVANCED = 600  # scrollbar + room for card border/radius
+UPSCALE_DIALOG_WIDTH_ADVANCED = 620  # scrollbar + room for full card border/radius
 # Soft floors; _fit_window() prefers measured size (simple mode must stay tight).
 UPSCALE_BASIC_HEIGHT = 320
-UPSCALE_ADVANCED_EXTRA = 400
-UPSCALE_ADVANCED_EXTRA_VIDEO = 440
+UPSCALE_ADVANCED_EXTRA = 440
+UPSCALE_ADVANCED_EXTRA_VIDEO = 480
 
 # Compact control sizing (~70% of default CTk chrome).
 _UI_LABEL = 12
@@ -75,10 +74,12 @@ _UI_BTN_H = 28
 _UI_BTN_W = 88
 _UI_MENU_W = 300
 _UI_PAD_Y = 2
-# Right inset so CTk rounded card borders aren't clipped by the scroll canvas.
-_UI_SECTION_PADX = (0, 12)
-_UI_SECTION_PADX_SCROLL = (0, 14)
+# Permanent right pack-spacer so card borders never sit on the canvas clip edge.
+# (CTk ScrollableFrame width hacks get overwritten on Advanced toggle.)
+_UI_SECTION_GUTTER = 16
+_UI_SECTION_GUTTER_SCROLL = 20
 _UI_SECTION_BG = ("gray88", "#2a2a2a")
+_UI_STATUS_BG = ("gray85", "#0c0c0c")
 _UI_SECTION_TITLE = "#8ab4c8"
 _UI_BODY_BG = ("gray92", "#1a1a1a")
 
@@ -158,12 +159,13 @@ class SeedVR2RunnerInstallDialog(ctk.CTkToplevel):
 
         rows = [
             ("What", f"ComfyUI-SeedVR2 CLI ({SEEDVR2_RUNNER_REF}) + Python .venv"),
-            ("Includes", "PyTorch (CUDA) and SeedVR2 Python dependencies"),
+            ("Includes", "PyTorch CUDA (cu130) and SeedVR2 Python dependencies"),
             ("From", f"GitHub: {SEEDVR2_RUNNER_REPO}"),
             ("Also from", "PyTorch CUDA wheels (download.pytorch.org)"),
             ("Disk space", f"About {SEEDVR2_SETUP_DISK_ESTIMATE} (mostly PyTorch)"),
             ("Time", "Several minutes on a typical connection"),
             ("Network", "Required for the download"),
+            ("Next step", "After this, use Install weights… (~4 GB models)"),
         ]
         for i, (label, value) in enumerate(rows):
             row = ctk.CTkFrame(body, fg_color="transparent")
@@ -416,15 +418,27 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         self._sections_scroll.pack(fill="both", expand=True)
         self._sections_scroll.grid_columnconfigure(0, weight=1)
 
-        # Inset host — keeps card borders/radii clear of the canvas & scrollbar clip.
+        # Pad + permanent right gutter so card borders never sit on the canvas clip edge.
         self._sections_pad = ctk.CTkFrame(
             self._sections_scroll, fg_color="transparent", corner_radius=0
         )
-        self._sections_pad.pack(fill="x", expand=True, padx=_UI_SECTION_PADX)
+        self._sections_pad.pack(fill="x", expand=True)
+        self._sections_gutter = ctk.CTkFrame(
+            self._sections_pad,
+            width=_UI_SECTION_GUTTER,
+            fg_color="transparent",
+            corner_radius=0,
+        )
+        self._sections_gutter.pack(side="right", fill="y")
+        self._sections_gutter.pack_propagate(False)
+        self._sections_content = ctk.CTkFrame(
+            self._sections_pad, fg_color="transparent", corner_radius=0
+        )
+        self._sections_content.pack(side="left", fill="both", expand=True)
 
         # Output card lives in the same scroll host as advanced cards (no width tooth).
         self._basic_wrap = ctk.CTkFrame(
-            self._sections_pad,
+            self._sections_content,
             fg_color=_UI_SECTION_BG,
             corner_radius=8,
             border_width=1,
@@ -571,7 +585,7 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
 
         # Advanced cards share the same scroll as Output (packed when Advanced opens).
         self._advanced_block = ctk.CTkFrame(
-            self._sections_pad, fg_color="transparent", corner_radius=0
+            self._sections_content, fg_color="transparent", corner_radius=0
         )
 
         def _adv_section(title: str) -> ctk.CTkFrame:
@@ -810,7 +824,7 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         link_btns.pack(anchor="center")
         for text, cmd, w in (
             ("Open weights", self._open_weights_folder, 110),
-            ("Download…", self._open_download_url, 100),
+            ("Install weights…", self._install_weights, 120),
             ("Install runner…", self._setup_runner, 120),
         ):
             ctk.CTkButton(
@@ -822,15 +836,25 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
                 command=cmd,
             ).pack(side="left", padx=(0, 6))
 
-        ctk.CTkLabel(
+        self._status_box = ctk.CTkFrame(
             paths,
+            fg_color=_UI_STATUS_BG,
+            corner_radius=6,
+            border_width=1,
+            border_color=("gray70", "#1a1a1a"),
+        )
+        self._status_box.grid(
+            row=3, column=0, columnspan=2, sticky="ew", pady=(14, 6)
+        )
+        ctk.CTkLabel(
+            self._status_box,
             textvariable=self.status_var,
-            wraplength=500,
+            wraplength=480,
             justify="left",
-            text_color="#aaaaaa",
+            text_color="#b0b0b0",
             anchor="w",
             font=ctk.CTkFont(size=_UI_SUB),
-        ).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        ).pack(fill="x", padx=10, pady=8)
 
         self._autosave_job = None
         self._autosave_enabled = False
@@ -870,13 +894,12 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         except Exception:
             return
         open_ = bool(getattr(self, "_advanced_open", False))
-        # Pack pady / margins around the measured widgets.
-        measured = 20
+        measured = 28
         for w, pad in (
             (getattr(self, "_title_lbl", None), 8),
             (getattr(self, "_subtitle_lbl", None), 4),
-            (getattr(self, "_basic_wrap", None), 8),
-            (getattr(self, "_button_bar", None), 16),
+            (getattr(self, "_basic_wrap", None), 10),
+            (getattr(self, "_button_bar", None), 18),
         ):
             if w is None:
                 continue
@@ -888,13 +911,12 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             measured += int(self._advanced_extra_height())
             width = UPSCALE_DIALOG_WIDTH_ADVANCED
             min_h = 520
-            # Prefer measured; soft floor only if reqheight under-reports.
             h = max(min_h, measured, UPSCALE_BASIC_HEIGHT + self._advanced_extra_height())
         else:
             width = UPSCALE_DIALOG_WIDTH
-            min_h = 280
-            # Tight to Output card — do not keep the advanced-era tall floor.
-            h = max(min_h, measured)
+            min_h = 260
+            # Never keep the advanced-era tall window in simple mode.
+            h = max(min_h, min(measured, 420))
         try:
             max_h = max(min_h, int(self.winfo_screenheight()) - 100)
         except Exception:
@@ -903,6 +925,50 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         try:
             self.minsize(width, min_h)
             self.geometry(f"{width}x{h}")
+            if not open_:
+                self.after(30, lambda w=width, hh=h, m=min_h: self._force_simple_height(w, hh, m))
+        except Exception:
+            pass
+
+    def _force_simple_height(self, width: int, h: int, min_h: int):
+        """Re-assert tight simple-mode geometry after Advanced collapse."""
+        if getattr(self, "_advanced_open", False):
+            return
+        try:
+            self.minsize(width, min_h)
+            self.geometry(f"{width}x{h}")
+            self.update_idletasks()
+            if int(self.winfo_height()) > h + 20:
+                self.geometry(f"{width}x{h}")
+        except Exception:
+            pass
+
+    def _layout_body_for_mode(self, open_: bool):
+        """Advanced expands the scroll; simple mode must not leave a tall empty body."""
+        body = getattr(self, "_body", None)
+        scroll = getattr(self, "_sections_scroll", None)
+        if body is None or scroll is None:
+            return
+        try:
+            if open_:
+                body.pack_configure(fill="both", expand=True)
+                scroll.pack_configure(fill="both", expand=True)
+                try:
+                    scroll.configure(height=int(self._advanced_extra_height()))
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.update_idletasks()
+                    card_h = max(120, int(self._basic_wrap.winfo_reqheight()) + 8)
+                    scroll.configure(height=card_h)
+                except Exception:
+                    try:
+                        scroll.configure(height=180)
+                    except Exception:
+                        pass
+                scroll.pack_configure(fill="x", expand=False)
+                body.pack_configure(fill="x", expand=False)
         except Exception:
             pass
 
@@ -1073,27 +1139,36 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             scale = 2
         return short <= 0 and scale >= 4
 
+    def _set_section_gutter(self, advanced: bool):
+        """Keep a permanent right spacer so rounded card borders stay visible."""
+        gutter = getattr(self, "_sections_gutter", None)
+        if gutter is None:
+            return
+        try:
+            w = _UI_SECTION_GUTTER_SCROLL if advanced else _UI_SECTION_GUTTER
+            gutter.configure(width=int(w))
+            gutter.pack_propagate(False)
+        except Exception:
+            pass
+
     def _sync_sections_scrollbar(self, visible: bool):
         """Show scrollbar only in Advanced; keep card borders clear of the clip edge."""
         scroll = getattr(self, "_sections_scroll", None)
-        pad = getattr(self, "_sections_pad", None)
         if scroll is None:
             return
         try:
             if visible:
                 scroll._create_grid()
-                # Gap between canvas content and scrollbar track.
                 border_spacing = scroll._apply_widget_scaling(
                     scroll._parent_frame.cget("corner_radius")
                     + scroll._parent_frame.cget("border_width")
                 )
                 scroll._parent_canvas.grid_configure(
-                    padx=(border_spacing, 6),
+                    padx=(border_spacing, 4),
                     pady=border_spacing,
                 )
-                if pad is not None:
-                    pad.pack_configure(padx=_UI_SECTION_PADX_SCROLL)
-                self._body.pack_configure(padx=(12, 10))
+                self._body.pack_configure(padx=(12, 8))
+                self._set_section_gutter(True)
                 return
             scroll._scrollbar.grid_forget()
             border_spacing = scroll._apply_widget_scaling(
@@ -1108,9 +1183,8 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
                 padx=border_spacing,
                 pady=border_spacing,
             )
-            if pad is not None:
-                pad.pack_configure(padx=_UI_SECTION_PADX)
             self._body.pack_configure(padx=12)
+            self._set_section_gutter(False)
         except Exception:
             pass
 
@@ -1124,6 +1198,7 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
                 after=self._basic_wrap,
             )
             self._sync_sections_scrollbar(True)
+            self._layout_body_for_mode(True)
             self.advanced_btn.configure(text="Advanced ▲")
             try:
                 self._sections_scroll._parent_canvas.yview_moveto(0)
@@ -1132,6 +1207,7 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         else:
             self._advanced_block.pack_forget()
             self._sync_sections_scrollbar(False)
+            self._layout_body_for_mode(False)
             self.advanced_btn.configure(text="Advanced ▼")
             try:
                 self._sections_scroll._parent_canvas.yview_moveto(0)
@@ -1141,6 +1217,7 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             try:
                 self.after_idle(self._fit_window)
                 self.after(50, self._fit_window)
+                self.after(120, self._fit_window)
             except Exception:
                 self._fit_window()
         if persist:
@@ -1297,16 +1374,30 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         self._refresh_status()
         self._schedule_autosave()
 
-    def _refresh_status(self):
+    def _refresh_status(self, *, deep: bool = False):
+        """Update Paths status text.
+
+        ``deep=False`` (default) is filesystem-only and must stay fast for dialog
+        open. ``deep=True`` probes runner torch/CUDA (use on Start / after install).
+        """
         backend = self._selected_backend()
         self._apply_paths_to_backend(backend)
-        runtime = backend.runtime_status() if hasattr(backend, "runtime_status") else {"ready": True}
-        weights = backend.weights_status() if hasattr(backend, "weights_status") else {"ready": True}
-        runner = backend.runner_status() if hasattr(backend, "runner_status") else {"ready": True}
+        runtime_fn = getattr(backend, "runtime_status", None)
+        weights_fn = getattr(backend, "weights_status", None)
+        runner_fn = getattr(backend, "runner_status", None)
+        try:
+            runtime = runtime_fn(deep=deep) if callable(runtime_fn) else {"ready": True}
+        except TypeError:
+            runtime = runtime_fn() if callable(runtime_fn) else {"ready": True}
+        weights = weights_fn() if callable(weights_fn) else {"ready": True}
+        try:
+            runner = runner_fn(deep=deep) if callable(runner_fn) else {"ready": True}
+        except TypeError:
+            runner = runner_fn() if callable(runner_fn) else {"ready": True}
         dit = self._selected_dit_filename()
         parts = []
         if not runtime.get("ready"):
-            parts.append(runtime.get("message") or "GPU pack missing.")
+            parts.append(runtime.get("message") or "Runner environment missing.")
         if not weights.get("ready"):
             parts.append(weights.get("message") or "Weights missing.")
             if weights.get("path"):
@@ -1428,14 +1519,95 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         except Exception as exc:
             messagebox.showerror("Upscale", f"Cannot open folder:\n{exc}", parent=self)
 
-    def _open_download_url(self):
-        backend = self._selected_backend()
-        weights = backend.weights_status() if hasattr(backend, "weights_status") else {}
-        url = weights.get("download_url")
-        if not url:
-            messagebox.showinfo("Upscale", "No download URL for this backend.", parent=self)
+    def _install_weights(self):
+        """Download recommended 3B FP8 DiT + VAE into the weights folder."""
+        from seedvr2_weights_setup import (
+            SEEDVR2_WEIGHTS_DISK_ESTIMATE,
+            SEEDVR2_WEIGHTS_HF_URL,
+            download_recommended_weights,
+        )
+
+        dest = (self.weights_dir_var.get() or "").strip() or default_weights_dir()
+        ok = messagebox.askyesno(
+            "Install SeedVR2 weights",
+            (
+                "Download the recommended SeedVR 2 models?\n\n"
+                f"• {DEFAULT_DIT_MODEL}\n"
+                "• ema_vae_fp16.safetensors\n\n"
+                f"Source: {SEEDVR2_WEIGHTS_HF_URL}\n"
+                f"Destination:\n{dest}\n\n"
+                f"Disk / download size: about {SEEDVR2_WEIGHTS_DISK_ESTIMATE}\n"
+                "Network required. Existing files are skipped."
+            ),
+            parent=self,
+        )
+        if not ok:
             return
-        webbrowser.open(url)
+
+        from gui_elements import open_file_op_progress_dialog
+
+        progress = open_file_op_progress_dialog(
+            self,
+            title="Install SeedVR2 weights",
+            total=200,
+            action_label="Download",
+            topmost=True,
+            show_preview=False,
+        )
+
+        def _on_progress(step: int, total: int, detail: str):
+            try:
+                self.after(
+                    0,
+                    lambda s=step, t=total, d=detail: progress.set_progress(
+                        s, t, detail=d, phase="load"
+                    ),
+                )
+            except Exception:
+                pass
+
+        def _worker():
+            result = download_recommended_weights(
+                dest,
+                progress_cb=_on_progress,
+                should_stop=lambda: bool(getattr(progress, "cancelled", False)),
+            )
+
+            def _done():
+                try:
+                    progress.close()
+                except Exception:
+                    pass
+                if result.get("ok"):
+                    path = result.get("path") or dest
+                    self.weights_dir_var.set(path)
+                    self._reload_model_list(prefer=DEFAULT_DIT_MODEL)
+                    self._flush_autosave()
+                    self._refresh_status()
+                    messagebox.showinfo(
+                        "Install SeedVR2 weights",
+                        result.get("message") or f"Weights ready:\n{path}",
+                        parent=self,
+                    )
+                elif result.get("error") == "aborted":
+                    messagebox.showinfo(
+                        "Install SeedVR2 weights",
+                        "Download cancelled.",
+                        parent=self,
+                    )
+                else:
+                    messagebox.showerror(
+                        "Install SeedVR2 weights",
+                        result.get("message") or "Download failed.",
+                        parent=self,
+                    )
+
+            try:
+                self.after(0, _done)
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _setup_runner(self):
         """Explain-then-install flow for the ComfyUI-SeedVR2 CLI runner."""
@@ -1514,11 +1686,15 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         self._flush_autosave()
         self._apply_paths_to_backend(backend)
 
-        runtime = backend.runtime_status() if hasattr(backend, "runtime_status") else {"ready": True}
+        runtime_fn = getattr(backend, "runtime_status", None)
+        try:
+            runtime = runtime_fn(deep=True) if callable(runtime_fn) else {"ready": True}
+        except TypeError:
+            runtime = runtime_fn() if callable(runtime_fn) else {"ready": True}
         if not runtime.get("ready"):
             messagebox.showwarning(
                 "Upscale",
-                runtime.get("message") or "GPU pack / runtime not available.",
+                runtime.get("message") or "Runner environment not available.",
                 parent=self,
             )
             return
@@ -1526,7 +1702,7 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         if not weights.get("ready"):
             messagebox.showwarning(
                 "Upscale",
-                weights.get("message") or "Weights not found.",
+                weights.get("message") or "Weights not found. Use Install weights…",
                 parent=self,
             )
             return
@@ -1539,7 +1715,11 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
                 parent=self,
             )
             return
-        runner = backend.runner_status() if hasattr(backend, "runner_status") else {"ready": True}
+        runner_fn = getattr(backend, "runner_status", None)
+        try:
+            runner = runner_fn(deep=True) if callable(runner_fn) else {"ready": True}
+        except TypeError:
+            runner = runner_fn() if callable(runner_fn) else {"ready": True}
         if not runner.get("ready"):
             messagebox.showwarning(
                 "Upscale",

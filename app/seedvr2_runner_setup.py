@@ -45,6 +45,7 @@ __all__ = [
     "default_setup_runner_dir",
     "find_venv_base_python",
     "runner_archive_url",
+    "runner_venv_ready",
     "setup_seedvr2_runner",
 ]
 
@@ -316,6 +317,11 @@ def ensure_runner_checkout(
             f"Expected checkout from {COMFY_REPO_URL}"
         )
     return Path(info["root"])
+
+
+def runner_venv_ready(runner_root: str | Path) -> bool:
+    """True when runner checkout has a .venv that can ``import torch``."""
+    return _runner_venv_ready(Path(runner_root))
 
 
 def _runner_venv_ready(runner_root: Path) -> bool:

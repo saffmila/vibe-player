@@ -1,10 +1,9 @@
 """
 seedvr2_plugin.py — SeedVR 2 offline video/image upscale backend.
 
-Runtime (torch/CUDA) comes from the optional Autotag GPU Pack.
-Model weights are user-downloaded into a configurable folder.
-Inference runs via an external ComfyUI-SeedVR2 checkout
-(``inference_cli.py`` from numz/ComfyUI-SeedVR2_VideoUpscaler).
+Inference runs in an isolated ComfyUI-SeedVR2 runner ``.venv`` (Install runner…).
+Model weights live in a configurable folder (Install weights… downloads the
+recommended 3B FP8 + VAE from Hugging Face).
 """
 
 from __future__ import annotations
@@ -96,13 +95,16 @@ def _preferred_attention_mode(
 
 
 SEEDVR2_PROJECT_URL = "https://github.com/ByteDance-Seed/SeedVR"
-SEEDVR2_WEIGHTS_URL = "https://huggingface.co/models?other=seedvr"
+SEEDVR2_WEIGHTS_URL = "https://huggingface.co/numz/SeedVR2_comfyUI"
 SEEDVR2_RUNNER_URL = COMFY_REPO_URL
 
-GPU_PACK_MISSING_MESSAGE = "Autotag GPU Pack is not installed (required for SeedVR 2)."
+RUNTIME_MISSING_MESSAGE = (
+    "SeedVR 2 runner environment is not ready. Click “Install runner…” under "
+    "Advanced → Paths (downloads ComfyUI-SeedVR2 + a CUDA PyTorch .venv)."
+)
 WEIGHTS_MISSING_MESSAGE = (
-    "SeedVR 2 weights not found. Download them from Hugging Face "
-    f"({SEEDVR2_WEIGHTS_URL}) and place them in the models folder."
+    "SeedVR 2 weights not found. Click “Install weights…” under Advanced → Paths "
+    f"to download the recommended 3B FP8 model + VAE (~4 GB) from {SEEDVR2_WEIGHTS_URL}."
 )
 RUNNER_MISSING_MESSAGE = (
     "SeedVR 2 runner not configured. Click “Install runner…” to download the "
@@ -183,6 +185,7 @@ def _format_runner_failure(tail: str) -> tuple[str, str]:
 
 
 def _is_gpu_pack_missing_error(exc: BaseException) -> bool:
+    """Legacy helper — kept for error-text heuristics only."""
     text = str(exc).lower()
     markers = (
         "no module named 'torch",
@@ -470,22 +473,111 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
         ext = os.path.splitext(file_path)[1].lower()
         return ext in IMAGE_FORMATS or ext in SEEDVR2_VIDEO_FORMATS
 
-    def runtime_status(self) -> dict[str, Any]:
+    def _runner_python_exe(self) -> str | None:
+        """Resolve runner venv python path without importing torch."""
+        runner = (self.runner_dir or "").strip()
+        if not runner or not Path(runner).is_dir():
+            return None
+        configured = ""
         try:
-            import torch  # noqa: F401
-        except Exception as exc:
-            if _is_gpu_pack_missing_error(exc):
+            configured = str(
+                (self.settings or {}).get(KEY_PYTHON)
+                or load_seedvr2_settings().get(KEY_PYTHON)
+                or ""
+            ).strip()
+        except Exception:
+            configured = ""
+        py = resolve_runner_python(runner, configured)
+        for rel in (
+            Path(".venv") / "Scripts" / "python.exe",
+            Path(".venv") / "bin" / "python",
+            Path("venv") / "Scripts" / "python.exe",
+            Path("venv") / "bin" / "python",
+        ):
+            cand = Path(runner) / rel
+            if cand.is_file():
+                return str(cand)
+        return py if py and Path(py).is_file() else None
+
+    def runtime_status(self, *, deep: bool = True) -> dict[str, Any]:
+        """
+        Check the SeedVR2 runner environment.
+
+        ``deep=False`` only verifies the runner ``.venv`` python exists (fast,
+        safe for dialog open). ``deep=True`` also probes ``import torch`` + CUDA
+        (slow cold start — use on Start / after install).
+        """
+        runner = (self.runner_dir or "").strip()
+        if not runner or not Path(runner).is_dir():
+            return {
+                "ready": False,
+                "error": "runner_missing",
+                "message": RUNTIME_MISSING_MESSAGE,
+            }
+        py = self._runner_python_exe()
+        if not py:
+            return {
+                "ready": False,
+                "error": "runner_venv_missing",
+                "message": RUNTIME_MISSING_MESSAGE,
+            }
+        if not deep:
+            return {
+                "ready": True,
+                "error": None,
+                "message": None,
+                "python": py,
+                "deep": False,
+            }
+        try:
+            out = subprocess.check_output(
+                [
+                    py,
+                    "-c",
+                    "import torch; "
+                    "print('cuda' if torch.cuda.is_available() else 'cpu'); "
+                    "print(getattr(torch, '__version__', ''))",
+                ],
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+                stderr=subprocess.STDOUT,
+                cwd=runner,
+            ).strip().splitlines()
+            device = (out[0] if out else "").strip().lower()
+            ver = (out[1] if len(out) > 1 else "").strip()
+            if device != "cuda":
                 return {
                     "ready": False,
-                    "error": "gpu_pack_missing",
-                    "message": GPU_PACK_MISSING_MESSAGE,
+                    "error": "cuda_unavailable",
+                    "message": (
+                        "SeedVR 2 runner PyTorch has no CUDA device.\n"
+                        f"Python: {py}\n"
+                        f"torch: {ver or '?'}\n\n"
+                        "Install a current NVIDIA driver, then re-run "
+                        "“Install runner…” if needed."
+                    ),
+                    "python": py,
                 }
+            return {
+                "ready": True,
+                "error": None,
+                "message": None,
+                "python": py,
+                "torch": ver,
+                "deep": True,
+            }
+        except Exception as exc:
             return {
                 "ready": False,
                 "error": "runtime_error",
-                "message": f"SeedVR 2 runtime error: {exc}",
+                "message": (
+                    f"SeedVR 2 runner environment error:\n{exc}\n\n"
+                    "Click “Install runner…” under Advanced → Paths."
+                ),
+                "python": py,
             }
-        return {"ready": True, "error": None, "message": None}
 
     def weights_status(self) -> dict[str, Any]:
         path = self.weights_dir
@@ -498,10 +590,15 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
             "message": None if ready else WEIGHTS_MISSING_MESSAGE,
         }
 
-    def runner_status(self) -> dict[str, Any]:
+    def runner_status(self, *, deep: bool = True) -> dict[str, Any]:
+        """
+        Check ComfyUI CLI checkout.
+
+        ``deep=False`` only checks ``inference_cli.py`` + ``.venv`` python file
+        (fast). ``deep=True`` also runs ``import torch`` in that venv.
+        """
         info = detect_runner(self.runner_dir)
         # Prefer ComfyUI CLI wrapper; ByteDance research checkout is not wired for Start.
-        ready = bool(info and info.get("kind") == "comfy")
         if info and info.get("kind") == "bytedance":
             return {
                 "ready": False,
@@ -514,12 +611,52 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
                     f"({SEEDVR2_RUNNER_URL}) — folder must contain inference_cli.py."
                 ),
             }
+        if not info or info.get("kind") != "comfy":
+            return {
+                "ready": False,
+                "path": self.runner_dir,
+                "cli": None,
+                "download_url": SEEDVR2_RUNNER_URL,
+                "message": RUNNER_MISSING_MESSAGE,
+            }
+        root = Path(info.get("root") or self.runner_dir)
+        venv_py = root / ".venv" / "Scripts" / "python.exe"
+        if not venv_py.is_file():
+            venv_py = root / ".venv" / "bin" / "python"
+        if not venv_py.is_file():
+            return {
+                "ready": False,
+                "path": self.runner_dir,
+                "cli": info.get("script"),
+                "download_url": SEEDVR2_RUNNER_URL,
+                "message": (
+                    "Runner sources found, but the CUDA .venv is missing or broken. "
+                    "Click “Install runner…” to finish setup."
+                ),
+            }
+        if deep:
+            try:
+                from seedvr2_runner_setup import runner_venv_ready
+
+                if not runner_venv_ready(root):
+                    return {
+                        "ready": False,
+                        "path": self.runner_dir,
+                        "cli": info.get("script"),
+                        "download_url": SEEDVR2_RUNNER_URL,
+                        "message": (
+                            "Runner sources found, but the CUDA .venv is missing or broken. "
+                            "Click “Install runner…” to finish setup."
+                        ),
+                    }
+            except Exception:
+                pass
         return {
-            "ready": ready,
+            "ready": True,
             "path": self.runner_dir,
-            "cli": info.get("script") if info else None,
+            "cli": info.get("script"),
             "download_url": SEEDVR2_RUNNER_URL,
-            "message": None if ready else RUNNER_MISSING_MESSAGE,
+            "message": None,
         }
 
     def default_options(self) -> dict[str, Any]:

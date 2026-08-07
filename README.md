@@ -31,6 +31,20 @@ If you use [Pinokio](https://pinokio.computer/) for managing local AI applicatio
 3. Paste the repository URL: `https://github.com/saffmila/vibe-player`
 4. Click **Install**, and once finished, click **Start Vibe Player**.
 
+### SeedVR 2 Upscale (optional, NVIDIA GPU)
+
+Offline AI image/video upscale via [ComfyUI-SeedVR2](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler). The app does **not** ship the CUDA runner or model weights — install them once from the Upscale dialog:
+
+1. Right-click a video or image → **Upscale** → open **Advanced**.
+2. **Install runner…** — downloads the CLI checkout and creates a local `.venv` with PyTorch CUDA (`cu130`, ~6–8 GB). Needs Python 3.10–3.12 on PATH (Pinokio’s `env` works after Install).
+3. **Install weights…** — downloads the recommended **3B FP8** DiT + VAE (~4 GB) from Hugging Face into the weights folder.
+4. Status should show **Ready to start**, then click **Start**.
+
+Notes:
+* NVIDIA GPU + recent driver required. Flash Attention is optional; SDPA is the default fallback.
+* FFmpeg is installed with the app (`install.bat` / Pinokio) and preferred for video I/O.
+* Lower VRAM cards: keep the FP8 3B model, enable **Low VRAM (tiled VAE)**, prefer Scale 2×.
+
 ###  Security & Privacy Audit
 We value your privacy. This project includes a dedicated audit tool, `check_build.py`, to ensure that every public release is:
 * **Clean**: No local development logs, private configurations, or personal database artifacts (`.db`, `.wal`, `.shm`) are ever included.
