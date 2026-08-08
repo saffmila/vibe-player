@@ -62,8 +62,9 @@ UPSCALE_DIALOG_WIDTH = 560
 UPSCALE_DIALOG_WIDTH_ADVANCED = 620  # scrollbar + room for full card border/radius
 # Soft floors; _fit_window() prefers measured size (simple mode must stay tight).
 UPSCALE_BASIC_HEIGHT = 320
-UPSCALE_ADVANCED_EXTRA = 440
-UPSCALE_ADVANCED_EXTRA_VIDEO = 480
+# Advanced body viewport (cards scroll inside); keep window short vs screen.
+UPSCALE_ADVANCED_BODY = 320
+UPSCALE_ADVANCED_MAX = 620
 
 # Compact control sizing (~70% of default CTk chrome).
 _UI_LABEL = 12
@@ -884,49 +885,54 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         self.after(50, self._center_on_parent)
         self.after(80, self._fit_window)
 
-    def _advanced_extra_height(self) -> int:
-        return UPSCALE_ADVANCED_EXTRA_VIDEO if self._has_video else UPSCALE_ADVANCED_EXTRA
-
     def _fit_window(self):
-        """Resize so content + button bar are fully visible (no clipping)."""
+        """Resize dialog to the screen; advanced cards scroll inside the body."""
         try:
             self.update_idletasks()
         except Exception:
             return
         open_ = bool(getattr(self, "_advanced_open", False))
-        measured = 28
+        chrome = 28
         for w, pad in (
             (getattr(self, "_title_lbl", None), 8),
             (getattr(self, "_subtitle_lbl", None), 4),
-            (getattr(self, "_basic_wrap", None), 10),
             (getattr(self, "_button_bar", None), 18),
         ):
             if w is None:
                 continue
             try:
-                measured += int(w.winfo_reqheight()) + int(pad)
+                chrome += int(w.winfo_reqheight()) + int(pad)
             except Exception:
                 pass
-        if open_:
-            measured += int(self._advanced_extra_height())
-            width = UPSCALE_DIALOG_WIDTH_ADVANCED
-            min_h = 520
-            h = max(min_h, measured, UPSCALE_BASIC_HEIGHT + self._advanced_extra_height())
-        else:
-            width = UPSCALE_DIALOG_WIDTH
-            min_h = 260
-            # Never keep the advanced-era tall window in simple mode.
-            h = max(min_h, min(measured, 420))
         try:
-            max_h = max(min_h, int(self.winfo_screenheight()) - 100)
+            # Margin for taskbar / title bar — advanced content scrolls if shorter.
+            max_h = max(320, int(self.winfo_screenheight()) - 120)
         except Exception:
             max_h = 900
-        h = max(min_h, min(max_h, h))
+        if open_:
+            width = UPSCALE_DIALOG_WIDTH_ADVANCED
+            preferred = chrome + UPSCALE_ADVANCED_BODY
+            preferred = min(preferred, UPSCALE_ADVANCED_MAX)
+            min_h = min(360, max_h)
+            h = max(min_h, min(max_h, preferred))
+        else:
+            width = UPSCALE_DIALOG_WIDTH
+            measured = chrome
+            try:
+                measured += int(self._basic_wrap.winfo_reqheight()) + 10
+            except Exception:
+                measured += UPSCALE_BASIC_HEIGHT - 80
+            min_h = min(260, max_h)
+            # Never keep the advanced-era tall window in simple mode.
+            h = max(min_h, min(measured, 420, max_h))
         try:
             self.minsize(width, min_h)
             self.geometry(f"{width}x{h}")
             if not open_:
                 self.after(30, lambda w=width, hh=h, m=min_h: self._force_simple_height(w, hh, m))
+            else:
+                self.after_idle(self._refresh_sections_scrollregion)
+                self.after(40, self._refresh_sections_scrollregion)
         except Exception:
             pass
 
@@ -943,6 +949,41 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         except Exception:
             pass
 
+    def _pack_sections_scroll(self, **kwargs):
+        """Pack the scroll outer frame.
+
+        CTkScrollableFrame.pack() is redirected to ``_parent_frame``, but
+        ``pack_configure()`` is not — calling it on ``scroll`` re-packs the
+        inner canvas slave and detaches ``create_window`` (scrollregion dies).
+        """
+        scroll = getattr(self, "_sections_scroll", None)
+        if scroll is None:
+            return
+        try:
+            scroll._parent_frame.pack_configure(**kwargs)
+        except Exception:
+            try:
+                scroll.pack(**kwargs)
+            except Exception:
+                pass
+
+    def _refresh_sections_scrollregion(self):
+        """Re-attach canvas window if needed and sync scrollregion to content."""
+        scroll = getattr(self, "_sections_scroll", None)
+        if scroll is None:
+            return
+        try:
+            self.update_idletasks()
+            canvas = scroll._parent_canvas
+            wid = scroll._create_window_id
+            if not canvas.itemcget(wid, "window"):
+                canvas.itemconfigure(wid, window=scroll)
+            bbox = canvas.bbox("all")
+            if bbox is not None:
+                canvas.configure(scrollregion=bbox)
+        except Exception:
+            pass
+
     def _layout_body_for_mode(self, open_: bool):
         """Advanced expands the scroll; simple mode must not leave a tall empty body."""
         body = getattr(self, "_body", None)
@@ -951,12 +992,9 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             return
         try:
             if open_:
+                # Fill remaining window height; cards scroll — do not force a tall viewport.
                 body.pack_configure(fill="both", expand=True)
-                scroll.pack_configure(fill="both", expand=True)
-                try:
-                    scroll.configure(height=int(self._advanced_extra_height()))
-                except Exception:
-                    pass
+                self._pack_sections_scroll(fill="both", expand=True)
             else:
                 try:
                     self.update_idletasks()
@@ -967,8 +1005,9 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
                         scroll.configure(height=180)
                     except Exception:
                         pass
-                scroll.pack_configure(fill="x", expand=False)
+                self._pack_sections_scroll(fill="x", expand=False)
                 body.pack_configure(fill="x", expand=False)
+            self._refresh_sections_scrollregion()
         except Exception:
             pass
 
@@ -1200,6 +1239,7 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             self._sync_sections_scrollbar(True)
             self._layout_body_for_mode(True)
             self.advanced_btn.configure(text="Advanced ▲")
+            self._refresh_sections_scrollregion()
             try:
                 self._sections_scroll._parent_canvas.yview_moveto(0)
             except Exception:
