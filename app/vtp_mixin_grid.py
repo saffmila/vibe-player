@@ -4020,9 +4020,15 @@ class VtpGridMixin:
 
         if (mimetype and mimetype.startswith("video")) or lower_path.endswith(VIDEO_FORMATS):
             menu.add_command(label="▶ Play Video", command=lambda:  self.play_video_selection(file_path) )   #self.open_video_player(file_path, video_name)
+            convert_paths = self.selected_video_paths_for_convert(file_path)
+            _cv_label = (
+                "Convert Video…"
+                if len(convert_paths) <= 1
+                else f"Convert Videos… ({len(convert_paths)})"
+            )
             menu.add_command(
-                label="Convert Video…",
-                command=lambda fp=file_path: self.open_convert_video_dialog(fp),
+                label=_cv_label,
+                command=lambda paths=convert_paths: self.open_convert_video_dialog(paths),
             )
         elif (mimetype and mimetype.startswith("image")) or lower_path.endswith(IMAGE_FORMATS):
             menu.add_command(label="🖼 Show Image", command=lambda: self.open_image_viewer(file_path, os.path.basename(file_path)))
@@ -4370,9 +4376,37 @@ class VtpGridMixin:
     def open_merge_videos_dialog(self, video_paths):
         open_merge_videos_dialog(self, video_paths, controller=self)
 
-    def open_convert_video_dialog(self, video_path):
-        """Whole-file convert / remux from thumbnail RMB (no cuts required)."""
-        open_convert_video_dialog(self, video_path, controller=self)
+    def selected_video_paths_for_convert(self, clicked_path=None):
+        """Video paths for Convert: multi-select when RMB target is in it, else clicked file."""
+        primary = os.path.normpath(clicked_path) if clicked_path else None
+        raw = list(getattr(self, "selected_thumbnails", []) or [])
+        paths = []
+        seen = set()
+        for item in raw:
+            p = item[0] if isinstance(item, tuple) and item else item
+            if not p:
+                continue
+            p = os.path.normpath(str(p))
+            key = os.path.normcase(p)
+            if key in seen:
+                continue
+            if not os.path.isfile(p) or not p.lower().endswith(VIDEO_FORMATS):
+                continue
+            seen.add(key)
+            paths.append(p)
+        if primary and len(paths) > 1 and os.path.normcase(primary) in {
+            os.path.normcase(p) for p in paths
+        }:
+            return paths
+        if primary and os.path.isfile(primary) and primary.lower().endswith(VIDEO_FORMATS):
+            return [primary]
+        return paths
+
+    def open_convert_video_dialog(self, video_paths):
+        """Whole-file convert / remux from thumbnail RMB (single or batch)."""
+        if isinstance(video_paths, (str, os.PathLike)):
+            video_paths = [video_paths]
+        open_convert_video_dialog(self, video_paths, controller=self)
 
     def reveal_merged_file(self, file_path):
         """Refresh current folder (if output is there) and select the merged file."""

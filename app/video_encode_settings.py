@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import customtkinter as ctk
 
-PRESET_CUSTOM = "Custom…"
+PRESET_CUSTOM = "Manual…"
 VIDEO_QUALITY_LEVELS = ("Low", "Medium", "High")
 AUDIO_BITRATE_LEVELS = ("96k", "128k", "192k", "256k")
 DEFAULT_VIDEO_QUALITY = "High"
@@ -309,7 +309,7 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
         )
 
     def apply_preset(self, preset_name: str | None = None):
-        """Named presets lock size/format/quality; only Custom… edits them."""
+        """Named presets lock size/format/quality; only Manual… edits them."""
         name = preset_name or self.preset_var.get()
         is_custom = name == PRESET_CUSTOM or name not in self.presets
         if is_custom:
@@ -364,7 +364,7 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
         if keep_size:
             if not self._source_width or not self._source_height:
                 raise ValueError(
-                    "Could not read source resolution. Choose Custom… and enter size manually."
+                    "Could not read source resolution. Choose Manual… and enter size manually."
                 )
             return {
                 "mode": "custom",
