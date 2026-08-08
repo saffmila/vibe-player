@@ -387,13 +387,53 @@ def _custom_video_filter(settings):
     return f"scale={width}:{height}:flags=lanczos,fps={fps:g},format=yuv420p"
 
 
+_X264_CRF = {"Low": "28", "Medium": "23", "High": "18"}
+_VP9_CRF = {"Low": "40", "Medium": "35", "High": "30"}
+_AVI_QV = {"Low": "10", "Medium": "6", "High": "3"}
+
+
+def _normalize_video_quality(settings) -> str:
+    level = str((settings or {}).get("video_quality") or "High").strip().title()
+    if level not in _X264_CRF:
+        return "High"
+    return level
+
+
+def _normalize_audio_bitrate(settings) -> str:
+    raw = str((settings or {}).get("audio_bitrate") or "192k").strip().lower()
+    if raw.isdigit():
+        raw = f"{raw}k"
+    if not raw.endswith("k"):
+        raw = f"{raw}k"
+    return raw
+
+
 def _custom_codec_args(save_path, settings):
     target_ext = (os.path.splitext(save_path)[1] or settings["ext"]).lower()
+    quality = _normalize_video_quality(settings)
     if target_ext == ".webm":
-        return ["-c:v", "libvpx-vp9", "-crf", "30", "-b:v", "0", "-pix_fmt", "yuv420p"]
+        return [
+            "-c:v",
+            "libvpx-vp9",
+            "-crf",
+            _VP9_CRF[quality],
+            "-b:v",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+        ]
     if target_ext == ".avi":
-        return ["-c:v", "mpeg4", "-q:v", "3", "-pix_fmt", "yuv420p"]
-    args = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"]
+        return ["-c:v", "mpeg4", "-q:v", _AVI_QV[quality], "-pix_fmt", "yuv420p"]
+    args = [
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        _X264_CRF[quality],
+        "-pix_fmt",
+        "yuv420p",
+    ]
     if target_ext in (".mp4", ".mov", ".m4v"):
         args += ["-movflags", "+faststart"]
     return args
@@ -401,11 +441,12 @@ def _custom_codec_args(save_path, settings):
 
 def _custom_audio_args(save_path, settings):
     target_ext = (os.path.splitext(save_path)[1] or settings["ext"]).lower()
+    bitrate = _normalize_audio_bitrate(settings)
     if target_ext == ".webm":
-        return ["-c:a", "libopus", "-b:a", "160k"]
+        return ["-c:a", "libopus", "-b:a", bitrate]
     if target_ext == ".avi":
-        return ["-c:a", "libmp3lame", "-b:a", "192k"]
-    return ["-c:a", "aac", "-b:a", "192k"]
+        return ["-c:a", "libmp3lame", "-b:a", bitrate]
+    return ["-c:a", "aac", "-b:a", bitrate]
 
 
 def _total_duration(paths):

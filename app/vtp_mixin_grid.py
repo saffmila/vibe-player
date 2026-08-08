@@ -46,6 +46,7 @@ from batch_processing_dialog import (
     process_one_image,
 )
 from video_operations import VideoPlayer
+from video_convert import open_convert_video_dialog
 from video_merge import open_merge_videos_dialog
 from utils import get_video_size
 from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS, preview_skip_subdir
@@ -4019,6 +4020,10 @@ class VtpGridMixin:
 
         if (mimetype and mimetype.startswith("video")) or lower_path.endswith(VIDEO_FORMATS):
             menu.add_command(label="▶ Play Video", command=lambda:  self.play_video_selection(file_path) )   #self.open_video_player(file_path, video_name)
+            menu.add_command(
+                label="Convert Video…",
+                command=lambda fp=file_path: self.open_convert_video_dialog(fp),
+            )
         elif (mimetype and mimetype.startswith("image")) or lower_path.endswith(IMAGE_FORMATS):
             menu.add_command(label="🖼 Show Image", command=lambda: self.open_image_viewer(file_path, os.path.basename(file_path)))
             menu.add_separator()
@@ -4364,6 +4369,10 @@ class VtpGridMixin:
 
     def open_merge_videos_dialog(self, video_paths):
         open_merge_videos_dialog(self, video_paths, controller=self)
+
+    def open_convert_video_dialog(self, video_path):
+        """Whole-file convert / remux from thumbnail RMB (no cuts required)."""
+        open_convert_video_dialog(self, video_path, controller=self)
 
     def reveal_merged_file(self, file_path):
         """Refresh current folder (if output is there) and select the merged file."""
