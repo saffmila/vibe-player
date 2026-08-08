@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -27,6 +28,29 @@ from utils import get_video_size
 from vtp_constants import VIDEO_FORMATS
 
 _BG = "#1a1a1a"
+
+
+def _apply_dark_titlebar(window) -> None:
+    """Windows immersive dark caption (matches main app / playlist chrome)."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        window.update_idletasks()
+        wid = int(window.winfo_id())
+        hwnd = ctypes.windll.user32.GetAncestor(wid, 2) or wid  # GA_ROOT
+        use_dark = ctypes.c_int(1)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd,
+            20,  # DWMWA_USE_IMMERSIVE_DARK_MODE
+            ctypes.byref(use_dark),
+            ctypes.sizeof(use_dark),
+        )
+    except Exception:
+        logging.debug("[VideoCompare] dark titlebar failed", exc_info=True)
+
+
 _HUD_BG = "#252525"
 _BTN_FG = "gray30"
 _BTN_HOVER = "gray25"
@@ -438,9 +462,6 @@ class VideoCompareDialog(ctk.CTkToplevel):
         row2 = ctk.CTkFrame(self._hud, fg_color="transparent")
         row2.pack(fill="x", padx=12, pady=(2, 8))
 
-        self._play_btn = self._btn(row1, "▶", self._toggle_play_synced, 40)
-        self._play_btn.pack(side="left", padx=(0, 8))
-
         self._sync_var = tk.BooleanVar(value=True)
         self._sync_cb = ctk.CTkCheckBox(
             row1,
@@ -476,8 +497,9 @@ class VideoCompareDialog(ctk.CTkToplevel):
             row1, text="Silent", font=ctk.CTkFont(size=12), text_color="#aaaaaa"
         ).pack(side="left", padx=(0, 4))
 
-        self._swap_btn = self._btn(row2, "⇄", self._swap, 36)
-        self._swap_btn.pack(side="left", padx=(0, 8))
+        # Play sits bottom-left (where swap used to be).
+        self._play_btn = self._btn(row2, "▶", self._toggle_play_synced, 40)
+        self._play_btn.pack(side="left", padx=(0, 8))
 
         self._layout_var = tk.StringVar(value=_LAYOUT_FIT)
         self._layout_btn = ctk.CTkSegmentedButton(
@@ -509,9 +531,6 @@ class VideoCompareDialog(ctk.CTkToplevel):
             dropdown_fg_color=_HUD_BG,
         )
         self._zoom_menu.pack(side="left", padx=(0, 8))
-
-        self._fs_btn = self._btn(row2, "Window", self.toggle_fullscreen, 72)
-        self._fs_btn.pack(side="left", padx=(0, 8))
 
         ctk.CTkButton(
             row2,
@@ -551,13 +570,44 @@ class VideoCompareDialog(ctk.CTkToplevel):
 
         self._sbs = ctk.CTkFrame(self._body, fg_color="transparent")
         self._sbs.pack(fill="both", expand=True)
+        # Equal panes + a visible blue split gutter between them.
+        self._sbs.grid_rowconfigure(0, weight=1)
+        self._sbs.grid_columnconfigure(0, weight=1, uniform="compare")
+        self._sbs.grid_columnconfigure(1, weight=0)
+        self._sbs.grid_columnconfigure(2, weight=1, uniform="compare")
 
         self._left_pane, self._left_meta, self._left_canvas = self._make_pane(self._sbs, "left")
         self._right_pane, self._right_meta, self._right_canvas = self._make_pane(
             self._sbs, "right"
         )
-        self._left_pane.pack(side="left", fill="both", expand=True, padx=(0, 1))
-        self._right_pane.pack(side="left", fill="both", expand=True, padx=(1, 0))
+        self._split_bar = tk.Frame(self._sbs, bg="#5eb0ff", width=2, bd=0, highlightthickness=0)
+        self._left_pane.grid(row=0, column=0, sticky="nsew")
+        self._split_bar.grid(row=0, column=1, sticky="ns")
+        self._right_pane.grid(row=0, column=2, sticky="nsew")
+        try:
+            self._split_bar.grid_propagate(False)
+        except Exception:
+            pass
+
+        # Compact Windows-style restore/maximize in the top-right of the video area.
+        self._fs_btn = ctk.CTkButton(
+            self._body,
+            text="❐",
+            width=28,
+            height=24,
+            corner_radius=4,
+            fg_color="#2a2a2a",
+            hover_color="#3a3a3a",
+            text_color="#dddddd",
+            font=ctk.CTkFont(size=14),
+            command=self.toggle_fullscreen,
+        )
+        self._fs_btn.place(relx=1.0, x=-10, y=8, anchor="ne")
+        try:
+            self._fs_btn.lift()
+        except Exception:
+            pass
+        self._update_fs_button()
 
     def _make_pane(self, parent, side: str):
         """Helper to create a single video pane containing a metadata label and a Tk Canvas."""
@@ -571,6 +621,14 @@ class VideoCompareDialog(ctk.CTkToplevel):
             height=22,
         )
         meta.pack(fill="x", padx=8, pady=(4, 0))
+        # Don't let long meta strings inflate the pane's requested width.
+        try:
+            meta.bind(
+                "<Configure>",
+                lambda e, m=meta: m.configure(wraplength=max(40, int(e.width) - 4)),
+            )
+        except Exception:
+            pass
         canvas = tk.Canvas(pane, bg="black", highlightthickness=0, bd=0, cursor="hand2")
         canvas.pack(fill="both", expand=True)
         canvas.bind("<Button-1>", lambda e, s=side: self._on_pane_click(s))
@@ -660,7 +718,7 @@ class VideoCompareDialog(ctk.CTkToplevel):
                 self.attributes("-alpha", 1.0)
             except Exception:
                 pass
-            self._fs_btn.configure(text="Window")
+            self._update_fs_button()
         else:
             self.is_fullscreen = False
             try:
@@ -670,8 +728,24 @@ class VideoCompareDialog(ctk.CTkToplevel):
             geom = self._windowed_geometry
             if geom:
                 self.geometry(geom)
-            self._fs_btn.configure(text="Fullscreen")
+            self._update_fs_button()
+            # Native caption appears only in windowed mode — paint it dark.
+            self.after(20, lambda: _apply_dark_titlebar(self))
+            self.after(200, lambda: _apply_dark_titlebar(self))
         self.after(80, self._paint_all)
+
+    def _update_fs_button(self) -> None:
+        """Restore-down when fullscreen, maximize when windowed (Windows-style glyphs)."""
+        btn = getattr(self, "_fs_btn", None)
+        if btn is None:
+            return
+        try:
+            if self.is_fullscreen:
+                btn.configure(text="❐")  # restore down
+            else:
+                btn.configure(text="☐")  # maximize / go fullscreen
+        except Exception:
+            pass
 
     def _on_escape(self, event=None):
         """Handles the Escape key press by closing the dialog."""
@@ -791,23 +865,6 @@ class VideoCompareDialog(ctk.CTkToplevel):
         if self._target_clip:
             self._target_clip.seek_ratio(0.0)
         self._update_meta()
-        self._paint_all()
-        self._update_time_ui()
-        if was:
-            self._start_playing()
-
-    def _swap(self) -> None:
-        """Swaps the Reference and Target video streams with each other."""
-        ratio = self._ref_clip.ratio if self._ref_clip else 0.0
-        was = self._want_playing
-        self._want_playing = False
-        self._ref_index, self._target_index = self._target_index, self._ref_index
-        self._update_nav_controls()
-        self._load_both(pause=not was)
-        if self._ref_clip:
-            self._ref_clip.seek_ratio(ratio)
-        if self._target_clip:
-            self._target_clip.seek_ratio(ratio)
         self._paint_all()
         self._update_time_ui()
         if was:
@@ -1112,7 +1169,8 @@ class VideoCompareDialog(ctk.CTkToplevel):
     def _refresh_play_button(self) -> None:
         """Updates the text inside the Play/Pause button on the HUD."""
         try:
-            self._play_btn.configure(text="❚❚" if self._want_playing else "▶")
+            # Single-char ⏸ keeps bars tight (❚❚ renders with a huge gap in CTk fonts).
+            self._play_btn.configure(text="⏸" if self._want_playing else "▶")
         except Exception:
             pass
 
