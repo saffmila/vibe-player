@@ -104,10 +104,22 @@ def make_section(parent, title: str):
     return card, body
 
 
-def make_info_box(parent, wraplength: int = 340):
+def make_info_box(parent, wraplength: int = 300, icon: str = ""):
+    """Dark info panel with optional leading emoji icon and text indented right."""
     box = ctk.CTkFrame(parent, fg_color=_UI_INFO_BG, corner_radius=8, border_width=0)
+    row = ctk.CTkFrame(box, fg_color="transparent")
+    row.pack(fill="x", padx=10, pady=8)
+    if icon:
+        ctk.CTkLabel(
+            row,
+            text=icon,
+            font=("", 16),
+            width=28,
+            anchor="center",
+            text_color=_UI_INFO_TEXT,
+        ).pack(side="left", padx=(2, 10))
     label = ctk.CTkLabel(
-        box,
+        row,
         text="",
         text_color=_UI_INFO_TEXT,
         font=("", 10),
@@ -115,7 +127,7 @@ def make_info_box(parent, wraplength: int = 340):
         anchor="w",
         wraplength=wraplength,
     )
-    label.pack(fill="x", padx=10, pady=8)
+    label.pack(side="left", fill="x", expand=True)
     box._info_label = label  # type: ignore[attr-defined]
     return box
 
@@ -176,7 +188,7 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
             height=28,
         )
         self._preset_menu.pack(fill="x", pady=(0, 6))
-        self._preset_info = make_info_box(preset_body)
+        self._preset_info = make_info_box(preset_body, icon="🎬")
         self._preset_info.pack(fill="x", pady=(0, 2))
 
         video_card, video_body = make_section(self._scroll, "Video")
@@ -233,7 +245,7 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
             audio_body, text="Include audio", variable=self.sound_var
         )
         self._audio_check.pack(anchor="w", pady=(2, 6))
-        self._audio_info = make_info_box(audio_body)
+        self._audio_info = make_info_box(audio_body, icon="🎧")
         self._audio_info.pack(fill="x", pady=(0, 2))
 
         self.apply_preset(self.preset_var.get())
