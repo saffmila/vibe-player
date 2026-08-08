@@ -263,7 +263,7 @@ class VideoPlayer:
     def __init__(self, parent, controller, video_path, video_name, initial_volume, 
                  vlc_video_output, vlc_audio_output, vlc_hw_decoding, vlc_audio_device,
                  auto_play=False, subtitles_enabled=False, playlist_manager=None, embed=False,
-                 show_video_button_bar=True, use_gpu_upscale=False):
+                 show_video_button_bar=True, use_gpu_upscale=False, mute_embed=None):
         init_start = time.perf_counter()
         logging.info(
             "[VideoPlayer Init] start name=%s path=%s embed=%s auto_play=%s",
@@ -290,6 +290,8 @@ class VideoPlayer:
         self.is_repeating = False
         self.playing = False
         self.embed = embed
+        # Preview embeds are silent; compare Reference passes mute_embed=False.
+        self.mute_embed = bool(embed) if mute_embed is None else bool(mute_embed)
         self.current_speed = 1.0
         
         self.is_fullscreen = False
@@ -382,10 +384,14 @@ class VideoPlayer:
 
         self.global_listener = None
         pynput_start = time.perf_counter()
-        self._start_global_mouse_listener_async()
-        try:
-            self._pynput_pump_job = self.video_window.after(25, self._pynput_queue_pump)
-        except Exception:
+        # Embed (preview / compare) has no player-window fullscreen chrome — skip global mouse.
+        if not embed:
+            self._start_global_mouse_listener_async()
+            try:
+                self._pynput_pump_job = self.video_window.after(25, self._pynput_queue_pump)
+            except Exception:
+                self._pynput_pump_job = None
+        else:
             self._pynput_pump_job = None
         _log_player_timing("pynput bridge setup", pynput_start)
 
@@ -547,8 +553,10 @@ class VideoPlayer:
                 
         
         if self.player:
-            if self.embed:
+            if self.embed and getattr(self, "mute_embed", True):
                 self._ensure_preview_muted()
+            elif self.embed:
+                self._ensure_embed_audio()
             else:
                 self.player.audio_set_volume(self.current_volume)
         
@@ -1743,14 +1751,16 @@ class VideoPlayer:
             player_start = time.perf_counter()
             self.player = self.instance.media_player_new()
             _log_vlc_timing("media_player_new", player_start)
-        if self.embed:
+        if self.embed and getattr(self, "mute_embed", True):
             self._ensure_preview_muted()
+        elif self.embed:
+            self._ensure_embed_audio()
         _log_vlc_timing("_ensure_vlc_player total", ensure_start)
         return True
 
     def _apply_preview_media_options(self, media) -> None:
-        """Disable audio track for embedded preview media."""
-        if not self.embed or media is None:
+        """Disable audio track for muted embedded preview media."""
+        if not self.embed or not getattr(self, "mute_embed", True) or media is None:
             return
         for opt in (":no-audio", "no-audio"):
             try:
@@ -1759,8 +1769,10 @@ class VideoPlayer:
                 pass
 
     def _ensure_preview_muted(self) -> None:
-        """Keep embedded preview silent (call after play(); VLC may reset volume)."""
-        if not self.embed or not getattr(self, "player", None):
+        """Keep muted embeds silent (call after play(); VLC may reset volume)."""
+        if not self.embed or not getattr(self, "mute_embed", True):
+            return
+        if not getattr(self, "player", None):
             return
         self.current_volume = 0
         try:
@@ -1772,9 +1784,25 @@ class VideoPlayer:
         except Exception:
             pass
 
+    def _ensure_embed_audio(self) -> None:
+        """Restore volume for embeds that intentionally keep audio (e.g. compare Reference)."""
+        if not self.embed or getattr(self, "mute_embed", True):
+            return
+        if not getattr(self, "player", None):
+            return
+        vol = int(getattr(self, "current_volume", 100) or 0)
+        try:
+            self.player.audio_set_mute(False)
+        except Exception:
+            pass
+        try:
+            self.player.audio_set_volume(max(0, min(100, vol)))
+        except Exception:
+            pass
+
     def _schedule_preview_mute_retries(self) -> None:
         """Re-apply mute shortly after play(); some VLC builds briefly output audio."""
-        if not self.embed:
+        if not self.embed or not getattr(self, "mute_embed", True):
             return
         self._ensure_preview_muted()
         win = getattr(self, "video_window", None)
@@ -1783,6 +1811,20 @@ class VideoPlayer:
         for delay in (50, 150, 400):
             try:
                 win.after(delay, self._ensure_preview_muted)
+            except Exception:
+                pass
+
+    def _schedule_embed_audio_retries(self) -> None:
+        """Re-apply volume after play for unmuted embeds."""
+        if not self.embed or getattr(self, "mute_embed", True):
+            return
+        self._ensure_embed_audio()
+        win = getattr(self, "video_window", None)
+        if win is None:
+            return
+        for delay in (50, 150, 400):
+            try:
+                win.after(delay, self._ensure_embed_audio)
             except Exception:
                 pass
 
@@ -2553,6 +2595,7 @@ class VideoPlayer:
         self._ensure_preview_muted()
         self.player.play()
         self._schedule_preview_mute_retries()
+        self._schedule_embed_audio_retries()
         self.video_window.after(120, lambda: self.player.pause() if self.player else None)
         self._schedule_decode_placeholder_checks()
 
@@ -4344,6 +4387,7 @@ class VideoPlayer:
                 self._ensure_preview_muted()
                 self.player.play()
                 self._schedule_preview_mute_retries()
+                self._schedule_embed_audio_retries()
                 self._duration_retry_count = 0
                 if self.current_speed != 1.0:
                     self.video_window.after(
@@ -4392,6 +4436,7 @@ class VideoPlayer:
         self.player.play()
         _log_vlc_timing("player.play call", player_play_start)
         self._schedule_preview_mute_retries()
+        self._schedule_embed_audio_retries()
         self._duration_retry_count = 0
 
         if self.current_speed != 1.0:
@@ -4593,6 +4638,8 @@ class VideoPlayer:
             self.player.play()
             self.playing = True
             self.show_hud()
+            self._schedule_preview_mute_retries()
+            self._schedule_embed_audio_retries()
 
             if not self.embed and self.show_video_button_bar:
                 self._slider_percent = 0.0
@@ -5257,17 +5304,25 @@ class VideoPlayer:
         canvas.tag_raise("volume_thumb")
 
     def update_volume(self, volume):
-        if self.embed:
+        if self.embed and getattr(self, "mute_embed", True):
             self._ensure_preview_muted()
             return
         self.current_volume = int(float(volume))
-        self.render_volume_slider(self.current_volume)
+        if hasattr(self, "render_volume_slider"):
+            try:
+                self.render_volume_slider(self.current_volume)
+            except Exception:
+                pass
         if self.player:
+            try:
+                self.player.audio_set_mute(False)
+            except Exception:
+                pass
             self.player.audio_set_volume(self.current_volume)
             logging.info(f"Volume set to: {self.current_volume}")  # Debug
 
             # Update the parent volume, but only if controller exists
-            if self.controller is not None:
+            if self.controller is not None and not self.embed:
                 self.controller.update_current_volume(self.current_volume)
             
 

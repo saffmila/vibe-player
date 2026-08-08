@@ -228,7 +228,7 @@ HOTKEY_LABELS: dict[str, str] = {
     "image_flip_v": "Flip vertical",
     "image_crop": "Crop image",
     "image_resize": "Resize image",
-    "image_compare": "Compare selected images",
+    "image_compare": "Compare selected images or videos",
     "image_toggle_bg": "Cycle background",
     "image_toggle_info": "Toggle info HUD",
     "image_actual_size": "Actual size",

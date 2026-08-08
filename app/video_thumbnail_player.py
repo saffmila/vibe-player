@@ -2544,7 +2544,14 @@ class VideoThumbnailPlayer(
             self._clipboard_status_flash("Select a file or tree item for keywords.", 3500)
 
     def _hotkey_image_compare(self, event=None):
-        """Open compare dialog when ≥2 images are selected in the grid."""
+        """Open compare dialog for ≥2 selected videos, else ≥2 selected images."""
+        sel_videos = getattr(self, "selected_video_paths_for_compare", None)
+        open_videos = getattr(self, "open_video_compare", None)
+        if callable(sel_videos) and callable(open_videos):
+            vpaths = sel_videos(None)
+            if len(vpaths) >= 2:
+                open_videos(vpaths)
+                return "break"
         open_fn = getattr(self, "open_image_compare", None)
         if callable(open_fn):
             open_fn()

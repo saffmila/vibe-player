@@ -32,6 +32,7 @@ from gui_elements import (
 from image_operations import create_image_viewer
 from image_loader import load_pil_image, get_pil_image_size
 from image_compare_dialog import open_image_compare_dialog
+from video_compare_dialog import open_video_compare_dialog
 from image_resize_dialog import (
     IMAGE_TRANSFORM_LABELS,
     image_reencode_is_lossy,
@@ -4116,6 +4117,17 @@ class VtpGridMixin:
 
         append_external_apps_cascade(menu, self, file_path)
 
+        compare_video_paths = self.selected_video_paths_for_compare(file_path)
+        if len(compare_video_paths) >= 2:
+            _vcmp_acc = menu_accel(_hk, "image_compare")
+            _vcmp_opts = {
+                "label": "Compare Videos…",
+                "command": lambda paths=compare_video_paths: self.open_video_compare(paths),
+            }
+            if _vcmp_acc:
+                _vcmp_opts["accelerator"] = _vcmp_acc
+            menu.add_command(**_vcmp_opts)
+
         merge_paths = self.selected_video_paths_for_merge(file_path)
         if len(merge_paths) >= 2:
             menu.add_command(
@@ -4289,6 +4301,42 @@ class VtpGridMixin:
         if paths is None:
             paths = self.selected_image_paths_for_compare(None)
         open_image_compare_dialog(self, paths)
+
+    def selected_video_paths_for_compare(self, primary_path=None):
+        """Video paths from multi-select (selection order) for the compare dialog.
+
+        When ``primary_path`` is set (context menu), require that path to be part of
+        the selection when more than one video is selected — same pattern as images.
+        """
+        primary = os.path.normpath(primary_path) if primary_path else None
+        raw = list(getattr(self, "selected_thumbnails", []) or [])
+        paths = []
+        seen = set()
+        for item in raw:
+            p = item[0] if isinstance(item, tuple) and item else item
+            if not p:
+                continue
+            p = os.path.normpath(str(p))
+            key = os.path.normcase(p)
+            if key in seen:
+                continue
+            if not os.path.isfile(p) or not p.lower().endswith(VIDEO_FORMATS):
+                continue
+            seen.add(key)
+            paths.append(p)
+        if primary is None:
+            return paths
+        if len(paths) > 1 and os.path.normcase(primary) in {
+            os.path.normcase(p) for p in paths
+        }:
+            return paths
+        return []
+
+    def open_video_compare(self, paths=None):
+        """Open the Side-by-Side video compare dialog for ``paths`` or current selection."""
+        if paths is None:
+            paths = self.selected_video_paths_for_compare(None)
+        open_video_compare_dialog(self, paths)
 
     def selected_video_paths_for_merge(self, primary_path):
         """Video paths from multi-select (selection order) when RMB target is part of it."""
