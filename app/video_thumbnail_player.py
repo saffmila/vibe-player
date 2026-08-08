@@ -1415,7 +1415,8 @@ class VideoThumbnailPlayer(
         input_var = ctk.StringVar(value=default_input) if input_field else None
         if input_field:
             input_entry = ctk.CTkEntry(content, textvariable=input_var, height=32)
-            input_entry.pack(fill="x", expand=True, pady=(8, 0))
+            # fill="x" only — expand=True vertically inflates the dialog on HiDPI/4K.
+            input_entry.pack(fill="x", pady=(8, 0))
 
         if checkbox_text:
             if checkbox_variable is None:
@@ -1480,14 +1481,18 @@ class VideoThumbnailPlayer(
                 )
                 btn_cancel.pack(side="right")
 
-        # Size to content so multi-line delete warnings don't hide buttons.
+        # Input prompts stay compact (Favorites/Rename). Message-only dialogs
+        # still size-to-content so SeedVR/batch/DnD multi-line text fits.
         try:
-            dialog_window.update_idletasks()
-            req_h = int(dialog_window.winfo_reqheight())
-            req_w = max(_dw, int(dialog_window.winfo_reqwidth()))
-            max_h = max(280, min(560, int(dialog_window.winfo_screenheight()) - 100))
-            h = max(_dh, min(req_h + 8, max_h))
-            self._center_toplevel_window(dialog_window, req_w, h)
+            if input_field:
+                self._center_toplevel_window(dialog_window, _dw, _dh)
+            else:
+                dialog_window.update_idletasks()
+                req_h = int(dialog_window.winfo_reqheight())
+                req_w = max(_dw, int(dialog_window.winfo_reqwidth()))
+                max_h = max(280, min(560, int(dialog_window.winfo_screenheight()) - 100))
+                h = max(_dh, min(req_h + 8, max_h))
+                self._center_toplevel_window(dialog_window, req_w, h)
         except Exception:
             self._center_toplevel_window(dialog_window, _dw, _dh)
 
