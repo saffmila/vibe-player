@@ -134,7 +134,10 @@ from timeline_bar_widget import TimelineBarWidget
 from caption_editor_widget import CaptionEditorWidget
 from multi_timeline_viewer import MultiTimelineViewer
 from utils import create_menu
-import win32api
+if sys.platform == "win32":
+    import win32api
+else:
+    win32api = None
 import string
 
 import tkinterdnd2 as dnd
@@ -166,8 +169,12 @@ except Exception:
     _crash_log_file = None
     logging.debug("Could not enable module-level faulthandler on crash.log", exc_info=True)
 
-# Enable DPI awareness for accurate resolution detection
-ctypes.windll.shcore.SetProcessDpiAwareness(2)
+# Enable DPI awareness for accurate resolution detection (Windows only).
+if sys.platform == "win32":
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        logging.debug("Could not set process DPI awareness", exc_info=True)
 
 
 # Tk iconphoto() with very large bitmaps (e.g. 300×300) has been observed to throw off
@@ -4391,16 +4398,17 @@ class VideoThumbnailPlayer(
                 # Defer sub-directory scan so the node appears in the UI immediately
                 self.after(0, lambda rn=root_node, p=path: self.process_directory(rn, p))
 
-        # get_available_drives now uses win32api (instant) instead of os.popen
+        # get_available_drives uses win32api on Windows (instant) instead of os.popen
         drives = self.get_available_drives()
         for drive in drives:
             # Skip any drive that is actually Google Drive (already added above)
-            try:
-                volume_name = win32api.GetVolumeInformation(drive)[0]
-                if "google drive" in volume_name.lower():
-                    continue
-            except Exception:
-                pass
+            if win32api is not None:
+                try:
+                    volume_name = win32api.GetVolumeInformation(drive)[0]
+                    if "google drive" in volume_name.lower():
+                        continue
+                except Exception:
+                    pass
 
             if os.path.exists(drive):
                 path_hash = self.get_path_hash(drive)
@@ -4411,18 +4419,19 @@ class VideoThumbnailPlayer(
 
 
     def find_google_drive_path(self):
-        # Method 1: virtual drive letter (most common)
-        drives = win32api.GetLogicalDriveStrings()
-        drives = drives.split('\000')[:-1]
-        for drive in drives:
-            try:
-                volume_name = win32api.GetVolumeInformation(drive)[0]
-                if "google drive" in volume_name.lower():
-                    # Found drive — return its root folder
-                    return os.path.join(drive, "My Drive")
-            except Exception:
-                # Some drives (e.g. empty DVD) can raise
-                continue
+        # Method 1: virtual drive letter (most common; Windows only)
+        if win32api is not None:
+            drives = win32api.GetLogicalDriveStrings()
+            drives = drives.split('\000')[:-1]
+            for drive in drives:
+                try:
+                    volume_name = win32api.GetVolumeInformation(drive)[0]
+                    if "google drive" in volume_name.lower():
+                        # Found drive — return its root folder
+                        return os.path.join(drive, "My Drive")
+                except Exception:
+                    # Some drives (e.g. empty DVD) can raise
+                    continue
 
         # Method 2: standard folder under user profile (older client)
         user_profile = os.path.expanduser("~")
@@ -5390,7 +5399,7 @@ class VideoThumbnailPlayer(
 
 
     def get_available_drives(self):
-        if os.name == 'nt':  # Windows
+        if os.name == 'nt' and win32api is not None:  # Windows
             # win32api.GetLogicalDriveStrings() is instant (no subprocess) vs
             # the old os.popen('wmic ...') which cost ~0.11s on every startup.
             drive_string = win32api.GetLogicalDriveStrings()

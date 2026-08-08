@@ -15,7 +15,7 @@ pymediainfo==6.1.0
 watchdog==3.0.0
 psutil==5.9.8
 chardet==5.2.0
-pywin32>=307
+pywin32>=307; sys_platform == 'win32'
 pyglet==2.0.10
 tkinterdnd2-universal==1.7.3
 alembic==1.13.1
