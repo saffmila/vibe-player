@@ -30,6 +30,9 @@ from file_operations import (
     probe_first_video_stream,
 )
 from utils import Tooltip, create_menu, parse_srt_file
+from video_convert import _probe_source_props
+from video_encode_settings import EXPORT_CUSTOM_SCROLL_HEIGHT, VideoEncodeSettingsPanel
+from video_merge import _custom_audio_args, _custom_codec_args, _custom_video_filter
 
 
 # Hide subprocess console windows on Windows (matches the pattern used in file_operations.py).
@@ -40,17 +43,20 @@ if os.name == "nt":
     _SUBPROCESS_STARTUPINFO.wShowWindow = subprocess.SW_HIDE
 
 
-EXPORT_DIALOG_WIDTH = 360
-EXPORT_DIALOG_HEIGHT = 500
-EXPORT_DIALOG_MIN_WIDTH = 330
-EXPORT_DIALOG_MIN_HEIGHT = 440
+EXPORT_DIALOG_WIDTH = 420
+EXPORT_DIALOG_HEIGHT = 680
+EXPORT_DIALOG_HEIGHT_LOSSLESS = 420
+EXPORT_DIALOG_MIN_WIDTH = 380
+EXPORT_DIALOG_MIN_HEIGHT = 360
 EXPORT_DIALOG_SCREEN_MARGIN = 24
 
 
 class VideoExportDialog(ctk.CTkToplevel):
     """
-    Simple dialog for selecting video export preset or custom settings.
+    Export loops/cuts: shared encode settings UI + cut-scope radios.
+    Encode logic stays in TimelineBarWidget; this dialog only collects settings.
     """
+
     def __init__(
         self,
         parent,
@@ -62,207 +68,197 @@ class VideoExportDialog(ctk.CTkToplevel):
         segments=None,
         active_segment_index=None,
     ):
-            """
-            Initializes the export dialog. 
-            Sets up the UI elements, variables, and dynamically adjusts window size.
-            """
-            super().__init__(parent)
-            self.title("Export Video")
-            
-            self.loop_mode = False
-            self.fill_timeline_gaps = True  # Enables continuous filmstrip by default
+        super().__init__(parent)
+        self.title("Export Video")
 
-            self._target_geometry = (EXPORT_DIALOG_WIDTH, EXPORT_DIALOG_HEIGHT)
-            self._apply_compact_geometry()
-            self.video_path = video_path
-            self.convert_callback = convert_callback
-            self.loop_start = loop_start
-            self.loop_end = loop_end
-            self.controller = controller
-            self.segments = list(segments or [])
-            self.active_segment_index = active_segment_index if isinstance(active_segment_index, int) else None
+        self.loop_mode = False
+        self.fill_timeline_gaps = True
 
-            self.resizable(True, True)
+        self._target_geometry = (EXPORT_DIALOG_WIDTH, EXPORT_DIALOG_HEIGHT)
+        self._apply_compact_geometry()
+        self.video_path = video_path
+        self.convert_callback = convert_callback
+        self.loop_start = loop_start
+        self.loop_end = loop_end
+        self.controller = controller
+        self.segments = list(segments or [])
+        self.active_segment_index = (
+            active_segment_index if isinstance(active_segment_index, int) else None
+        )
 
-            self.presets = {
-                "MP4 1600x1200 HQ": { "ext": ".mp4", "width": 1600, "height": 1200, "fps": 30 },
-                "MP4 1280x720":     { "ext": ".mp4", "width": 1280, "height": 720,  "fps": 30 },
-                "AVI 640x480":      { "ext": ".avi", "width": 640,  "height": 480,  "fps": 25 },
-            }
+        self.resizable(True, True)
+        self.lossless_container_var = ctk.StringVar(value="MKV (recommended)")
+        self.mode_var = ctk.StringVar(value="Custom")
 
-            self.preset_var = ctk.StringVar(value=list(self.presets.keys())[0])
-            self.ext_var = ctk.StringVar(value=".mp4")
-            self.width_var = ctk.StringVar(value="1600")
-            self.height_var = ctk.StringVar(value="1200")
-            self.fps_var = ctk.StringVar(value="30")
-            self.sound_var = ctk.BooleanVar(value=True)
-            self.lossless_container_var = ctk.StringVar(value="MKV (recommended)")
+        self._source_width, self._source_height, self._source_fps = _probe_source_props(
+            video_path
+        )
 
-            # Source duration (used when no loop is provided so we can default end-time).
+        try:
+            self._source_duration = float(get_video_duration_mediainfo(video_path) or 0.0)
+        except Exception:
+            self._source_duration = 0.0
+
+        self.export_mode_var = ctk.StringVar(value="active")
+
+        active_seg = self._get_active_segment()
+        active_seg_len = 0.0
+        if active_seg:
+            active_seg_len = max(0.0, float(active_seg["end"]) - float(active_seg["start"]))
+        seg_count = len(self.segments)
+        total_seg_len = 0.0
+        for seg in self.segments:
             try:
-                self._source_duration = float(get_video_duration_mediainfo(video_path) or 0.0)
-            except Exception:
-                self._source_duration = 0.0
+                s = float(seg.get("start"))
+                e = float(seg.get("end"))
+            except (TypeError, ValueError):
+                continue
+            if e > s:
+                total_seg_len += e - s
+        if not active_seg and seg_count > 0:
+            self.export_mode_var.set("all_separate")
 
-            self.export_mode_var = ctk.StringVar(value="active")
+        self._scope_lbl = ctk.CTkLabel(self, text="Export scope", text_color="#00bfff")
+        self._scope_lbl.pack(pady=(6, 0))
+        export_scope_frame = ctk.CTkFrame(self)
+        export_scope_frame.pack(pady=2, padx=8, fill="x")
+        active_label = (
+            f"Active loop / cut ({active_seg_len:.1f}s)"
+            if active_seg
+            else "Active loop / cut (none selected)"
+        )
+        self.active_cut_radio = ctk.CTkRadioButton(
+            export_scope_frame,
+            text=active_label,
+            variable=self.export_mode_var,
+            value="active",
+            height=22,
+        )
+        self.active_cut_radio.pack(anchor="w", padx=8, pady=(5, 1))
+        self.all_cuts_separate_radio = ctk.CTkRadioButton(
+            export_scope_frame,
+            text=f"All loops / cuts, separate files ({seg_count})",
+            variable=self.export_mode_var,
+            value="all_separate",
+            height=22,
+        )
+        self.all_cuts_separate_radio.pack(anchor="w", padx=8, pady=(1, 1))
+        self.all_cuts_merged_radio = ctk.CTkRadioButton(
+            export_scope_frame,
+            text=f"All loops / cuts, merged ({seg_count})",
+            variable=self.export_mode_var,
+            value="all_merged",
+            height=22,
+        )
+        self.all_cuts_merged_radio.pack(anchor="w", padx=8, pady=(1, 5))
+        self.export_duration_var = ctk.StringVar(value="")
+        if not active_seg:
+            self.active_cut_radio.configure(state="disabled")
+            if seg_count <= 0:
+                self.all_cuts_separate_radio.configure(state="disabled")
+                self.all_cuts_merged_radio.configure(state="disabled")
+        self._active_seg_len_for_ui = active_seg_len
+        self._total_seg_len_for_ui = total_seg_len
+        self.export_mode_var.trace_add(
+            "write", lambda *_: self._update_export_duration_label()
+        )
 
-            # --- Segment-based export selection ---
-            active_seg = self._get_active_segment()
-            active_seg_len = 0.0
-            if active_seg:
-                active_seg_len = max(0.0, float(active_seg["end"]) - float(active_seg["start"]))
-            seg_count = len(self.segments)
-            total_seg_len = 0.0
-            for seg in self.segments:
-                try:
-                    s = float(seg.get("start"))
-                    e = float(seg.get("end"))
-                except (TypeError, ValueError):
-                    continue
-                if e > s:
-                    total_seg_len += (e - s)
-            if not active_seg and seg_count > 0:
-                self.export_mode_var.set("all_separate")
+        button_bar = ctk.CTkFrame(self, fg_color="transparent")
+        button_bar.pack(side="bottom", fill="x", padx=8, pady=8)
+        self.export_duration_label = ctk.CTkLabel(
+            button_bar,
+            textvariable=self.export_duration_var,
+            text_color="#bfc7d5",
+            font=("", 10),
+            anchor="w",
+        )
+        self.export_duration_label.pack(fill="x", pady=(0, 6))
+        self.close_btn = ctk.CTkButton(
+            button_bar, text="Close", width=90, height=28, command=self._on_close
+        )
+        self.close_btn.pack(side="left")
+        self.start_btn = ctk.CTkButton(
+            button_bar, text="Start Export", height=28, command=self.start_export
+        )
+        self.start_btn.pack(side="right", fill="x", expand=True, padx=(10, 0))
 
-            ctk.CTkLabel(self, text="Export scope", text_color="#00bfff").pack(pady=(6, 0))
-            export_scope_frame = ctk.CTkFrame(self)
-            export_scope_frame.pack(pady=2, padx=8, fill="x")
-            active_label = (
-                f"Active loop / cut ({active_seg_len:.1f}s)"
-                if active_seg
-                else "Active loop / cut (none selected)"
-            )
-            self.active_cut_radio = ctk.CTkRadioButton(
-                export_scope_frame,
-                text=active_label,
-                variable=self.export_mode_var,
-                value="active",
-                height=22,
-            )
-            self.active_cut_radio.pack(anchor="w", padx=8, pady=(5, 1))
-            self.all_cuts_separate_radio = ctk.CTkRadioButton(
-                export_scope_frame,
-                text=f"All loops / cuts, separate files ({seg_count})",
-                variable=self.export_mode_var,
-                value="all_separate",
-                height=22,
-            )
-            self.all_cuts_separate_radio.pack(anchor="w", padx=8, pady=(1, 1))
-            self.all_cuts_merged_radio = ctk.CTkRadioButton(
-                export_scope_frame,
-                text=f"All loops / cuts, merged ({seg_count})",
-                variable=self.export_mode_var,
-                value="all_merged",
-                height=22,
-            )
-            self.all_cuts_merged_radio.pack(anchor="w", padx=8, pady=(1, 5))
-            self.export_duration_var = ctk.StringVar(value="")
-            if not active_seg:
-                self.active_cut_radio.configure(state="disabled")
-                if seg_count <= 0:
-                    self.all_cuts_separate_radio.configure(state="disabled")
-                    self.all_cuts_merged_radio.configure(state="disabled")
-            self._active_seg_len_for_ui = active_seg_len
-            self._total_seg_len_for_ui = total_seg_len
-            self.export_mode_var.trace_add("write", lambda *_: self._update_export_duration_label())
+        self._mode_seg = ctk.CTkSegmentedButton(
+            self,
+            values=["Lossless", "Custom"],
+            variable=self.mode_var,
+            command=self._on_mode_changed,
+            height=28,
+        )
+        self._mode_seg.pack(fill="x", padx=8, pady=(8, 4))
 
-            # Pack this before the tab body so it keeps its requested height when
-            # the dialog is opened compactly or resized smaller.
-            button_bar = ctk.CTkFrame(self, fg_color="transparent")
-            button_bar.pack(side="bottom", fill="x", padx=8, pady=8)
-            self.export_duration_label = ctk.CTkLabel(
-                button_bar,
-                textvariable=self.export_duration_var,
-                text_color="#bfc7d5",
-                font=("", 10),
-                anchor="w",
-            )
-            self.export_duration_label.pack(fill="x", pady=(0, 6))
-            self.close_btn = ctk.CTkButton(
-                button_bar, text="Close", width=90, height=28, command=self._on_close
-            )
-            self.close_btn.pack(side="left")
-            self.start_btn = ctk.CTkButton(
-                button_bar, text="Start Export", height=28, command=self.start_export
-            )
-            self.start_btn.pack(side="right", fill="x", expand=True, padx=(10, 0))
+        self._lossless_frame = ctk.CTkFrame(self)
+        self.lossless_hint = ctk.CTkLabel(
+            self._lossless_frame,
+            text=(
+                "Loop / Cut points snap to nearest keyframe (LosslessCut-style). "
+                "MKV is the safest container."
+            ),
+            text_color="#888888",
+            font=("", 10),
+            justify="left",
+            anchor="w",
+            wraplength=360,
+        )
+        self.lossless_hint.pack(fill="x", padx=8, pady=(8, 4))
+        self.lossless_container_menu = ctk.CTkOptionMenu(
+            self._lossless_frame,
+            variable=self.lossless_container_var,
+            values=["MKV (recommended)", "Same as source"],
+            height=28,
+        )
+        self.lossless_container_menu.pack(fill="x", padx=8, pady=(0, 10))
 
-            # --- Export mode tabs ---
-            self.tabs = ctk.CTkTabview(self, height=235)
-            self.tabs.pack(pady=(6, 2), padx=8, fill="both", expand=True)
-            lossless_tab = self.tabs.add("Lossless")
-            custom_tab = self.tabs.add("Custom")
+        self._custom_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self._encode_panel = VideoEncodeSettingsPanel(
+            self._custom_frame,
+            source_width=self._source_width,
+            source_height=self._source_height,
+            source_fps=self._source_fps,
+            scroll_height=EXPORT_CUSTOM_SCROLL_HEIGHT,
+        )
+        self._encode_panel.pack(fill="both", expand=True)
 
-            self.lossless_hint = ctk.CTkLabel(
-                lossless_tab,
-                text="Loop / Cut points snap to nearest keyframe (LosslessCut-style). MKV is the safest container.",
-                text_color="#888888",
-                font=("", 10),
-                justify="left",
-                anchor="w",
-                wraplength=300,
-            )
-            self.lossless_hint.pack(fill="x", padx=8, pady=(6, 4))
+        self._show_mode("Custom")
+        self._update_export_duration_label()
 
-            self.lossless_container_menu = ctk.CTkOptionMenu(
-                lossless_tab,
-                variable=self.lossless_container_var,
-                values=["MKV (recommended)", "Same as source"],
-                height=28,
-            )
-            self.lossless_container_menu.pack(fill="x", padx=8, pady=(0, 6))
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind("<Destroy>", self._on_destroy_event, add="+")
 
-            ctk.CTkLabel(custom_tab, text="Choose preset:").pack(pady=(6, 3))
-            self.preset_menu = ctk.CTkOptionMenu(
-                custom_tab,
-                variable=self.preset_var,
-                values=list(self.presets.keys()),
-                command=self.apply_preset,
-                height=28,
-            )
-            self.preset_menu.pack(pady=(0, 4))
+        self.lift()
+        self.focus_force()
+        # NOTE: no grab_set() — dialog stays open after export for re-export.
+        self.transient(self.master)
+        self._sync_target_geometry()
+        self._apply_compact_geometry()
+        self.after(100, self._apply_compact_geometry)
 
-            form_frame = ctk.CTkFrame(custom_tab)
-            form_frame.pack(pady=4, padx=8, fill="x")
-            self.width_entry = self._add_entry(form_frame, "Width:", self.width_var)
-            self.height_entry = self._add_entry(form_frame, "Height:", self.height_var)
-            self.fps_entry = self._add_entry(form_frame, "FPS:", self.fps_var)
+    def _on_mode_changed(self, mode: str | None = None):
+        self._show_mode(mode or self.mode_var.get())
+        self._sync_target_geometry()
+        self._apply_compact_geometry()
 
-            self.supported_formats = [".mp4", ".avi", ".mkv", ".mov", ".webm"]
-            ctk.CTkLabel(custom_tab, text="Output Format:").pack(pady=(5, 2))
-            self.format_menu = ctk.CTkOptionMenu(
-                custom_tab,
-                variable=self.ext_var,
-                values=self.supported_formats,
-                height=28,
-            )
-            self.format_menu.pack(pady=(0, 5))
+    def _show_mode(self, mode: str):
+        self._lossless_frame.pack_forget()
+        self._custom_frame.pack_forget()
+        if mode == "Lossless":
+            self._lossless_frame.pack(fill="x", padx=8, pady=(0, 2))
+        else:
+            self._custom_frame.pack(fill="both", expand=True, padx=8, pady=(0, 2))
+        try:
+            self.update_idletasks()
+        except Exception:
+            pass
 
-            ctk.CTkCheckBox(custom_tab, text="Include audio", variable=self.sound_var).pack(pady=(0, 5))
-
-            self.tabs.set("Lossless")
-            self._update_export_duration_label()
-
-            # Keep close/destroy handlers only.
-            self.protocol("WM_DELETE_WINDOW", self._on_close)
-            self.bind("<Destroy>", self._on_destroy_event, add="+")
-
-            self.apply_preset(self.preset_var.get())
-            self.lift()
-            self.focus_force()
-            # NOTE: no grab_set() — the dialog stays open after a successful export
-            # so the user can immediately re-export with different settings.
-            self.transient(self.master)
-            self._apply_compact_geometry()
-            self.after(100, self._apply_compact_geometry)
-
-    def _add_entry(self, frame, label, var):
-        row = ctk.CTkFrame(frame)
-        row.pack(fill="x", pady=1)
-        ctk.CTkLabel(row, text=label, width=80, anchor="w").pack(side="left")
-        entry = ctk.CTkEntry(row, textvariable=var, height=28)
-        entry.pack(side="left", fill="x", expand=True)
-        return entry
+    def _sync_target_geometry(self):
+        if self.mode_var.get() == "Lossless":
+            self._target_geometry = (EXPORT_DIALOG_WIDTH, EXPORT_DIALOG_HEIGHT_LOSSLESS)
+        else:
+            self._target_geometry = (EXPORT_DIALOG_WIDTH, EXPORT_DIALOG_HEIGHT)
 
     def _apply_compact_geometry(self):
         """Keep the export dialog compact and fully visible on high-DPI monitors."""
@@ -284,8 +280,14 @@ class VideoExportDialog(ctk.CTkToplevel):
 
             x = screen_x + max(0, (screen_w - width) // 2)
             y = screen_y + max(0, (screen_h - height) // 2)
-            x = min(max(screen_x + margin, x), screen_x + max(margin, screen_w - width - margin))
-            y = min(max(screen_y + margin, y), screen_y + max(margin, screen_h - height - margin))
+            x = min(
+                max(screen_x + margin, x),
+                screen_x + max(margin, screen_w - width - margin),
+            )
+            y = min(
+                max(screen_y + margin, y),
+                screen_y + max(margin, screen_h - height - margin),
+            )
             self.geometry(f"{int(width)}x{int(height)}+{int(x)}+{int(y)}")
             self.update_idletasks()
             self._clamp_to_work_area(screen_x, screen_y, screen_w, screen_h)
@@ -327,7 +329,9 @@ class VideoExportDialog(ctk.CTkToplevel):
                 monitor = ctypes.windll.user32.MonitorFromWindow(hwnd, 2)
                 info = MONITORINFO()
                 info.cbSize = ctypes.sizeof(MONITORINFO)
-                if monitor and ctypes.windll.user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                if monitor and ctypes.windll.user32.GetMonitorInfoW(
+                    monitor, ctypes.byref(info)
+                ):
                     monitor_rect = info.rcMonitor
                     work = info.rcWork
                     monitor_w = max(1, int(monitor_rect.right - monitor_rect.left))
@@ -437,25 +441,24 @@ class VideoExportDialog(ctk.CTkToplevel):
         # No periodic sync timers are used in segment mode.
         return
 
-    def apply_preset(self, preset_name):
-        preset = self.presets[preset_name]
-        self.ext_var.set(preset["ext"])
-        self.width_var.set(str(preset["width"]))
-        self.height_var.set(str(preset["height"]))
-        self.fps_var.set(str(preset["fps"]))
-
     def start_export(self):
         try:
             active_seg = self._get_active_segment()
             export_mode = self.export_mode_var.get()
             if export_mode == "active" and active_seg is None:
-                messagebox.showerror("No active cut", "No active cut is selected for export.")
+                messagebox.showerror(
+                    "No active cut", "No active cut is selected for export."
+                )
                 return
             if export_mode in ("all_separate", "all_merged") and not self.segments:
                 messagebox.showerror("No cuts", "There are no cuts to export.")
                 return
-            export_start = active_seg["start"] if (export_mode == "active" and active_seg) else None
-            export_end = active_seg["end"] if (export_mode == "active" and active_seg) else None
+            export_start = (
+                active_seg["start"] if (export_mode == "active" and active_seg) else None
+            )
+            export_end = (
+                active_seg["end"] if (export_mode == "active" and active_seg) else None
+            )
             serializable_segments = []
             for seg in self.segments:
                 s = seg.get("start")
@@ -470,35 +473,22 @@ class VideoExportDialog(ctk.CTkToplevel):
                 if e > s:
                     serializable_segments.append({"start": s, "end": e})
 
-            selected_tab = self.tabs.get() if hasattr(self, "tabs") else "Lossless"
-            is_lossless = selected_tab == "Lossless"
+            is_lossless = self.mode_var.get() == "Lossless"
+            scope = {
+                "start_time": export_start,
+                "end_time": export_end,
+                "export_mode": export_mode,
+                "segments": serializable_segments,
+            }
 
             if is_lossless:
-                # Lossless mode: stream copy + keyframe cut. Container choice drives compatibility.
                 source_ext = (os.path.splitext(self.video_path)[1] or ".mp4").lower()
                 container_choice = self.lossless_container_var.get()
                 out_ext = ".mkv" if container_choice.startswith("MKV") else source_ext
-                settings = {
-                    "mode": "original",
-                    "ext": out_ext,
-                    "start_time": export_start,
-                    "end_time": export_end,
-                    "export_mode": export_mode,
-                    "segments": serializable_segments,
-                }
+                settings = {"mode": "original", "ext": out_ext, **scope}
             else:
-                settings = {
-                    "mode": "custom",
-                    "ext": self.ext_var.get(),
-                    "width": int(self.width_var.get()),
-                    "height": int(self.height_var.get()),
-                    "fps": float(self.fps_var.get()),
-                    "include_audio": bool(self.sound_var.get()),
-                    "start_time": export_start,
-                    "end_time": export_end,
-                    "export_mode": export_mode,
-                    "segments": serializable_segments,
-                }
+                settings = {**self._encode_panel.get_custom_settings(), **scope}
+
             # Keep the dialog open after kicking off the export so the user can
             # tweak settings and re-export without re-opening the menu.
             self.convert_callback(self.video_path, settings)
@@ -2206,31 +2196,13 @@ class TimelineBarWidget(ctk.CTkFrame):
         return cmd
 
     def _custom_export_video_filter(self, settings):
-        width = int(settings["width"])
-        height = int(settings["height"])
-        fps = float(settings["fps"])
-        fps_text = f"{fps:g}"
-        return f"scale={width}:{height}:flags=lanczos,fps={fps_text},format=yuv420p"
+        return _custom_video_filter(settings)
 
     def _custom_export_codec_args(self, save_path, settings):
-        target_ext = (os.path.splitext(save_path)[1] or settings["ext"]).lower()
-        if target_ext == ".webm":
-            return ["-c:v", "libvpx-vp9", "-crf", "30", "-b:v", "0", "-pix_fmt", "yuv420p"]
-        if target_ext == ".avi":
-            return ["-c:v", "mpeg4", "-q:v", "3", "-pix_fmt", "yuv420p"]
-
-        args = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"]
-        if target_ext in (".mp4", ".mov", ".m4v"):
-            args += ["-movflags", "+faststart"]
-        return args
+        return _custom_codec_args(save_path, settings)
 
     def _custom_export_audio_args(self, save_path, settings):
-        target_ext = (os.path.splitext(save_path)[1] or settings["ext"]).lower()
-        if target_ext == ".webm":
-            return ["-c:a", "libopus", "-b:a", "160k"]
-        if target_ext == ".avi":
-            return ["-c:a", "libmp3lame", "-b:a", "192k"]
-        return ["-c:a", "aac", "-b:a", "192k"]
+        return _custom_audio_args(save_path, settings)
 
     def _has_exportable_audio_stream(self, input_path):
         try:

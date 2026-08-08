@@ -381,6 +381,9 @@ def _has_audio_stream(path):
 
 
 def _custom_video_filter(settings):
+    # keep_size: re-encode without scale/fps so source resolution & rate stay native.
+    if settings.get("keep_size"):
+        return "format=yuv420p"
     width = int(settings["width"])
     height = int(settings["height"])
     fps = float(settings["fps"])
