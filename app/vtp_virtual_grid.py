@@ -37,9 +37,11 @@ _OFFSCREEN_Y = -10000
 
 # Defaults are stored on the instance (see init_virtual_grid).
 # Module-level values stay only as safe fallbacks.
-_WIDE_PREVIEW_PAD_SIDE = 10
-_WIDE_PREVIEW_MARGIN_Y = 12
-_WIDE_PREVIEW_INNER_PAD = 6
+_WIDE_PREVIEW_PAD_SIDE = 6
+_WIDE_PREVIEW_MARGIN_Y = 10
+_WIDE_PREVIEW_INNER_PAD = 2
+# Gap between vertical divider and first thumbnail (breathing room)
+_WIDE_PREVIEW_PAD_AFTER_DIV = 8
 
 
 class VtpVirtualGridMixin:
@@ -113,13 +115,18 @@ class VtpVirtualGridMixin:
         self.vg_wide_preview_pad_side = _WIDE_PREVIEW_PAD_SIDE
         self.vg_wide_preview_margin_y = _WIDE_PREVIEW_MARGIN_Y
         self.vg_wide_preview_inner_pad = _WIDE_PREVIEW_INNER_PAD
+        self.vg_wide_preview_pad_after_div = _WIDE_PREVIEW_PAD_AFTER_DIV
 
         # Composite generator: number of tiles in the wide thumbnail strip
         self.vg_wide_preview_count = 5
 
         # Fonts
-        self.vg_wide_title_scale = 1   # title (folder icon + name)
-        self.vg_wide_stats_scale = 1.0   # stats/keywords labels
+        self.vg_wide_title_scale = 1   # fallback if absolute size unset
+        self.vg_wide_stats_scale = 1.0
+        self.vg_wide_title_font_size = 12   # absolute px; Preferences spinner
+        self.vg_wide_stats_font_size = 9
+        self.wide_folder_videos_color = "#5dade2"
+        self.wide_folder_images_color = "#7dcea0"
 
         # Label row spacing inside left panel (stats / keywords / rating blocks)
         self.vg_wide_label_row_gap = 7
@@ -137,8 +144,8 @@ class VtpVirtualGridMixin:
         # Extra space below folder title before first stats line; None = use label_row_gap
         self.vg_wide_title_bottom_gap = None
 
-        # Divider (vertical line) visibility
-        self.vg_wide_show_divider = False
+        # Divider (vertical line) visibility — always on for consistent chrome
+        self.vg_wide_show_divider = True
 
         # Strip / card chrome (None = fall back to folder_color_media / wide_folder_borderColor)
         self.vg_wide_bg_color = None
@@ -153,6 +160,8 @@ class VtpVirtualGridMixin:
         # Preview tiles (right, inside card): PIL; radius 0 = auto from thumb size
         self.vg_wide_round_preview_corners = True
         self.vg_wide_preview_corner_radius = 0
+        # center | left — fixed equal slots look balanced centered in the preview band
+        self.vg_wide_preview_align = "center"
 
         # Outer wide-folder card (container): rounded polygon on strip_canvas
         self.vg_wide_round_container = True
@@ -275,31 +284,10 @@ class VtpVirtualGridMixin:
         muted = "#9aa4ad"
         kw_color = "#8ecae6"
 
-        # Fonts (scaled via tuning params)
-        base_title = getattr(self, "folder_title_font", ("Helvetica", 13, "bold"))
-        title_scale = float(getattr(self, "vg_wide_title_scale", 2.5))
-        try:
-            fam = base_title.cget("family")
-            sz = int(base_title.cget("size") or 13)
-            weight = str(base_title.cget("weight") or "bold")
-            title_font = (fam, max(10, int(round(sz * title_scale))), "bold" if weight.lower() == "bold" else weight)
-        except Exception:
-            # tuple fallback
-            try:
-                fam = base_title[0]
-                sz = int(base_title[1])
-                w = base_title[2] if len(base_title) > 2 else "bold"
-                title_font = (fam, max(10, int(round(sz * title_scale))), w)
-            except Exception:
-                title_font = ("Helvetica", 32, "bold")
-        stats_font = ("Helvetica", 10)
-        try:
-            stats_scale = float(getattr(self, "vg_wide_stats_scale", 1.0))
-            sf = self.wide_folder_stats_font
-            stats_font = (sf.cget("family"),
-                          max(8, int(round(int(sf.cget("size")) * stats_scale))))
-        except Exception:
-            pass
+        # Fonts (absolute sizes from prefs; fall back to scaled defaults)
+        title_font, stats_font = self._vg_wide_label_fonts()
+        videos_color = getattr(self, "wide_folder_videos_color", "#5dade2")
+        images_color = getattr(self, "wide_folder_images_color", "#7dcea0")
 
         for _ in range(pool_size):
             outer = tk.Frame(self.canvas, bg=shell_bg,
@@ -333,22 +321,42 @@ class VtpVirtualGridMixin:
             left_panel = tk.Frame(strip, bg=card_bg, width=left_px)
             left_panel.place(x=10, y=8, width=left_px, relheight=1.0, height=-16)
 
-            name_label = tk.Label(
-                left_panel, text="", bg=card_bg, fg="#dbdee1",
-                font=title_font, anchor="w", justify="left",
-                wraplength=left_px - 10,
-            )
+            title_row = tk.Frame(left_panel, bg=card_bg)
             row_gap = int(getattr(self, "vg_wide_label_row_gap", 4))
             title_bot = getattr(self, "vg_wide_title_bottom_gap", None)
             title_pad = int(title_bot) if title_bot is not None else row_gap
-            name_label.pack(side="top", anchor="w", pady=(0, title_pad))
+            title_row.pack(side="top", fill="x", anchor="w", pady=(0, title_pad))
 
-            stats_label = tk.Label(
-                left_panel, text="", bg=card_bg, fg=muted,
-                font=stats_font, anchor="nw", justify="left",
-                wraplength=left_px - 10,
+            icon_label = tk.Label(
+                title_row, text="", bg=card_bg, fg="#dbdee1",
+                font=title_font, anchor="nw", justify="left",
             )
-            stats_label.pack(side="top", anchor="w", pady=(0, row_gap))
+            icon_label.pack(side="left", anchor="n", padx=(0, 8))
+
+            name_label = tk.Label(
+                title_row, text="", bg=card_bg, fg="#dbdee1",
+                font=title_font, anchor="nw", justify="left",
+                wraplength=max(40, left_px - 48),
+            )
+            name_label.pack(side="left", fill="x", expand=True, anchor="n")
+
+            stats_row = tk.Frame(left_panel, bg=card_bg)
+            stats_row.pack(side="top", anchor="w", fill="x", pady=(0, row_gap))
+
+            stats_videos_label = tk.Label(
+                stats_row, text="", bg=card_bg, fg=videos_color,
+                font=stats_font, anchor="w", justify="left",
+            )
+            stats_videos_label.pack(side="left", anchor="w")
+
+            stats_images_label = tk.Label(
+                stats_row, text="", bg=card_bg, fg=images_color,
+                font=stats_font, anchor="w", justify="left",
+            )
+            stats_images_label.pack(side="left", anchor="w", padx=(10, 0))
+
+            # Keep legacy key pointing at videos label for any old callers
+            stats_label = stats_videos_label
 
             kw_label = tk.Label(
                 left_panel, text="", bg=card_bg, fg=kw_color,
@@ -365,12 +373,12 @@ class VtpVirtualGridMixin:
             rating_canvas.pack_forget()
 
             sep = tk.Frame(strip, bg=sep_color, width=1)
-            if getattr(self, "vg_wide_show_divider", False):
-                sep.place(x=left_px + 14, y=8, width=1, relheight=1.0, height=-16)
+            if getattr(self, "vg_wide_show_divider", True):
+                sep.place(x=10 + left_px + 4, y=8, width=1, relheight=1.0, height=-16)
 
             img_canvas = tk.Canvas(strip, bg=card_bg, bd=0, highlightthickness=0)
-            # We'll reposition "wideimg" with coords when slot geometry changes.
-            img_canvas.create_image(0, 0, anchor="center", tags="wideimg")
+            # Left-aligned preview (nw); coords set in _vg_bind_wide_slot
+            img_canvas.create_image(0, 0, anchor="nw", tags="wideimg")
 
             win_id = self.canvas.create_window(
                 0, _OFFSCREEN_Y, window=outer, anchor="nw")
@@ -378,8 +386,12 @@ class VtpVirtualGridMixin:
             slot_entry = {
                 "frame": outer, "strip": strip, "shadow": shadow,
                 "strip_canvas": strip_canvas,
-                "left_panel": left_panel, "sep": sep,
-                "name_label": name_label, "stats_label": stats_label,
+                "left_panel": left_panel, "title_row": title_row, "sep": sep,
+                "icon_label": icon_label, "name_label": name_label,
+                "stats_row": stats_row,
+                "stats_label": stats_label,
+                "stats_videos_label": stats_videos_label,
+                "stats_images_label": stats_images_label,
                 "kw_label": kw_label, "rating_canvas": rating_canvas,
                 "img_canvas": img_canvas,
                 "card_bg": card_bg,
@@ -402,18 +414,99 @@ class VtpVirtualGridMixin:
             return c[1]
         return fallback if (not c or c == "transparent") else c
 
+    def _vg_wide_label_fonts(self):
+        """Title + stats fonts for wide-folder left column (prefs-driven sizes)."""
+        title_size = int(getattr(self, "vg_wide_title_font_size", 0) or 0)
+        stats_size = int(getattr(self, "vg_wide_stats_font_size", 0) or 0)
+
+        fam, weight = "Helvetica", "bold"
+        base_sz = 13
+        base_title = getattr(self, "folder_title_font", ("Helvetica", 13, "bold"))
+        try:
+            fam = base_title.cget("family")
+            base_sz = int(base_title.cget("size") or 13)
+            weight = str(base_title.cget("weight") or "bold")
+            if weight.lower() == "bold":
+                weight = "bold"
+        except Exception:
+            try:
+                fam = base_title[0]
+                base_sz = int(base_title[1])
+                weight = base_title[2] if len(base_title) > 2 else "bold"
+            except Exception:
+                fam, base_sz, weight = "Helvetica", 13, "bold"
+
+        if title_size <= 0:
+            scale = float(getattr(self, "vg_wide_title_scale", 1.0) or 1.0)
+            title_size = max(10, int(round(base_sz * scale)))
+        title_size = max(9, min(36, title_size))
+
+        stats_fam = "Helvetica"
+        base_stats = 10
+        try:
+            sf = self.wide_folder_stats_font
+            stats_fam = sf.cget("family")
+            base_stats = int(sf.cget("size") or 10)
+        except Exception:
+            pass
+        if stats_size <= 0:
+            scale = float(getattr(self, "vg_wide_stats_scale", 1.0) or 1.0)
+            stats_size = max(8, int(round(base_stats * scale)))
+        stats_size = max(8, min(28, stats_size))
+
+        return (fam, title_size, weight), (stats_fam, stats_size)
+
+    def _vg_apply_wide_label_fonts(self):
+        """Push current title/stats font sizes into existing wide pool slots."""
+        title_font, stats_font = self._vg_wide_label_fonts()
+        videos_color = getattr(self, "wide_folder_videos_color", "#5dade2")
+        images_color = getattr(self, "wide_folder_images_color", "#7dcea0")
+        for slot in getattr(self, "_vg_wide_pool", []) or []:
+            try:
+                if slot.get("icon_label"):
+                    slot["icon_label"].configure(font=title_font)
+                if slot.get("name_label"):
+                    slot["name_label"].configure(font=title_font)
+                for key in ("stats_label", "stats_videos_label", "stats_images_label", "kw_label"):
+                    w = slot.get(key)
+                    if w:
+                        w.configure(font=stats_font)
+                if slot.get("stats_videos_label"):
+                    slot["stats_videos_label"].configure(fg=videos_color)
+                if slot.get("stats_images_label"):
+                    slot["stats_images_label"].configure(fg=images_color)
+            except Exception:
+                continue
+
+    def set_wide_folder_title_font_size(self, size: int):
+        self.vg_wide_title_font_size = max(9, min(36, int(size)))
+        self._vg_apply_wide_label_fonts()
+
+    def set_wide_folder_stats_font_size(self, size: int):
+        self.vg_wide_stats_font_size = max(8, min(28, int(size)))
+        try:
+            # Keep CTkFont in sync for classic-grid wide panels
+            self.wide_folder_stats_font = ctk.CTkFont(size=self.vg_wide_stats_font_size)
+        except Exception:
+            pass
+        self._vg_apply_wide_label_fonts()
+
     def _vg_wide_cache_key(self, file_path: str, nprev: int) -> str:
         """Memory-cache key for generated wide strips, including size-sensitive inputs."""
         try:
             wide_w, wide_h = self.widefolder_size
         except Exception:
             wide_w, wide_h = 0, 0
-        gap = int(getattr(self, "wide_folder_gap", 18))
+        gap = int(getattr(self, "wide_folder_gap", 10))
         radius = int(getattr(self, "wide_folder_innerThumbRadius", 10))
+        cover = int(bool(getattr(self, "wide_folder_cover_tiles", True)))
+        fill = int(bool(getattr(self, "wide_folder_fill_slots", True)))
+        aspect = int(round(float(getattr(self, "wide_folder_tile_aspect", 1.35) or 1.35) * 100))
         return (
             f"{file_path}\x00wide\x00n={int(nprev)}"
             f"\x00size={int(wide_w)}x{int(wide_h)}"
             f"\x00g={gap}\x00r={radius}"
+            f"\x00slots{int(nprev)}_c{cover}_fill{fill}_a{aspect}_u1_blk"
         )
 
     def _wide_strip_dir_signature(self, folder_path: str):
@@ -505,6 +598,34 @@ class VtpVirtualGridMixin:
                 selected = True
                 break
 
+        # Card chrome (behind photos) stays at base color — lightening it against a
+        # PhotoImage flattened onto the base tone creates a dark "frame" around thumbs.
+        fill_bg = card_bg
+        left_bg = card_bg
+        if slot.get("_hover") and not selected and isinstance(card_bg, str) and card_bg.startswith("#") and len(card_bg) == 7:
+            try:
+                r = int(card_bg[1:3], 16)
+                g = int(card_bg[3:5], 16)
+                b = int(card_bg[5:7], 16)
+                left_bg = "#{:02x}{:02x}{:02x}".format(
+                    min(255, r + 18), min(255, g + 18), min(255, b + 20)
+                )
+            except Exception:
+                left_bg = card_bg
+
+        if slot.get("_painted_bg") != left_bg:
+            slot["_painted_bg"] = left_bg
+            for key in ("left_panel", "title_row", "icon_label", "name_label",
+                        "stats_row", "stats_label", "stats_videos_label",
+                        "stats_images_label", "kw_label", "rating_canvas"):
+                child = slot.get(key)
+                if not child:
+                    continue
+                try:
+                    child.configure(bg=left_bg)
+                except Exception:
+                    pass
+
         if selected:
             outline_c = self.thumbSelColor
             ow = max(int(getattr(self, "Select_outlinewidth", 2) or 2), 2)
@@ -512,12 +633,13 @@ class VtpVirtualGridMixin:
             outline_c = border_c
             ow = max(bw, 1)
         else:
-            outline_c = card_bg
+            outline_c = fill_bg
             ow = 0
 
         inset = max(1, (ow + 1) // 2) if ow else 1
+        card_w, card_h = int(w), int(h)
         x1 = y1 = float(inset)
-        x2, y2 = float(w - 1 - inset), float(h - 1 - inset)
+        x2, y2 = float(card_w - 1 - inset), float(card_h - 1 - inset)
         if x2 <= x1 + 2 or y2 <= y1 + 2:
             return
 
@@ -533,13 +655,13 @@ class VtpVirtualGridMixin:
             if r >= 2 and round_on:
                 self.create_rounded_rectangle(
                     sc, int(x1), int(y1), int(x2), int(y2), radius=int(r),
-                    fill=card_bg, outline=outline_c, width=ow, tags="vgcard",
+                    fill=fill_bg, outline=outline_c, width=ow, tags="vgcard",
                 )
             else:
                 sc.create_rectangle(
                     int(x1), int(y1), int(x2), int(y2),
-                    fill=card_bg,
-                    outline=outline_c if ow else card_bg,
+                    fill=fill_bg,
+                    outline=outline_c if ow else fill_bg,
                     width=ow,
                     tags="vgcard",
                 )
@@ -594,8 +716,9 @@ class VtpVirtualGridMixin:
         if not sep:
             return
         try:
-            if getattr(self, "vg_wide_show_divider", False):
-                sep.place(x=left_px + 14, y=8, width=1, relheight=1.0, height=-16)
+            if getattr(self, "vg_wide_show_divider", True):
+                # Sit just after the title column (x=10 + left_px + small gap)
+                sep.place(x=10 + left_px + 4, y=8, width=1, relheight=1.0, height=-16)
             else:
                 sep.place_forget()
         except Exception:
@@ -603,19 +726,22 @@ class VtpVirtualGridMixin:
 
     def _vg_compute_wide_left_px(self, strip_w: int) -> int:
         """Match _vg_bind_wide_slot left panel width (for divider sync on layout)."""
-        show_div = getattr(self, "vg_wide_show_divider", False)
-        left_px = max(160, min(420, int(round(strip_w * 0.25))))
+        show_div = getattr(self, "vg_wide_show_divider", True)
+        frac = float(getattr(self, "wide_folder_left_frac", 0.27) or 0.27)
+        left_px = max(180, min(520, int(round(strip_w * frac))))
         pad_side = int(getattr(self, "vg_wide_preview_pad_side", _WIDE_PREVIEW_PAD_SIDE))
+        pad_after = int(getattr(self, "vg_wide_preview_pad_after_div", _WIDE_PREVIEW_PAD_AFTER_DIV))
         if show_div:
-            sep_x = left_px + 14
+            sep_x = 10 + left_px + 4
+            preview_start = sep_x + 1 + pad_after
         else:
-            sep_x = 10 + left_px
+            preview_start = 10 + left_px + pad_side
         min_preview_w = 140
-        if (strip_w - (sep_x + pad_side)) < min_preview_w:
+        if (strip_w - (preview_start + pad_side)) < min_preview_w:
             if show_div:
-                left_px = max(160, strip_w - (14 + pad_side + min_preview_w))
+                left_px = max(180, strip_w - (10 + 4 + 1 + pad_after + pad_side + min_preview_w))
             else:
-                left_px = max(160, strip_w - (10 + pad_side + min_preview_w))
+                left_px = max(180, strip_w - (10 + pad_side + pad_side + min_preview_w))
         return left_px
 
     def _vg_apply_wide_outer_chrome(self, slot: dict, strip_inner_w: int) -> None:
@@ -1513,22 +1639,28 @@ class VtpVirtualGridMixin:
         strip_w = max(1, int(strip_w))
         strip_h = max(1, int(strip_h))
 
-        show_div = getattr(self, "vg_wide_show_divider", False)
-        left_px = max(160, min(420, int(round(strip_w * 0.25))))
+        show_div = getattr(self, "vg_wide_show_divider", True)
+        frac = float(getattr(self, "wide_folder_left_frac", 0.27) or 0.27)
+        left_px = max(180, min(520, int(round(strip_w * frac))))
         pad_side = int(getattr(self, "vg_wide_preview_pad_side", _WIDE_PREVIEW_PAD_SIDE))
-        # Without divider: no extra 14px gutter (it looked like a vertical rule).
+        pad_after = int(getattr(self, "vg_wide_preview_pad_after_div", _WIDE_PREVIEW_PAD_AFTER_DIV))
+        # Divider sits just after the title column; thumbs start after a small gap.
         if show_div:
-            sep_x = left_px + 14
+            sep_x = 10 + left_px + 4
+            preview_x0 = sep_x + 1 + pad_after
         else:
             sep_x = 10 + left_px
+            preview_x0 = sep_x + pad_side
         min_preview_w = 140
-        if (strip_w - (sep_x + pad_side)) < min_preview_w:
+        if (strip_w - (preview_x0 + pad_side)) < min_preview_w:
             if show_div:
-                left_px = max(160, strip_w - (14 + pad_side + min_preview_w))
-                sep_x = left_px + 14
+                left_px = max(180, strip_w - (10 + 4 + 1 + pad_after + pad_side + min_preview_w))
+                sep_x = 10 + left_px + 4
+                preview_x0 = sep_x + 1 + pad_after
             else:
-                left_px = max(160, strip_w - (10 + pad_side + min_preview_w))
+                left_px = max(180, strip_w - (10 + pad_side + pad_side + min_preview_w))
                 sep_x = 10 + left_px
+                preview_x0 = sep_x + pad_side
 
         geom_changed = (
             slot.get("_geom_w") != strip_w
@@ -1561,15 +1693,30 @@ class VtpVirtualGridMixin:
         has_media = item.get("_has_media", False)
 
         icon = "\U0001F4C2" if has_media else "\U0001F4C1"
-        slot["name_label"].configure(text=f"{icon}  {file_name}",
-                                     fg="#dbdee1" if has_media else "#7f848a")
+        icon_fg = "#dbdee1" if has_media else "#7f848a"
+        try:
+            if slot.get("icon_label") is not None:
+                slot["icon_label"].configure(text=icon, fg=icon_fg)
+                slot["name_label"].configure(text=file_name, fg=icon_fg)
+            else:
+                # Legacy pool slots (icon embedded in name)
+                slot["name_label"].configure(text=f"{icon}  {file_name}", fg=icon_fg)
+        except Exception:
+            slot["name_label"].configure(text=f"{icon}  {file_name}", fg=icon_fg)
 
         row_gap = int(getattr(self, "vg_wide_label_row_gap", 4))
         tbg = getattr(self, "vg_wide_title_bottom_gap", None)
         title_pad = int(tbg) if tbg is not None else row_gap
         try:
-            slot["name_label"].pack_configure(pady=(0, title_pad))
-            slot["stats_label"].pack_configure(pady=(0, row_gap))
+            title_row = slot.get("title_row")
+            if title_row is not None:
+                title_row.pack_configure(pady=(0, title_pad))
+            else:
+                slot["name_label"].pack_configure(pady=(0, title_pad))
+            if slot.get("stats_row") is not None:
+                slot["stats_row"].pack_configure(pady=(0, row_gap))
+            elif slot.get("stats_label") is not None:
+                slot["stats_label"].pack_configure(pady=(0, row_gap))
             slot["kw_label"].pack_configure(pady=(0, row_gap))
         except Exception:
             pass
@@ -1577,12 +1724,28 @@ class VtpVirtualGridMixin:
         stats = item.get("_stats", {})
 
         if self._wide_folder_stats_nonempty(stats):
-            parts = []
-            vc = stats.get("video_count", 0)
-            ic_count = stats.get("image_count", 0)
-            if vc or ic_count:
-                parts.append(f"Videos: {vc}   Images: {ic_count}")
-            slot["stats_label"].configure(text="\n".join(parts) if parts else "")
+            vc = int(stats.get("video_count", 0) or 0)
+            ic_count = int(stats.get("image_count", 0) or 0)
+            v_lbl = slot.get("stats_videos_label") or slot.get("stats_label")
+            i_lbl = slot.get("stats_images_label")
+            videos_color = getattr(self, "wide_folder_videos_color", "#5dade2")
+            images_color = getattr(self, "wide_folder_images_color", "#7dcea0")
+            show_counts = bool(vc or ic_count)
+            if v_lbl is not None:
+                if i_lbl is None:
+                    v_lbl.configure(
+                        text=f"Videos: {vc}   Images: {ic_count}" if show_counts else "",
+                    )
+                else:
+                    v_lbl.configure(
+                        text=f"Videos: {vc}" if show_counts else "",
+                        fg=videos_color,
+                    )
+            if i_lbl is not None:
+                i_lbl.configure(
+                    text=f"Images: {ic_count}" if show_counts else "",
+                    fg=images_color,
+                )
 
             kw_body = (stats.get("keywords") or "").strip()
             extra_kw = int(stats.get("extra_keyword_count") or 0)
@@ -1612,7 +1775,13 @@ class VtpVirtualGridMixin:
             else:
                 rc.pack_forget()
         else:
-            slot["stats_label"].configure(text="")
+            for key in ("stats_label", "stats_videos_label", "stats_images_label"):
+                lbl = slot.get(key)
+                if lbl is not None:
+                    try:
+                        lbl.configure(text="")
+                    except Exception:
+                        pass
             slot["kw_label"].configure(text="")
             slot["rating_canvas"].pack_forget()
 
@@ -1624,7 +1793,7 @@ class VtpVirtualGridMixin:
             except Exception:
                 pass
             try:
-                slot["name_label"].configure(wraplength=max(1, left_px - 10))
+                slot["name_label"].configure(wraplength=max(1, left_px - 48))
                 slot["stats_label"].configure(wraplength=max(1, left_px - 10))
                 slot["kw_label"].configure(wraplength=max(1, left_px - 10))
             except Exception:
@@ -1650,14 +1819,11 @@ class VtpVirtualGridMixin:
                 # Preview area: between separator and right edge, vertically inside the strip.
                 top_margin = int(getattr(self, "vg_wide_preview_margin_y", _WIDE_PREVIEW_MARGIN_Y))
                 bottom_margin = top_margin
-                preview_x = sep_x + pad_side
+                preview_x = preview_x0
                 preview_y = top_margin
                 preview_w = max(10, strip_w - preview_x - pad_side)
                 preview_h = max(10, strip_h - top_margin - bottom_margin)
 
-                # Keep padding from the wide-strip edges via preview_x/preview_y.
-                # Inner padding reduces the preview size inside the available area.
-                # This is what the user perceives as "thumbs are too big".
                 inner_pad = int(getattr(self, "vg_wide_preview_inner_pad", _WIDE_PREVIEW_INNER_PAD))
                 target_w = max(10, preview_w - 2 * inner_pad)
                 target_h = max(10, preview_h - 2 * inner_pad)
@@ -1673,16 +1839,38 @@ class VtpVirtualGridMixin:
                         int(card_bg_hex[3:5], 16),
                         int(card_bg_hex[5:7], 16),
                     )
-                resized = self._vg_flatten_rgba_for_tk(
-                    ImageOps.contain(cached._light_image, (target_w, target_h)),
-                    bg_rgb,
-                )
+
+                src_img = cached._light_image
+                sw, sh = src_img.size
+                # Width-fill so every row's slots share the same column rhythm; keep height
+                # inside the padded preview box (stable vertical padding across rows).
+                scale = target_w / max(1, sw)
+                dw = max(1, int(round(sw * scale)))
+                dh = max(1, int(round(sh * scale)))
+                if dh > target_h:
+                    scale = target_h / max(1, sh)
+                    dw = max(1, int(round(sw * scale)))
+                    dh = max(1, int(round(sh * scale)))
+                try:
+                    scaled = src_img.resize((dw, dh), Image.LANCZOS)
+                except Exception:
+                    scaled = ImageOps.contain(src_img, (target_w, target_h))
+
+                # Display-time edge fade (always at preview edges, never mid-row)
+                fade_px = int(getattr(self, "wide_folder_edge_fade_px", 56) or 0)
+                fade_strength = float(getattr(self, "wide_folder_edge_fade_strength", 0.5) or 0.5)
+                rgba = scaled.convert("RGBA")
+                if fade_px > 0 and fade_strength > 0:
+                    rgba = self._wide_apply_edge_fade(
+                        rgba, fade_px, sides=("left", "right"), strength=fade_strength
+                    )
+                resized = self._vg_flatten_rgba_for_tk(rgba, bg_rgb)
 
                 round_on = getattr(self, "vg_wide_round_preview_corners", True)
                 rr_user = int(getattr(self, "vg_wide_preview_corner_radius", 0))
                 if round_on and rr_user <= 0:
-                    rr_draw = int(min(target_w, target_h) * 0.12)
-                    rr_draw = max(6, min(18, rr_draw))
+                    rr_draw = int(min(resized.size) * 0.08)
+                    rr_draw = max(6, min(16, rr_draw))
                 elif round_on:
                     rr_draw = max(1, rr_user)
                 else:
@@ -1691,17 +1879,20 @@ class VtpVirtualGridMixin:
                 rw, rh = resized.size
                 max_r = max(1, min(rw, rh) // 2)
                 rr_eff = min(rr_draw, max_r) if round_on and rr_draw > 0 else 0
+                align = str(getattr(self, "vg_wide_preview_align", "center") or "center").lower()
 
-                # Bust cache when tuning changes (rr_user kept even if clamped to rr_eff).
-                cache_key = (file_path, target_w, target_h, rr_user, rr_eff, round_on)
+                cache_key = (
+                    file_path, target_w, target_h, dw, dh,
+                    rr_user, rr_eff, round_on, fade_px, fade_strength, align,
+                )
                 if slot.get("_wide_photo_key") == cache_key and slot.get("photo") is not None:
                     photo = slot["photo"]
                 else:
                     try:
                         from PIL import ImageDraw
-                        rgba = resized.convert("RGBA")
+                        rgba2 = resized.convert("RGBA")
                         if round_on and rr_eff > 0:
-                            mask = Image.new("L", rgba.size, 0)
+                            mask = Image.new("L", rgba2.size, 0)
                             draw = ImageDraw.Draw(mask)
                             x1, y1 = rw - 1, rh - 1
                             draw.rounded_rectangle(
@@ -1709,15 +1900,15 @@ class VtpVirtualGridMixin:
                                 radius=int(rr_eff),
                                 fill=255,
                             )
-                            bg = Image.new("RGBA", rgba.size, (bg_rgb[0], bg_rgb[1], bg_rgb[2], 255))
-                            bg.paste(rgba, (0, 0), mask)
+                            bg = Image.new("RGBA", rgba2.size, (bg_rgb[0], bg_rgb[1], bg_rgb[2], 255))
+                            bg.paste(rgba2, (0, 0), mask)
                             rounded = bg.convert("RGB")
                         else:
-                            bg = Image.new("RGBA", rgba.size, (bg_rgb[0], bg_rgb[1], bg_rgb[2], 255))
-                            if rgba.mode == "RGBA":
-                                bg.paste(rgba, (0, 0), rgba)
+                            bg = Image.new("RGBA", rgba2.size, (bg_rgb[0], bg_rgb[1], bg_rgb[2], 255))
+                            if rgba2.mode == "RGBA":
+                                bg.paste(rgba2, (0, 0), rgba2)
                             else:
-                                bg.paste(rgba, (0, 0))
+                                bg.paste(rgba2, (0, 0))
                             rounded = bg.convert("RGB")
 
                         photo = ImageTk.PhotoImage(rounded)
@@ -1732,24 +1923,39 @@ class VtpVirtualGridMixin:
                             photo = ImageTk.PhotoImage(
                                 self._vg_flatten_rgba_for_tk(redo, bg_rgb))
                     slot["_wide_photo_key"] = cache_key
+                    slot["_wide_photo_size"] = (rw, rh)
         img_c = slot["img_canvas"]
 
-        # Place the preview canvas itself (so the image is centered in the right section).
+        # Place the preview canvas itself (right section of the card).
         top_margin = int(getattr(self, "vg_wide_preview_margin_y", _WIDE_PREVIEW_MARGIN_Y))
         bottom_margin = top_margin
-        preview_x = sep_x + pad_side
+        preview_x = preview_x0
         preview_y = top_margin
         preview_w = max(10, strip_w - preview_x - pad_side)
         preview_h = max(10, strip_h - top_margin - bottom_margin)
 
         img_c.place(x=preview_x, y=preview_y, width=preview_w, height=preview_h)
 
-        # Center the image within the preview canvas.
+        # Left-align strip inside preview; vertically center leftover pad.
         if photo:
-            img_c.itemconfig("wideimg", image=photo)
+            img_c.itemconfig("wideimg", image=photo, anchor="nw")
             img_c.image = photo
             slot["photo"] = photo
-            img_c.coords("wideimg", preview_w // 2, preview_h // 2)
+            pw, ph = slot.get("_wide_photo_size") or (0, 0)
+            if pw <= 0 or ph <= 0:
+                try:
+                    pw, ph = photo.width(), photo.height()
+                except Exception:
+                    pw = ph = 0
+            inner_pad = int(getattr(self, "vg_wide_preview_inner_pad", _WIDE_PREVIEW_INNER_PAD))
+            align = str(getattr(self, "vg_wide_preview_align", "center") or "center").lower()
+            if align == "center":
+                ix = max(inner_pad, (preview_w - pw) // 2)
+            else:
+                ix = inner_pad
+            iy = max(inner_pad, (preview_h - ph) // 2)
+            img_c.coords("wideimg", ix, iy)
+            slot["_wide_img_pos"] = (ix, iy)
         else:
             img_c.itemconfig("wideimg", image="")
             img_c.image = None
@@ -1779,12 +1985,36 @@ class VtpVirtualGridMixin:
         if sc is not None:
             self.bind_canvas_events(sc, file_path, file_name, True, index=data_idx)
 
-        for w in (slot["name_label"], slot["stats_label"], slot["kw_label"],
-                  slot["left_panel"]):
+        for w in (slot["name_label"], slot.get("icon_label"), slot.get("title_row"),
+                  slot.get("stats_row"), slot.get("stats_videos_label"),
+                  slot.get("stats_images_label"), slot["stats_label"],
+                  slot["kw_label"], slot["left_panel"]):
+            if w is None:
+                continue
             w.bind("<Button-1>",
                    lambda e, p=file_path, s=strip, i=data_idx: self.on_thumb_click(e, p, s, i))
             w.bind("<Double-Button-1>",
                    lambda e, p=file_path: self.display_thumbnails(p))
+
+        def _wide_hover_enter(_e=None, s=slot):
+            if s.get("_hover"):
+                return
+            s["_hover"] = True
+            self._vg_redraw_wide_card(s)
+
+        def _wide_hover_leave(_e=None, s=slot):
+            if not s.get("_hover"):
+                return
+            s["_hover"] = False
+            self._vg_redraw_wide_card(s)
+
+        # Bind only on the outer card shell so moving between left/preview children
+        # does not flicker hover off/on.
+        try:
+            slot["frame"].bind("<Enter>", _wide_hover_enter, add="+")
+            slot["frame"].bind("<Leave>", _wide_hover_leave, add="+")
+        except Exception:
+            pass
 
         self.thumbnail_labels[file_path] = {
             "row": data_idx, "col": 0, "index": data_idx,

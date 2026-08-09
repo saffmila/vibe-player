@@ -282,6 +282,17 @@ class VtpPreferencesMixin:
                     self.search_results_page_size = 250
                 # New additions
                 self.numwidefolders_in_col = settings.get("numwidefolders_in_col", 2)  # Default to 2
+                try:
+                    self.vg_wide_preview_count = max(
+                        3, min(10, int(settings.get("vg_wide_preview_count", 5)))
+                    )
+                except (TypeError, ValueError):
+                    self.vg_wide_preview_count = 5
+                if hasattr(self, "wide_folder_preview_count_var"):
+                    try:
+                        self.wide_folder_preview_count_var.set(self.vg_wide_preview_count)
+                    except Exception:
+                        pass
                 # 1. Load value under the new settings key
                 is_wide = settings.get("wide_folders_check_var", False)  # Default False (Standard)
                 
@@ -295,6 +306,28 @@ class VtpPreferencesMixin:
                 # Font size preferences
                 self.thumbFontSize = settings.get("thumb_font_size", self.thumbFontSize)
                 self.base_font_size = settings.get("tree_font_size", self.base_font_size)
+                try:
+                    self.vg_wide_title_font_size = max(
+                        9, min(36, int(settings.get("vg_wide_title_font_size", 12)))
+                    )
+                except (TypeError, ValueError):
+                    self.vg_wide_title_font_size = 12
+                try:
+                    self.vg_wide_stats_font_size = max(
+                        8, min(28, int(settings.get("vg_wide_stats_font_size", 9)))
+                    )
+                except (TypeError, ValueError):
+                    self.vg_wide_stats_font_size = 9
+                try:
+                    self.wide_folder_gap = max(
+                        0, min(40, int(settings.get("wide_folder_gap", 15)))
+                    )
+                except (TypeError, ValueError):
+                    self.wide_folder_gap = 15
+                try:
+                    self.wide_folder_stats_font = ctk.CTkFont(size=self.vg_wide_stats_font_size)
+                except Exception:
+                    pass
                 self.video_show_hud = settings.get("video_show_hud", True)
                 self.gpu_upscale = settings.get("gpu_upscale", False)
                 self.vlc_enable_postproc = settings.get("vlc_enable_postproc", False)

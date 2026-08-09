@@ -1212,6 +1212,20 @@ def build_view_menu(app):
                                                  command=lambda n=num: app.set_wide_folder_columns(n))
     view_menu.add_cascade(label="Wide Folder Columns", menu=wide_folder_columns_menu)
 
+    if not hasattr(app, "wide_folder_preview_count_var"):
+        app.wide_folder_preview_count_var = tk.IntVar(
+            value=int(getattr(app, "vg_wide_preview_count", 5) or 5)
+        )
+    wide_folder_slots_menu = create_menu(app, view_menu)
+    for num in (3, 4, 5, 6, 7, 8):
+        wide_folder_slots_menu.add_radiobutton(
+            label=f"{num} Slots",
+            variable=app.wide_folder_preview_count_var,
+            value=num,
+            command=lambda n=num: app.set_wide_folder_preview_count(n),
+        )
+    view_menu.add_cascade(label="Wide Folder Preview Slots", menu=wide_folder_slots_menu)
+
     # --- "Show for files" Submenu ---
     show_for_files_menu = create_menu(app, view_menu)
     view_menu.add_cascade(label="Show for files by", menu=show_for_files_menu)
@@ -2584,21 +2598,111 @@ def create_preferences_window(app):
     interface_frame = ctk.CTkFrame(interface_section)
     interface_frame.pack(fill="x", pady=10)
 
-    ctk.CTkLabel(interface_frame, text="Player Interface Settings", font=pref_heading_font).pack(anchor="w", padx=10)
+    ctk.CTkLabel(interface_frame, text="Player Interface Settings", font=pref_heading_font).pack(
+        anchor="w", padx=10, pady=(8, 4)
+    )
 
-    # Tree font label + slider
-    ctk.CTkLabel(interface_frame, text="Left panel font size").pack(anchor="w", padx=10, pady=(10, 0))
-    tree_slider = ctk.CTkSlider(interface_frame, from_=8, to=30, number_of_steps=22)
-    tree_slider.set(app.base_font_size)
-    tree_slider.configure(command=lambda val: app.set_tree_font_size(int(float(val))))
-    tree_slider.pack(fill="x", padx=10)
+    def _pref_spinner_row(parent, label, value, lo, hi, on_change):
+        """Label + − / value / + spinner row (shows numeric value)."""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=(6, 2))
+        ctk.CTkLabel(row, text=label, anchor="w").pack(side="left", fill="x", expand=True)
 
-    # Thumb font label + slider
-    ctk.CTkLabel(interface_frame, text="Right panel font size").pack(anchor="w", padx=10, pady=(10, 0))
-    thumb_slider = ctk.CTkSlider(interface_frame, from_=8, to=20, number_of_steps=12)
-    thumb_slider.set(app.thumbFontSize)
-    thumb_slider.configure(command=lambda val: app.set_thumb_font_size(int(float(val))))
-    thumb_slider.pack(fill="x", padx=10)
+        ctrl = ctk.CTkFrame(row, fg_color="transparent")
+        ctrl.pack(side="right")
+        var = tk.StringVar(value=str(int(value)))
+
+        def _apply(_event=None):
+            try:
+                v = int(float(var.get().strip()))
+            except (TypeError, ValueError):
+                v = int(value)
+            v = max(int(lo), min(int(hi), v))
+            var.set(str(v))
+            try:
+                on_change(v)
+            except Exception:
+                logging.debug("pref spinner on_change failed", exc_info=True)
+
+        def _bump(delta):
+            try:
+                cur = int(float(var.get().strip()))
+            except (TypeError, ValueError):
+                cur = int(lo)
+            var.set(str(max(int(lo), min(int(hi), cur + int(delta)))))
+            _apply()
+
+        ctk.CTkButton(
+            ctrl, text="−", width=30, height=28, command=lambda: _bump(-1)
+        ).pack(side="left", padx=(0, 3))
+        entry = ctk.CTkEntry(ctrl, textvariable=var, width=56, justify="center", height=28)
+        entry.pack(side="left")
+        entry.bind("<Return>", _apply)
+        entry.bind("<FocusOut>", _apply)
+        ctk.CTkButton(
+            ctrl, text="+", width=30, height=28, command=lambda: _bump(1)
+        ).pack(side="left", padx=(3, 0))
+        return var
+
+    _pref_spinner_row(
+        interface_frame,
+        "Left panel font size",
+        app.base_font_size,
+        8,
+        30,
+        app.set_tree_font_size,
+    )
+    _pref_spinner_row(
+        interface_frame,
+        "Right panel font size",
+        app.thumbFontSize,
+        7,
+        20,
+        app.set_thumb_font_size,
+    )
+
+    # --- Wide folders (visually separated) ---
+    wide_block = ctk.CTkFrame(interface_frame, fg_color=("gray85", "gray22"), corner_radius=8)
+    wide_block.pack(fill="x", padx=10, pady=(14, 10))
+    ctk.CTkLabel(
+        wide_block,
+        text="Wide folders",
+        font=pref_heading_font,
+        anchor="w",
+    ).pack(anchor="w", padx=12, pady=(10, 2))
+    ctk.CTkLabel(
+        wide_block,
+        text="Title, description and thumbnail strip spacing",
+        text_color=("gray40", "gray65"),
+        anchor="w",
+        font=("Helvetica", 12),
+    ).pack(anchor="w", padx=12, pady=(0, 6))
+
+    _pref_spinner_row(
+        wide_block,
+        "Title size",
+        int(getattr(app, "vg_wide_title_font_size", 12) or 12),
+        10,
+        28,
+        app.set_wide_folder_title_font_size,
+    )
+    _pref_spinner_row(
+        wide_block,
+        "Description size",
+        int(getattr(app, "vg_wide_stats_font_size", 9) or 9),
+        8,
+        20,
+        app.set_wide_folder_stats_font_size,
+    )
+    _pref_spinner_row(
+        wide_block,
+        "Horizontal image spacing (px)",
+        int(getattr(app, "wide_folder_gap", 15) or 15),
+        0,
+        40,
+        app.set_wide_folder_gap,
+    )
+    ctk.CTkLabel(wide_block, text="").pack(pady=4)  # bottom padding inside card
 
     # === FILE OPERATIONS (collapsible) ===
     advanced_outer = ctk.CTkFrame(file_ops_section)
@@ -2855,9 +2959,13 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
         "audio_device": audio_device_id,  # Save device ID
         "thumbnail_time": app.thumbnail_time_var.get() / 100,  # Store as a percentage (0.0 to 1.0)
         "numwidefolders_in_col": app.numwidefolders_in_col,
+        "vg_wide_preview_count": int(getattr(app, "vg_wide_preview_count", 5) or 5),
         "wide_folders_check_var": app.wide_folders_check_var.get(),
         "widefolder_size": f"{app.widefolder_size[0]}x{app.widefolder_size[1]}",
         "thumb_font_size": app.thumbFontSize,
+        "vg_wide_title_font_size": int(getattr(app, "vg_wide_title_font_size", 12) or 12),
+        "vg_wide_stats_font_size": int(getattr(app, "vg_wide_stats_font_size", 9) or 9),
+        "wide_folder_gap": int(getattr(app, "wide_folder_gap", 15) or 15),
         "tree_font_size": app.base_font_size,
         "info_panel_expanded": app.info_panel_container.expanded if app.info_panel_container else True,
         "timeline_widget_expanded": app.timeline_container.expanded if app.timeline_container else True,
@@ -2986,8 +3094,32 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
     app.hardware_decoding = preferences["hardware_decoding"]
     app.audio_device = preferences["audio_device"]  # Update audio_device in app
     app.numwidefolders_in_col = preferences["numwidefolders_in_col"]
+    _slots = int(preferences.get("vg_wide_preview_count", getattr(app, "vg_wide_preview_count", 5) or 5))
+    app.vg_wide_preview_count = max(3, min(10, _slots))
+    if hasattr(app, "wide_folder_preview_count_var"):
+        try:
+            app.wide_folder_preview_count_var.set(app.vg_wide_preview_count)
+        except Exception:
+            pass
     app.wide_folders_check_var.set(preferences["wide_folders_check_var"])
     app.widefolder_size = app.parse_thumbnail_size(preferences["widefolder_size"])  # Parse new tuple
+    try:
+        app.vg_wide_title_font_size = max(
+            9, min(36, int(preferences.get("vg_wide_title_font_size", 12)))
+        )
+        app.vg_wide_stats_font_size = max(
+            8, min(28, int(preferences.get("vg_wide_stats_font_size", 9)))
+        )
+        try:
+            app.wide_folder_gap = max(
+                0, min(40, int(preferences.get("wide_folder_gap", getattr(app, "wide_folder_gap", 15))))
+            )
+        except (TypeError, ValueError):
+            app.wide_folder_gap = 15
+        if hasattr(app, "_vg_apply_wide_label_fonts"):
+            app._vg_apply_wide_label_fonts()
+    except (TypeError, ValueError):
+        pass
     app.thumbnail_time = preferences["thumbnail_time"]
     app.search_results_page_size = int(preferences.get("search_results_page_size", 250))
     if getattr(app, "search_results_active", False) and hasattr(app, "_update_search_load_more_action"):

@@ -19,7 +19,7 @@ import tkinter.ttk as ttk
 from tkinter import messagebox
 import tkinterdnd2 as dnd
 
-from PIL import Image, ImageDraw, ImageOps, ImageTk
+from PIL import Image, ImageChops, ImageDraw, ImageOps, ImageTk
 
 from file_operations import *
 from gui_elements import (
@@ -1754,6 +1754,48 @@ class VtpGridMixin:
         if hasattr(self, "save_preferences"):
             self.save_preferences()
         self.display_thumbnails(self.current_directory, preserve_scroll=True)  # Refresh the display
+
+    def set_wide_folder_preview_count(self, num_slots):
+        """Fixed number of uniform preview slots (with placeholders) in each wide strip."""
+        n = max(3, min(10, int(num_slots)))
+        self.vg_wide_preview_count = n
+        if hasattr(self, "wide_folder_preview_count_var"):
+            try:
+                self.wide_folder_preview_count_var.set(n)
+            except Exception:
+                pass
+        if hasattr(self, "save_preferences"):
+            self.save_preferences()
+        # Drop in-memory wide strips so they rebuild with the new slot count
+        try:
+            if getattr(self, "memory_cache", None) is not None:
+                self.memory_cache.clear()
+        except Exception:
+            pass
+        try:
+            self._vg_wide_built_mtime.clear()
+        except Exception:
+            pass
+        if getattr(self, "current_directory", None):
+            self.display_thumbnails(self.current_directory, preserve_scroll=True)
+
+    def set_wide_folder_gap(self, gap_px: int):
+        """Horizontal spacing between tiles in the wide-folder filmstrip."""
+        g = max(0, min(40, int(gap_px)))
+        if int(getattr(self, "wide_folder_gap", -1)) == g:
+            return
+        self.wide_folder_gap = g
+        try:
+            if getattr(self, "memory_cache", None) is not None:
+                self.memory_cache.clear()
+        except Exception:
+            pass
+        try:
+            self._vg_wide_built_mtime.clear()
+        except Exception:
+            pass
+        if getattr(self, "current_directory", None):
+            self.display_thumbnails(self.current_directory, preserve_scroll=True)
     
     def update_load_time(self, cache_hits, cache_misses, from_cache):
         """Display and update load timing information."""
@@ -5315,26 +5357,199 @@ class VtpGridMixin:
         return collected
 
 
+    @staticmethod
+    def _wide_trim_letterbox(pil_img, tol: int = 28):
+        """Crop baked-in letterbox/pillarbox from grid thumbnails (grey/black pad)."""
+        rgb = pil_img.convert("RGB")
+        w, h = rgb.size
+        if w < 8 or h < 8:
+            return rgb
+
+        px = rgb.load()
+        # Sample corners — JPEG pad rarely stays exactly (71,71,71)
+        corners = (
+            px[0, 0],
+            px[w - 1, 0],
+            px[0, h - 1],
+            px[w - 1, h - 1],
+            px[1, 1],
+            px[w - 2, 1],
+        )
+        bg_candidates = list(dict.fromkeys(
+            list(corners) + [(71, 71, 71), (0, 0, 0), (45, 45, 45), (42, 58, 74)]
+        ))
+
+        best_bbox = None
+        best_area = None
+        full_area = w * h
+        for bg in bg_candidates:
+            diff = ImageChops.difference(rgb, Image.new("RGB", rgb.size, bg))
+            bands = diff.split()
+            mask = bands[0]
+            for b in bands[1:]:
+                mask = ImageChops.lighter(mask, b)
+            mask = mask.point(lambda p, t=tol: 255 if p > t else 0)
+            bbox = mask.getbbox()
+            if not bbox:
+                continue
+            bw, bh = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            area = bw * bh
+            # Must keep meaningful content; prefer tighter crop (real pad color)
+            if area < full_area * 0.08 or area > full_area * 0.995:
+                continue
+            if best_area is None or area < best_area:
+                best_bbox = bbox
+                best_area = area
+
+        if best_bbox is None or best_area is None:
+            return rgb
+
+        l, t, r, b = best_bbox
+        removed = full_area - best_area
+        if removed < full_area * 0.03:
+            return rgb
+
+        l = min(max(0, l + 1), w - 2)
+        t = min(max(0, t + 1), h - 2)
+        r = max(l + 2, min(w, r - 1))
+        b = max(t + 2, min(h, b - 1))
+        return rgb.crop((l, t, r, b))
+
+    @staticmethod
+    def _wide_cover_tile(pil_img, tile_w: int, tile_h: int) -> Image.Image:
+        """Cover-crop into a fixed tile (fills slot, no letterbox)."""
+        tile_w = max(8, int(tile_w))
+        tile_h = max(8, int(tile_h))
+        src = pil_img.convert("RGB")
+        return ImageOps.fit(src, (tile_w, tile_h), method=Image.LANCZOS, centering=(0.5, 0.5))
+
+    @staticmethod
+    def _wide_apply_edge_fade(
+        wide_rgba: Image.Image,
+        fade_px: int,
+        sides=("right",),
+        strength: float = 1.0,
+    ) -> Image.Image:
+        """Soft alpha fade on strip edges (scroll affordance + blend into card)."""
+        if fade_px <= 0 or strength <= 0:
+            return wide_rgba
+        img = wide_rgba.convert("RGBA")
+        w, h = img.size
+        if w < 16 or h < 8:
+            return img
+        alpha = img.split()[3]
+        fade_px = max(1, min(int(fade_px), w // 3))
+        strength = max(0.0, min(1.0, float(strength)))
+
+        def _fade_vals(n: int, *, reverse: bool) -> list[int]:
+            # strength 1 → full fade to 0; strength 0.5 → only halfway transparent
+            out = []
+            denom = float(max(1, n - 1))
+            for i in range(n):
+                t = i / denom
+                if reverse:
+                    t = 1.0 - t
+                out.append(int(255 * (1.0 - strength * t)))
+            return out
+
+        if "right" in sides:
+            grad = Image.new("L", (fade_px, 1))
+            grad.putdata(_fade_vals(fade_px, reverse=False))
+            grad = grad.resize((fade_px, h), Image.BILINEAR)
+            region = alpha.crop((w - fade_px, 0, w, h))
+            alpha.paste(ImageChops.multiply(region, grad), (w - fade_px, 0))
+
+        if "left" in sides:
+            left_fade = fade_px if "right" in sides else max(1, min(fade_px // 3, w // 8))
+            left_fade = max(1, min(int(left_fade), w // 3))
+            grad = Image.new("L", (left_fade, 1))
+            grad.putdata(_fade_vals(left_fade, reverse=True))
+            grad = grad.resize((left_fade, h), Image.BILINEAR)
+            region = alpha.crop((0, 0, left_fade, h))
+            alpha.paste(ImageChops.multiply(region, grad), (0, 0))
+
+        img.putalpha(alpha)
+        return img
+
+    @staticmethod
+    def _wide_placeholder_tile(tile_w: int, tile_h: int, slot_index: int, radius: int) -> Image.Image:
+        """Quiet dark slot with a muted index — fills missing previews so rows align."""
+        tile_w = max(8, int(tile_w))
+        tile_h = max(8, int(tile_h))
+        radius = max(2, min(int(radius), tile_w // 2, tile_h // 2))
+        img = Image.new("RGBA", (tile_w, tile_h), (0, 0, 0, 255))
+        draw = ImageDraw.Draw(img)
+        # Soft inner rim (reads as empty slot, not a broken image)
+        inset = max(2, radius // 3)
+        draw.rounded_rectangle(
+            (inset, inset, tile_w - 1 - inset, tile_h - 1 - inset),
+            radius=max(2, radius - 2),
+            outline=(40, 44, 50, 255),
+            width=1,
+        )
+        label = str(int(slot_index) + 1)
+        font_size = max(14, min(tile_h // 4, 36))
+        font = None
+        for name in ("segoeui.ttf", "arial.ttf", "DejaVuSans.ttf"):
+            try:
+                from PIL import ImageFont
+                font = ImageFont.truetype(name, font_size)
+                break
+            except Exception:
+                continue
+        if font is None:
+            try:
+                from PIL import ImageFont
+                font = ImageFont.load_default()
+            except Exception:
+                font = None
+        fill = (70, 78, 88, 255)
+        if font is not None:
+            try:
+                bbox = draw.textbbox((0, 0), label, font=font)
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            except Exception:
+                tw, th = font_size, font_size
+            draw.text(
+                ((tile_w - tw) / 2, (tile_h - th) / 2 - 2),
+                label,
+                fill=fill,
+                font=font,
+            )
+        else:
+            draw.text((tile_w // 2 - 4, tile_h // 2 - 6), label, fill=fill)
+        return img
+
     def create_wide_folder_thumbnail(self, folder_path, folderthumbnail_size=None, num_thumbnails=5):
         """
-        Generates a wide composite thumbnail for folders using global styling variables for gaps and rounded corners.
+        Generates a wide composite thumbnail for folders.
+
+        Uses a fixed number of uniform cover-cropped slots. Missing previews become
+        quiet numbered placeholders so every wide-folder row aligns the same way.
+        Edge fade is applied at display time (not baked into this PNG).
         """
         target_size = folderthumbnail_size or self.widefolder_size
         target_height = target_size[1]  # height drives layout
-        gap_val = getattr(self, "wide_folder_gap", 18)
-        radius_val = getattr(self, "wide_folder_innerThumbRadius", 10)
+        gap_val = int(getattr(self, "wide_folder_gap", 10))
+        radius_val = int(getattr(self, "wide_folder_innerThumbRadius", 10))
+        cover = bool(getattr(self, "wide_folder_cover_tiles", True))
+        fill_slots = bool(getattr(self, "wide_folder_fill_slots", True))
+        # Uniform slots by default (aligned columns across rows)
+        tile_aspect = float(getattr(self, "wide_folder_tile_aspect", 1.35) or 1.35)
+        if tile_aspect < 0.2:
+            tile_aspect = 1.35
+        num_slots = max(1, int(num_thumbnails or 5))
 
         cache_dir_path, _ = get_cache_dir_path(folder_path, self.thumbnail_cache_path)
         os.makedirs(cache_dir_path, exist_ok=True)
-        
-        
-        
-        # Inner thumb radius (included in cache key for invalidation)
-        RADIUS = max(12, min(radius_val, max(10, target_height // 4)))
+
+        RADIUS = max(4, min(radius_val, max(4, target_height // 5)))
+        aspect_key = int(round(tile_aspect * 100))
+        style = f"slots{num_slots}_c{int(cover)}_fill{int(fill_slots)}_a{aspect_key}_u1_blk"
 
         wide_thumbnail_path = os.path.join(
             cache_dir_path,
-            f"!folder_wide_{os.path.basename(folder_path)}_h{target_height}_g{gap_val}_r{RADIUS}.png",
+            f"!folder_wide_{os.path.basename(folder_path)}_h{target_height}_g{gap_val}_r{RADIUS}_{style}.png",
         )
 
         folder_mtime = self._wide_strip_dir_signature(folder_path)
@@ -5345,15 +5560,10 @@ class VtpGridMixin:
                     img.load()
                     stored_sources = img.info.get("vtp_sources")
                     stored_mtime = img.info.get("vtp_mtime")
-                # Only trust the cached strip when (a) every file it was composed from
-                # still exists (so deleting media drops out) and (b) the folder has not
-                # changed since (so newly added files get composited in). Legacy caches
-                # lack this metadata and are regenerated once to attach it.
-                if stored_sources:
+                if stored_sources is not None:
                     cached_sources = [p for p in stored_sources.split("\n") if p]
-                    sources_ok = bool(cached_sources) and all(
-                        os.path.exists(p) for p in cached_sources
-                    )
+                    # Placeholders-only strip still has empty sources string → treat as ok
+                    sources_ok = all(os.path.exists(p) for p in cached_sources)
                     mtime_ok = (
                         folder_mtime is None
                         or (stored_mtime is not None and stored_mtime == repr(folder_mtime))
@@ -5363,14 +5573,12 @@ class VtpGridMixin:
             except Exception:
                 pass
 
-        source_file_paths = self._get_folder_content_for_preview(folder_path, num_thumbnails)
-        if not source_file_paths:
+        source_file_paths = self._get_folder_content_for_preview(folder_path, num_slots)
+        if not source_file_paths and not fill_slots:
             return None
 
         thumbnails = []
-        # Use the SAME size, capture time and DB as the regular grid thumbnails so the
-        # filmstrip reuses the exact cached thumbnail (same frame / same cache file)
-        # instead of generating its own at a different timestamp.
+        used_sources = []
         thumbnail_size = self.thumbnail_size
 
         for file_path in source_file_paths:
@@ -5388,48 +5596,67 @@ class VtpGridMixin:
                     file_path, thumbnail_size, cache_enabled=self.cache_enabled,
                     database=self.database, cache_dir=self.thumbnail_cache_path
                 )
-            
+
             if thumb:
                 thumbnails.append(thumb)
+                used_sources.append(file_path)
+            if len(thumbnails) >= num_slots:
+                break
 
-        if not thumbnails:
+        if not thumbnails and not fill_slots:
+            return None
+        if not thumbnails and fill_slots and not source_file_paths:
+            # Truly empty folder — let empty-folder UI handle it
             return None
 
-        GAP = gap_val
+        GAP = max(0, gap_val)
+        tile_w = max(24, int(round(target_height * tile_aspect)))
+        slot_count = num_slots if fill_slots else max(1, len(thumbnails))
 
-        total_width = sum(
-            int(target_height * (thumb._light_image.width / thumb._light_image.height))
-            for thumb in thumbnails
-        ) + (len(thumbnails) - 1) * GAP
+        prepared = []
+        for i in range(slot_count):
+            if i < len(thumbnails):
+                pil_img = thumbnails[i]._light_image.convert("RGB")
+                if cover:
+                    src = self._wide_trim_letterbox(pil_img)
+                    prepared.append(
+                        self._wide_cover_tile(src, tile_w, target_height).convert("RGBA")
+                    )
+                else:
+                    prepared.append(
+                        ImageOps.fit(
+                            pil_img, (tile_w, target_height), method=Image.LANCZOS
+                        ).convert("RGBA")
+                    )
+            else:
+                prepared.append(
+                    self._wide_placeholder_tile(tile_w, target_height, i, RADIUS)
+                )
 
-        wide_image = Image.new('RGBA', (total_width, target_height), (0, 0, 0, 0))
+        total_width = slot_count * tile_w + max(0, slot_count - 1) * GAP
+        # Black gutters between slots (no light fringe / card bleed)
+        wide_image = Image.new("RGBA", (total_width, target_height), (0, 0, 0, 255))
         x_offset = 0
 
-        for thumbnail in thumbnails:
-            pil_img = thumbnail._light_image.convert("RGBA")
-            aspect_ratio = pil_img.width / pil_img.height
-            thumb_width = int(target_height * aspect_ratio)
-            resized_thumb = pil_img.resize((thumb_width, target_height), Image.LANCZOS)
-
-            # Rounded corners for each tile
-            r_tile = int(max(8, min(RADIUS, thumb_width // 2, target_height // 2)))
+        for resized_thumb in prepared:
+            thumb_width = resized_thumb.width
+            r_tile = int(max(4, min(RADIUS, thumb_width // 2, target_height // 2)))
             mask = Image.new("L", (thumb_width, target_height), 0)
             draw = ImageDraw.Draw(mask)
             draw.rounded_rectangle(
-                (0, 0, thumb_width, target_height), radius=r_tile, fill=255
+                (0, 0, thumb_width - 1, target_height - 1), radius=r_tile, fill=255
             )
-            
-            rounded_thumb = Image.new("RGBA", (thumb_width, target_height), (0, 0, 0, 0))
+
+            # Composite tile onto black so antialiased corners don't pick up white/card colors
+            rounded_thumb = Image.new("RGBA", (thumb_width, target_height), (0, 0, 0, 255))
             rounded_thumb.paste(resized_thumb, (0, 0), mask=mask)
 
             wide_image.paste(rounded_thumb, (x_offset, 0))
             x_offset += thumb_width + GAP
 
-        # Persist which files this strip was built from so a later cache hit can
-        # detect deleted media and regenerate instead of serving a stale filmstrip.
         from PIL.PngImagePlugin import PngInfo
         meta = PngInfo()
-        meta.add_text("vtp_sources", "\n".join(source_file_paths))
+        meta.add_text("vtp_sources", "\n".join(used_sources))
         if folder_mtime is not None:
             meta.add_text("vtp_mtime", repr(folder_mtime))
         wide_image.save(
@@ -5754,13 +5981,22 @@ class VtpGridMixin:
 
         counts_row = ctk.CTkFrame(stats_host, fg_color=folder_bg_hex, corner_radius=0)
         counts_row.pack(anchor="w", fill="none", pady=(0, 1))
+        videos_color = getattr(self, "wide_folder_videos_color", "#5dade2")
+        images_color = getattr(self, "wide_folder_images_color", "#7dcea0")
         ctk.CTkLabel(
             counts_row,
-            text=f"Videos: {stats['video_count']}     Images: {stats['image_count']}",
+            text=f"Videos: {stats['video_count']}",
             font=self.wide_folder_stats_font,
-            text_color=muted,
+            text_color=videos_color,
             anchor="w",
-        ).pack(anchor="w")
+        ).pack(side="left", anchor="w")
+        ctk.CTkLabel(
+            counts_row,
+            text=f"Images: {stats['image_count']}",
+            font=self.wide_folder_stats_font,
+            text_color=images_color,
+            anchor="w",
+        ).pack(side="left", anchor="w", padx=(12, 0))
 
         kw_body = (stats.get("keywords") or "").strip()
         extra_kw = int(stats.get("extra_keyword_count") or 0)
@@ -5795,7 +6031,7 @@ class VtpGridMixin:
         if tw < 80:
             tw = max(640, int(self.winfo_width() or 900) - 140)
         cell_w = max(220.0, (tw - 8 * nc) / nc)
-        return int(max(160, min(420, round(cell_w * 0.25))))
+        return int(max(180, min(520, round(cell_w * float(getattr(self, "wide_folder_left_frac", 0.30) or 0.30)))))
 
     def _wide_folder_resolve_gutter_px(self, target_frame) -> int:
         """
@@ -5823,7 +6059,7 @@ class VtpGridMixin:
         tw = max(tw, 400)
         nc = max(1, getattr(self, "numwidefolders_in_col", 2))
         cell_w = max(220.0, (tw - 8 * nc) / nc)
-        g = int(max(160, min(420, round(cell_w * 0.25))))
+        g = int(max(180, min(520, round(cell_w * float(getattr(self, "wide_folder_left_frac", 0.30) or 0.30)))))
         self._wide_folder_left_gutter_px = g
         logging.debug(
             "[WIDE_GUTTER] resolve NEW gutter=%s tw_raw=%s tw_used=%s nc=%s cell_w=%.1f "
@@ -6078,7 +6314,7 @@ class VtpGridMixin:
             left_panel = ctk.CTkFrame(left_holder, fg_color=folder_bg_color, corner_radius=0)
             left_panel.pack(fill="both", expand=True, padx=(4, 6), pady=(2, 0))
 
-            sep_color = "#4a5056"
+            sep_color = "#3a4046"
             sep = tk.Frame(
                 wide_folder_frame,
                 width=1,
@@ -6086,6 +6322,7 @@ class VtpGridMixin:
                 bd=0,
                 highlightthickness=0,
             )
+            _show_wide_div = bool(getattr(self, "wide_folder_show_divider", True))
 
             right_panel = ctk.CTkFrame(wide_folder_frame, fg_color=folder_bg_color, corner_radius=0)
             right_panel.grid_rowconfigure(0, weight=1)
@@ -6108,11 +6345,21 @@ class VtpGridMixin:
                     ph = max(1, H - 2 * _VPAD_INNER - 2 * _cr_in)
                     x0 = _PAD_L_OUTER + _cr_in
                     x_sep = x0 + _left_px
-                    x_right = x_sep + 1 + _PAD_SEP_TO_RIGHT
+                    if _show_wide_div:
+                        x_right = x_sep + 1 + _PAD_SEP_TO_RIGHT
+                    else:
+                        # No hard rule — small soft gap between label column and filmstrip
+                        x_right = x_sep + 2
                     rw = max(80, W - x_right - _PAD_R_OUTER - _cr_in)
                     y0 = _VPAD_INNER + _cr_in
                     left_holder.place(x=x0, y=y0, width=_left_px, height=ph)
-                    sep.place(x=x_sep, y=y0, width=1, height=ph)
+                    if _show_wide_div:
+                        sep.place(x=x_sep, y=y0, width=1, height=ph)
+                    else:
+                        try:
+                            sep.place_forget()
+                        except tk.TclError:
+                            pass
                     right_panel.configure(width=int(rw), height=int(ph))
                     right_panel.place(x=x_right, y=y0)
                 except (tk.TclError, ValueError):
@@ -6163,7 +6410,7 @@ class VtpGridMixin:
                 text="",
                 fg_color="transparent",
             )
-            image_label.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+            image_label.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
 
             # Register with the selection system right away
             self.thumbnail_labels[file_path] = {
@@ -7036,10 +7283,17 @@ class VtpGridMixin:
             # --- DELEGATE VISUAL UPDATE (This part was fine) ---
             self.update_thumbnail_selection()
             
-            # --- Update other UI parts (This part was fine) ---
-            self.update_panel_info(file_path)
-            if hasattr(self, "notify_caption_selection"):
-                self.notify_caption_selection(file_path)
+            # --- Update other UI parts ---
+            # Folders: skip panel/caption I/O on select (was adding noticeable lag).
+            is_folder_sel = False
+            try:
+                is_folder_sel = bool(self.video_files[idx].get("is_folder"))
+            except Exception:
+                is_folder_sel = False
+            if not is_folder_sel:
+                self.update_panel_info(file_path)
+                if hasattr(self, "notify_caption_selection"):
+                    self.notify_caption_selection(file_path)
 
 
 

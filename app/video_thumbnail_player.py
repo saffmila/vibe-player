@@ -468,10 +468,23 @@ class VideoThumbnailPlayer(
         self.play_broken_videos = True
         # Wide folder styling variables
         self.wide_folder_cornerRadius = 12     # corner radius for wide-folder cards
-        self.wide_folder_gap = 25              # spacing between previews in wide strip (was 10)
+        self.wide_folder_gap = 15              # filmstrip spacing between tiles
         self.wide_folder_borderWidth = 0       # permanent border thickness
         self.wide_folder_borderColor = "#383838"  # subtle gray border (dark theme)
-        self.wide_folder_innerThumbRadius = 12  # corner radius for thumbs inside wide strip
+        self.wide_folder_innerThumbRadius = 10  # corner radius for thumbs inside wide strip
+        # Fixed uniform slots (aligned across rows) + silent placeholders for empty slots
+        self.wide_folder_cover_tiles = True
+        self.wide_folder_tile_aspect = 1.35    # uniform W/H for every slot
+        self.wide_folder_fill_slots = True     # pad missing thumbs with placeholders
+        self.wide_folder_min_tile_aspect = 0.62
+        self.wide_folder_max_tile_aspect = 2.05
+        self.wide_folder_hero_scale = 1.0
+        # Edge fade is applied at DISPLAY time on the preview edges (not baked into PNG)
+        self.wide_folder_edge_fade_px = 56
+        self.wide_folder_edge_fade_strength = 0.5  # 1.0 = full fade-to-transparent; 0.5 = softer
+        self.wide_folder_show_divider = True   # classic-grid vertical rule
+        self.vg_wide_preview_count = 5        # configurable slot count (also in View menu)
+        self.wide_folder_left_frac = 0.27      # title column; divider sits just after it
 
         self.numwidefolders_in_col = 2
         # StringVar for controlling thumbnail time via slider
@@ -4887,12 +4900,21 @@ class VideoThumbnailPlayer(
         is_folder = False
         if file_path:
             try:
-                nfp = os.path.normcase(os.path.normpath(file_path))
-                is_folder = any(
-                    vf.get("is_folder")
-                    and os.path.normcase(os.path.normpath(vf.get("path", ""))) == nfp
-                    for vf in (self.video_files or [])
-                )
+                info = self.thumbnail_labels.get(file_path)
+                if isinstance(info, dict) and info.get("index") is not None:
+                    vi = self.video_files[info["index"]] if info["index"] < len(self.video_files) else None
+                    if vi and os.path.normcase(os.path.normpath(vi.get("path", ""))) == os.path.normcase(os.path.normpath(file_path)):
+                        is_folder = bool(vi.get("is_folder"))
+                if not is_folder:
+                    # VG wide slots store path on the widget
+                    is_folder = bool(getattr(event.widget, "is_folder", False)) if event is not None else False
+                if not is_folder:
+                    nfp = os.path.normcase(os.path.normpath(file_path))
+                    is_folder = any(
+                        vf.get("is_folder")
+                        and os.path.normcase(os.path.normpath(vf.get("path", ""))) == nfp
+                        for vf in (self.video_files or [])
+                    )
             except Exception:
                 is_folder = False
         if is_folder:
