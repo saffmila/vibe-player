@@ -331,6 +331,11 @@ class PlaylistManager:
         logging.info(f"Added {added_count} items to the playlist.")
         return added_count
 
+    def open_after_first_items(self, *, was_empty: bool) -> None:
+        """Show the playlist window when the first item(s) land in an empty list."""
+        if was_empty and self.playlist:
+            self.show_playlist()
+
     def remove_selected(self, event=None):
         """
         Removes the currently selected items from the playlist.

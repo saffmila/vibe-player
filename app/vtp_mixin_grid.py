@@ -4597,39 +4597,50 @@ class VtpGridMixin:
             
             logging.info(f"[Play-Selection] Target: {target_path}")
             logging.info(f"[Play-Selection] Selection size: {len(selection_normalized)}")
-            
-            if len(selection_normalized) > 1 and target_path in selection_normalized:
-                logging.info(f"[Multi-Play] Detected selection of {len(selection_normalized)} items.")
-                
-                playlist_videos = [p for p in selection_normalized if p.lower().endswith(video_exts)]
-                playlist_videos.sort()
-                
-                if playlist_videos:
-                    self.playlist_manager.playlist = list(playlist_videos)
-                    
-                    if hasattr(self.playlist_manager, "original_playlist"):
-                        self.playlist_manager.original_playlist = list(playlist_videos)
-                    
-                    self.playlist_manager.is_playlist_open = True 
-                    
-                    try:
-                        start_index = playlist_videos.index(target_path)
-                    except ValueError:
-                        start_index = 0
-                    
-                    self.playlist_manager.current_playing_index = start_index
-                    
-                    if hasattr(self.playlist_manager, "populate_playlist"):
-                        self.playlist_manager.populate_playlist()
-                    elif hasattr(self.playlist_manager, "refresh_playlist"):
-                        self.playlist_manager.refresh_playlist()
-                    elif hasattr(self.playlist_manager, "update_playlist"):
-                        self.playlist_manager.update_playlist()
 
-                    logging.info(f"[Multi-Play] Playlist populated with {len(playlist_videos)} videos. Starting at index {start_index}.")
-                    
-                    self.open_video_player(target_path, os.path.basename(target_path))
-                    return
+            def _n(p):
+                return os.path.normcase(os.path.normpath(p))
+
+            # Preserve selection order (unique videos only).
+            playlist_videos = []
+            seen = set()
+            for p in selection_normalized:
+                if not str(p).lower().endswith(video_exts):
+                    continue
+                key = _n(p)
+                if key in seen:
+                    continue
+                seen.add(key)
+                playlist_videos.append(p)
+
+            multi = len(playlist_videos) > 1 and _n(target_path) in {_n(p) for p in playlist_videos}
+            if multi:
+                logging.info(f"[Multi-Play] Playing {len(playlist_videos)} selected videos as playlist.")
+                self.playlist_manager.playlist = list(playlist_videos)
+                if hasattr(self.playlist_manager, "original_playlist"):
+                    self.playlist_manager.original_playlist = list(playlist_videos)
+
+                try:
+                    start_index = next(
+                        i for i, p in enumerate(playlist_videos) if _n(p) == _n(target_path)
+                    )
+                except StopIteration:
+                    start_index = 0
+
+                self.playlist_manager.current_playing_index = start_index
+                try:
+                    self.playlist_manager.populate_playlist_box()
+                except Exception:
+                    pass
+
+                start_path = playlist_videos[start_index]
+                logging.info(
+                    "[Multi-Play] Starting at index %s: %s",
+                    start_index,
+                    os.path.basename(start_path),
+                )
+                self.open_video_player(start_path, os.path.basename(start_path))
+                return
 
             # Single-file play
             logging.info(f"[Single-Play] Playing single file: {target_path}")
@@ -6435,6 +6446,8 @@ class VtpGridMixin:
                     logging.info("Playlist file deleted successfully.")
                 except Exception as e:
                     logging.info(f"Error deleting playlist file: {e}")
+
+        was_empty = not self.playlist_manager.playlist
                     
         try:
             # Filter selected thumbnails to get only video file paths
@@ -6451,6 +6464,7 @@ class VtpGridMixin:
                 # The 'new_playlist' logic is already handled above, so we just pass the files.
                 
                 self.playlist_manager.add_to_playlist(selected_files)
+                self.playlist_manager.open_after_first_items(was_empty=was_empty)
                 
         except Exception as e:
             # Log the specific error (which was the '3 arguments given' error)

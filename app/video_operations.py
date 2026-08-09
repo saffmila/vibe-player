@@ -4638,7 +4638,8 @@ class VideoPlayer:
             self._cancel_broken_decode_checks()
             self._hide_broken_playback_overlay()
             self.playing = False
-            self._release_current_media(detach_hwnd=True)
+            # Playlist/short-clip switches run on the UI thread — never busy-wait here.
+            self._release_current_media(detach_hwnd=True, wait_stop=False)
 
             self.video_path = path
             self.video_name = name
@@ -4662,6 +4663,12 @@ class VideoPlayer:
             self.show_hud()
             self._schedule_preview_mute_retries()
             self._schedule_embed_audio_retries()
+            # Catch Playing quickly on ~1s clips (between 50ms polls).
+            try:
+                self.video_window.after(40, self._note_playback_started_if_active)
+                self.video_window.after(120, self._note_playback_started_if_active)
+            except Exception:
+                pass
 
             if not self.embed and self.show_video_button_bar:
                 self._slider_percent = 0.0
@@ -4787,14 +4794,29 @@ class VideoPlayer:
     def _playlist_index_for_current(self) -> int | None:
         return self._playlist_index_for_path(getattr(self, "video_path", None))
 
+    def _note_playback_started_if_active(self) -> None:
+        """Mark that the current media actually started (needed for short-clip end detection)."""
+        if getattr(self, "_cleaning_up", False) or not self.player:
+            return
+        try:
+            st = self.player.get_state()
+        except Exception:
+            return
+        if st in (vlc.State.Playing, vlc.State.Paused, vlc.State.Buffering):
+            self._saw_playing_since_media_load = True
+            return
+        try:
+            if int(self.player.get_time()) > 50:
+                self._saw_playing_since_media_load = True
+        except Exception:
+            pass
+
     def _playback_has_ended(self) -> bool:
         """
         True when the *current* media has naturally finished.
 
         Stale ``Ended`` from the previous file is ignored until this media has
-        been observed in Playing/Buffering (or made measurable progress). A
-        fixed multi-second grace window is intentionally avoided — it skips
-        ~1–2s clips entirely.
+        been observed in Playing/Buffering (or made measurable progress).
         """
         if not self.player:
             return False
@@ -4818,30 +4840,9 @@ class VideoPlayer:
         if st != vlc.State.Ended:
             return False
 
-        if getattr(self, "_saw_playing_since_media_load", False):
-            return True
-
-        # Still no Playing observed: only accept Ended after the media has had
-        # time to start. Prevents cascading on a leftover Ended from the
-        # previous file right after set_media/play.
-        loaded_at = float(getattr(self, "_media_load_mono", 0.0) or 0.0)
-        elapsed = (time.monotonic() - loaded_at) if loaded_at else 0.0
-        try:
-            length_ms = int(self.player.get_length())
-        except Exception:
-            length_ms = -1
-
-        if length_ms > 0 and elapsed >= max(0.35, (length_ms / 1000.0) * 0.6):
-            logging.info(
-                "[Playlist] Short-clip end fallback (len=%.2fs elapsed=%.2fs)",
-                length_ms / 1000.0,
-                elapsed,
-            )
-            return True
-        if elapsed >= 2.0:
-            logging.info("[Playlist] End fallback after %.2fs without Playing", elapsed)
-            return True
-        return False
+        # Never treat a leftover Ended as finished until THIS media actually ran.
+        # Length/elapsed fallbacks caused cascade advances + freezes on ~1s clips.
+        return bool(getattr(self, "_saw_playing_since_media_load", False))
 
     def _mark_playback_stopped_at_end(self) -> None:
         """UI + state after natural end when we are not advancing."""
@@ -5020,19 +5021,21 @@ class VideoPlayer:
 
     # Uvnitř třídy VideoPlayer
 
-    def _release_current_media(self, *, detach_hwnd: bool = True) -> None:
+    def _release_current_media(self, *, detach_hwnd: bool = True, wait_stop: bool = True) -> None:
         """Stop VLC and release the current Media without destroying the player window."""
         player = getattr(self, "player", None)
         if not player:
             return
-        self._shutdown_vlc_player(player, detach_hwnd=detach_hwnd)
+        self._shutdown_vlc_player(player, detach_hwnd=detach_hwnd, wait_stop=wait_stop)
 
-    def _shutdown_vlc_player(self, player, *, detach_hwnd: bool = True) -> None:
+    def _shutdown_vlc_player(self, player, *, detach_hwnd: bool = True, wait_stop: bool = True) -> None:
         """
         Detach Win32 HWND, stop, and release Media. Safe order for Windows (avoids AV on close).
         Does not call player.release() — caller does that after the Tk window is gone.
+
+        ``wait_stop=False`` skips the blocking sleep loop (playlist auto-advance / already-Ended).
         """
-        logging.info("[Cleanup][VLC] shutdown start detach_hwnd=%s player=%r", detach_hwnd, player)
+        logging.info("[Cleanup][VLC] shutdown start detach_hwnd=%s wait_stop=%s player=%r", detach_hwnd, wait_stop, player)
         if detach_hwnd and os.name == "nt" and hasattr(player, "set_hwnd"):
             try:
                 logging.info("[Cleanup][VLC] before player.set_hwnd(0)")
@@ -5047,6 +5050,9 @@ class VideoPlayer:
         except Exception as e:
             logging.info("[Cleanup][VLC] player.get_state() failed: %s", e)
             st = None
+
+        already_ended = st in (vlc.State.Ended, vlc.State.Stopped, vlc.State.Error, vlc.State.NothingSpecial)
+
         if st == vlc.State.Paused:
             try:
                 logging.info("[Cleanup][VLC] before player.set_pause(0)")
@@ -5054,26 +5060,33 @@ class VideoPlayer:
                 logging.info("[Cleanup][VLC] after player.set_pause(0)")
             except Exception as e:
                 logging.info("[Cleanup][VLC] player.set_pause(0) failed: %s", e)
-        try:
-            logging.info("[Cleanup][VLC] before player.stop()")
-            player.stop()
-            logging.info("[Cleanup][VLC] after player.stop()")
-        except Exception as e:
-            logging.info("[Cleanup][VLC] player.stop() failed: %s", e)
-        try:
-            t0 = time.time()
-            while (time.time() - t0) < 1.2:
+
+        # stop() on an already-Ended player often hangs on Windows — skip it.
+        if not already_ended:
+            try:
+                logging.info("[Cleanup][VLC] before player.stop()")
+                player.stop()
+                logging.info("[Cleanup][VLC] after player.stop()")
+            except Exception as e:
+                logging.info("[Cleanup][VLC] player.stop() failed: %s", e)
+            if wait_stop:
                 try:
-                    logging.debug("[Cleanup][VLC] before player.is_playing()")
-                    if not player.is_playing():
-                        logging.info("[Cleanup][VLC] playback stopped after %.2fs", time.time() - t0)
-                        break
+                    t0 = time.time()
+                    while (time.time() - t0) < 1.2:
+                        try:
+                            logging.debug("[Cleanup][VLC] before player.is_playing()")
+                            if not player.is_playing():
+                                logging.info("[Cleanup][VLC] playback stopped after %.2fs", time.time() - t0)
+                                break
+                        except Exception as e:
+                            logging.info("[Cleanup][VLC] player.is_playing() failed: %s", e)
+                            break
+                        time.sleep(0.05)
                 except Exception as e:
-                    logging.info("[Cleanup][VLC] player.is_playing() failed: %s", e)
-                    break
-                time.sleep(0.05)
-        except Exception as e:
-            logging.info("[Cleanup][VLC] stop wait failed: %s", e)
+                    logging.info("[Cleanup][VLC] stop wait failed: %s", e)
+        else:
+            logging.info("[Cleanup][VLC] skip stop/wait (state=%s)", st)
+
         try:
             logging.info("[Cleanup][VLC] before player.get_media()")
             m = player.get_media()
@@ -5590,7 +5603,7 @@ class VideoPlayer:
         # Keep the poll chain alive across media switches; work resumes when the flag clears.
         if getattr(self, "_media_switch_in_progress", False):
             try:
-                delay = 100 if time.monotonic() < float(getattr(self, "_fast_poll_until", 0.0) or 0.0) else 300
+                delay = 50 if time.monotonic() < float(getattr(self, "_fast_poll_until", 0.0) or 0.0) else 300
                 self._slider_poll_after_id = self.video_window.after(delay, self.update_time_slider)
             except Exception:
                 self._slider_poll_after_id = None
@@ -5642,7 +5655,7 @@ class VideoPlayer:
 
         try:
             # Poll faster right after a switch so ~1–2s clips still register Playing.
-            delay = 100 if time.monotonic() < float(getattr(self, "_fast_poll_until", 0.0) or 0.0) else 300
+            delay = 50 if time.monotonic() < float(getattr(self, "_fast_poll_until", 0.0) or 0.0) else 300
             self._slider_poll_after_id = self.video_window.after(delay, self.update_time_slider)
         except Exception:
             self._slider_poll_after_id = None

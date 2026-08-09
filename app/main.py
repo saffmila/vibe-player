@@ -530,7 +530,9 @@ class _FastVideoController:
             self.playlist_manager.playlist = []
             self.video_files = []
             self.current_video_index = 0
+        was_empty = not self.playlist_manager.playlist
         self.playlist_manager.add_to_playlist([current_path])
+        self.playlist_manager.open_after_first_items(was_empty=was_empty)
         try:
             self.playlist_manager.current_playing_index = self.playlist_manager.playlist.index(current_path)
             self.playlist_manager.update_playlist_selection()

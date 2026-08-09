@@ -4657,7 +4657,7 @@ class VideoThumbnailPlayer(
         if ext in IMAGE_FORMATS or file_path.lower().endswith(IMAGE_FORMATS):
             self.open_image_viewer(file_path, os.path.basename(file_path))
         elif ext in VIDEO_FORMATS or file_path.lower().endswith(VIDEO_FORMATS):
-            self.open_video_player(file_path, os.path.basename(file_path))
+            self.play_video_selection(file_path)
         else:
             logging.info("[DEBUG] Unsupported file type for ENTER.")
 
@@ -4836,6 +4836,20 @@ class VideoThumbnailPlayer(
             self._dnd_drag_happened = False
             return
 
+        # Detect double-click BEFORE collapsing multi-selection — otherwise Play
+        # only sees the clicked thumb and never builds a playlist.
+        now = int(time.time() * 1000)
+        if self._last_click_time and (now - self._last_click_time < self._click_interval):
+            if self._click_timer:
+                try:
+                    self.after_cancel(self._click_timer)
+                except (tk.TclError, ValueError):
+                    pass
+                self._click_timer = None
+            self._last_click_time = 0
+            self._handle_thumbnail_double_click(file_path)
+            return
+
         # After Ctrl+A (etc.), ButtonPress skipped select on an already-selected cell so DnD can keep
         # multi-selection; on release without a real drag, collapse to the clicked thumb.
         # Use modifiers from Button-1 press (on_thumb_click / select_range), not from release:
@@ -4885,15 +4899,6 @@ class VideoThumbnailPlayer(
             return
 
         now = int(time.time() * 1000)
-
-        # Double-click detection
-        if self._last_click_time and (now - self._last_click_time < self._click_interval):
-            if self._click_timer:
-                self.after_cancel(self._click_timer)
-                self._click_timer = None
-            self._last_click_time = 0
-            self._handle_thumbnail_double_click(file_path)
-            return
 
         # --- MULTI-TIMELINE SWITCH ---
         # selected_thumbnails is already updated from on_thumb_click (Button press)
@@ -5090,7 +5095,7 @@ class VideoThumbnailPlayer(
                 logging.warning(f"Error stopping preview on double-click: {e}")
 
         if is_video:
-            self.open_video_player(file_path, os.path.basename(file_path))
+            self.play_video_selection(file_path)
         elif is_image:
             self.open_image_viewer(file_path, os.path.basename(file_path))
 
