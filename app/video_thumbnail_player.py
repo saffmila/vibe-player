@@ -5956,33 +5956,16 @@ class VideoThumbnailPlayer(
         if sort_option and ("Reverse order" in str(sort_option) or str(sort_option).startswith("↕")):
             sort_option = "Filename"
 
-        def _dimensions_area(path: str) -> int:
-            # Prefer DB (instant) — opening every Flux PNG during sort freezes folder loads.
-            try:
-                rec = self.database.get_entry(path)
-                if rec:
-                    w = int(rec.get("width") or 0)
-                    h = int(rec.get("height") or 0)
-                    if w > 0 and h > 0:
-                        return w * h
-            except Exception:
-                pass
-            try:
-                dims = self.get_video_dimensions(path)
-                if isinstance(dims, tuple) and len(dims) >= 2:
-                    return int(dims[0] or 0) * int(dims[1] or 0)
-            except Exception:
-                pass
-            return 0
-
         rating_by_path: dict[str, int] = {}
-        if sort_option == "Rating":
+        area_by_path: dict[str, int] = {}
+        if sort_option in ("Rating", "Dimensions"):
             paths = [f["path"] for f in files_list if not f.get("is_folder")]
             try:
                 bulk = self.database.get_entries_bulk(paths) if paths else {}
             except Exception:
                 bulk = {}
-            for path in paths:
+
+            def _bulk_rec(path: str):
                 try:
                     norm = self.database.normalize_path(path)
                 except Exception:
@@ -5993,10 +5976,48 @@ class VideoThumbnailPlayer(
                         rec = self.database.get_entry(path)
                     except Exception:
                         rec = None
-                try:
-                    rating_by_path[path] = int((rec or {}).get("rating") or 0)
-                except (TypeError, ValueError):
-                    rating_by_path[path] = 0
+                return rec
+
+            if sort_option == "Rating":
+                for path in paths:
+                    rec = _bulk_rec(path)
+                    try:
+                        rating_by_path[path] = int((rec or {}).get("rating") or 0)
+                    except (TypeError, ValueError):
+                        rating_by_path[path] = 0
+            else:
+                # Dimensions: DB first (instant). get_vidsize is False on purpose so most
+                # videos land with NULL width/height — without persisting probes here,
+                # every folder open re-opens OpenCV for each file (~25ms * N).
+                missing: list[str] = []
+                for path in paths:
+                    rec = _bulk_rec(path)
+                    try:
+                        w = int((rec or {}).get("width") or 0)
+                        h = int((rec or {}).get("height") or 0)
+                    except (TypeError, ValueError):
+                        w = h = 0
+                    if w > 0 and h > 0:
+                        area_by_path[path] = w * h
+                    else:
+                        missing.append(path)
+
+                for path in missing:
+                    area = 0
+                    try:
+                        dims = self.get_video_dimensions(path)
+                        if isinstance(dims, tuple) and len(dims) >= 2:
+                            w = int(dims[0] or 0)
+                            h = int(dims[1] or 0)
+                            if w > 0 and h > 0:
+                                area = w * h
+                                try:
+                                    self.database.update_file_metadata(path, width=w, height=h)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                    area_by_path[path] = area
 
         def sort_key(f):
             if f['is_folder']:
@@ -6017,7 +6038,7 @@ class VideoThumbnailPlayer(
                             mtime = os.path.getmtime(path)
                         return (1, mtime)
                     elif sort_option == "Dimensions":
-                        return (1, _dimensions_area(path))
+                        return (1, area_by_path.get(path, 0))
                     elif sort_option == "File Type":
                         return (1, os.path.splitext(path)[-1].lower())
                     elif sort_option == "Rating":
