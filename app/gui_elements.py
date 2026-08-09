@@ -2291,6 +2291,9 @@ def create_preferences_window(app):
     general_section = _add_preferences_section("General Options")
     interface_section = _add_preferences_section("Player Interface")
     file_ops_section = _add_preferences_section("File Operations")
+    # Debug prefs only when launched via run_debug.bat (main.py --debug)
+    _debug_prefs = bool(getattr(app, "debug_prefs_enabled", False))
+    debug_section = _add_preferences_section("Debug") if _debug_prefs else None
     pref_heading_texts.update({
         "Video Options",
         "VLC Video Filters",
@@ -2302,6 +2305,8 @@ def create_preferences_window(app):
         "Delete behavior",
         "Drag and drop",
     })
+    if _debug_prefs:
+        pref_heading_texts.add("Debug")
 
     # === VIDEO OPTIONS ===
     video_options_frame = ctk.CTkFrame(video_section)
@@ -2704,6 +2709,212 @@ def create_preferences_window(app):
     )
     ctk.CTkLabel(wide_block, text="").pack(pady=4)  # bottom padding inside card
 
+    # Debug strip chrome — only visible when app started with run_debug.bat (--debug)
+    if debug_section is not None:
+        debug_frame = ctk.CTkFrame(debug_section)
+        debug_frame.pack(fill="x", pady=10)
+        ctk.CTkLabel(
+            debug_frame,
+            text="Wide folder strip (debug)",
+            font=pref_heading_font,
+        ).pack(anchor="w", padx=10, pady=(8, 2))
+        ctk.CTkLabel(
+            debug_frame,
+            text="Visible only when launched via run_debug.bat. Values still persist in settings.json.",
+            text_color=("gray40", "gray65"),
+            anchor="w",
+            font=("Helvetica", 12),
+            wraplength=420,
+            justify="left",
+        ).pack(anchor="w", padx=10, pady=(0, 8))
+
+        _dbg_color_row = ctk.CTkFrame(debug_frame, fg_color="transparent")
+        _dbg_color_row.pack(fill="x", padx=12, pady=(6, 2))
+        ctk.CTkLabel(_dbg_color_row, text="Container color (#RRGGBB)", anchor="w").pack(
+            side="left", fill="x", expand=True
+        )
+        _tile_bg_var = tk.StringVar(
+            value=str(getattr(app, "wide_folder_tile_bg", "#000000") or "#000000")
+        )
+        _tile_bg_entry = ctk.CTkEntry(
+            _dbg_color_row, textvariable=_tile_bg_var, width=96, justify="center", height=28
+        )
+        _tile_bg_entry.pack(side="right")
+
+        def _apply_tile_bg(_event=None):
+            try:
+                app.set_wide_folder_tile_bg(_tile_bg_var.get())
+                _tile_bg_var.set(str(getattr(app, "wide_folder_tile_bg", "#000000")))
+            except Exception:
+                logging.debug("debug tile bg apply failed", exc_info=True)
+
+        _tile_bg_entry.bind("<Return>", _apply_tile_bg)
+        _tile_bg_entry.bind("<FocusOut>", _apply_tile_bg)
+
+        def _set_tile_opacity_pct(pct: int):
+            app.set_wide_folder_tile_bg_alpha(int(round(max(0, min(100, int(pct))) * 2.55)))
+
+        _cur_alpha = int(getattr(app, "wide_folder_tile_bg_alpha", 255) or 255)
+        _pref_spinner_row(
+            debug_frame,
+            "Container opacity (%)",
+            int(round(_cur_alpha / 2.55)),
+            0,
+            100,
+            _set_tile_opacity_pct,
+        )
+        _pref_spinner_row(
+            debug_frame,
+            "Side pad past first/last thumb (px)",
+            int(getattr(app, "wide_folder_strip_end_pad_px", 40) or 40),
+            0,
+            120,
+            app.set_wide_folder_strip_end_pad,
+        )
+        _pref_spinner_row(
+            debug_frame,
+            "Tile inset / frame (px)",
+            int(getattr(app, "wide_folder_tile_inset_px", 8) or 8),
+            0,
+            24,
+            app.set_wide_folder_tile_inset,
+        )
+        _pref_spinner_row(
+            debug_frame,
+            "Vertical spacing between rows (px)",
+            int(getattr(app, "vg_wide_inter_row_gap", 10) or 10),
+            0,
+            80,
+            app.set_wide_folder_inter_row_gap,
+        )
+
+        ctk.CTkLabel(
+            debug_frame,
+            text="Title / filmstrip divider",
+            font=("Helvetica", 13),
+            anchor="w",
+        ).pack(anchor="w", padx=12, pady=(12, 2))
+
+        _div_show_var = tk.BooleanVar(
+            value=bool(getattr(app, "wide_folder_show_divider", False))
+        )
+
+        def _on_div_show():
+            try:
+                app.set_wide_folder_show_divider(bool(_div_show_var.get()))
+            except Exception:
+                logging.debug("debug divider show apply failed", exc_info=True)
+
+        ctk.CTkCheckBox(
+            debug_frame,
+            text="Show divider",
+            variable=_div_show_var,
+            command=_on_div_show,
+        ).pack(anchor="w", padx=12, pady=(4, 2))
+
+        _div_color_row = ctk.CTkFrame(debug_frame, fg_color="transparent")
+        _div_color_row.pack(fill="x", padx=12, pady=(6, 2))
+        ctk.CTkLabel(_div_color_row, text="Divider color (#RRGGBB)", anchor="w").pack(
+            side="left", fill="x", expand=True
+        )
+        _div_color_var = tk.StringVar(
+            value=str(getattr(app, "wide_folder_divider_color", "#4a5056") or "#4a5056")
+        )
+        _div_color_entry = ctk.CTkEntry(
+            _div_color_row, textvariable=_div_color_var, width=96, justify="center", height=28
+        )
+        _div_color_entry.pack(side="right")
+
+        def _apply_div_color(_event=None):
+            try:
+                app.set_wide_folder_divider_color(_div_color_var.get())
+                _div_color_var.set(str(getattr(app, "wide_folder_divider_color", "#4a5056")))
+            except Exception:
+                logging.debug("debug divider color apply failed", exc_info=True)
+
+        _div_color_entry.bind("<Return>", _apply_div_color)
+        _div_color_entry.bind("<FocusOut>", _apply_div_color)
+
+        _pref_spinner_row(
+            debug_frame,
+            "Divider width (px)",
+            int(getattr(app, "wide_folder_divider_width", 1) or 1),
+            1,
+            12,
+            app.set_wide_folder_divider_width,
+        )
+
+        ctk.CTkLabel(
+            debug_frame,
+            text="Card outline (idle / selection)",
+            font=("Helvetica", 13),
+            anchor="w",
+        ).pack(anchor="w", padx=12, pady=(12, 2))
+
+        _pref_spinner_row(
+            debug_frame,
+            "Default border width (px)",
+            int(getattr(app, "wide_folder_borderWidth", 0) or 0),
+            0,
+            10,
+            app.set_wide_folder_border_width,
+        )
+        _idle_border_row = ctk.CTkFrame(debug_frame, fg_color="transparent")
+        _idle_border_row.pack(fill="x", padx=12, pady=(6, 2))
+        ctk.CTkLabel(_idle_border_row, text="Default border color (#RRGGBB)", anchor="w").pack(
+            side="left", fill="x", expand=True
+        )
+        _idle_border_var = tk.StringVar(
+            value=str(getattr(app, "wide_folder_borderColor", "#555555") or "#555555")
+        )
+        _idle_border_entry = ctk.CTkEntry(
+            _idle_border_row, textvariable=_idle_border_var, width=96, justify="center", height=28
+        )
+        _idle_border_entry.pack(side="right")
+
+        def _apply_idle_border(_event=None):
+            try:
+                app.set_wide_folder_border_color(_idle_border_var.get())
+                _idle_border_var.set(str(getattr(app, "wide_folder_borderColor", "#555555")))
+            except Exception:
+                logging.debug("debug idle border color apply failed", exc_info=True)
+
+        _idle_border_entry.bind("<Return>", _apply_idle_border)
+        _idle_border_entry.bind("<FocusOut>", _apply_idle_border)
+
+        _pref_spinner_row(
+            debug_frame,
+            "Selection border width (px)",
+            int(getattr(app, "wide_folder_sel_outline_width", 3) or 3),
+            1,
+            10,
+            app.set_wide_folder_sel_outline_width,
+        )
+        _sel_border_row = ctk.CTkFrame(debug_frame, fg_color="transparent")
+        _sel_border_row.pack(fill="x", padx=12, pady=(6, 2))
+        ctk.CTkLabel(_sel_border_row, text="Selection border color (#RRGGBB)", anchor="w").pack(
+            side="left", fill="x", expand=True
+        )
+        _sel_border_var = tk.StringVar(
+            value=str(getattr(app, "wide_folder_sel_outline_color", getattr(app, "thumbSelColor", "#4f575f")) or getattr(app, "thumbSelColor", "#4f575f"))
+        )
+        _sel_border_entry = ctk.CTkEntry(
+            _sel_border_row, textvariable=_sel_border_var, width=96, justify="center", height=28
+        )
+        _sel_border_entry.pack(side="right")
+
+        def _apply_sel_border(_event=None):
+            try:
+                app.set_wide_folder_sel_outline_color(_sel_border_var.get())
+                _sel_border_var.set(str(getattr(app, "wide_folder_sel_outline_color", getattr(app, "thumbSelColor", "#4f575f"))))
+            except Exception:
+                logging.debug("debug sel border color apply failed", exc_info=True)
+
+        _sel_border_entry.bind("<Return>", _apply_sel_border)
+        _sel_border_entry.bind("<FocusOut>", _apply_sel_border)
+
+        ctk.CTkLabel(debug_frame, text="").pack(pady=4)
+
     # === FILE OPERATIONS (collapsible) ===
     advanced_outer = ctk.CTkFrame(file_ops_section)
     advanced_outer.pack(fill="x", padx=10, pady=(5, 5))
@@ -2966,6 +3177,27 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
         "vg_wide_title_font_size": int(getattr(app, "vg_wide_title_font_size", 12) or 12),
         "vg_wide_stats_font_size": int(getattr(app, "vg_wide_stats_font_size", 9) or 9),
         "wide_folder_gap": int(getattr(app, "wide_folder_gap", 15) or 15),
+        "wide_folder_tile_bg": str(getattr(app, "wide_folder_tile_bg", "#000000") or "#000000"),
+        "wide_folder_tile_bg_alpha": int(getattr(app, "wide_folder_tile_bg_alpha", 255) or 255),
+        "wide_folder_strip_end_pad_px": int(getattr(app, "wide_folder_strip_end_pad_px", 40) or 40),
+        "wide_folder_tile_inset_px": int(getattr(app, "wide_folder_tile_inset_px", 8) or 8),
+        "wide_folder_show_divider": bool(getattr(app, "wide_folder_show_divider", False)),
+        "wide_folder_divider_color": str(
+            getattr(app, "wide_folder_divider_color", "#4a5056") or "#4a5056"
+        ),
+        "wide_folder_divider_width": int(getattr(app, "wide_folder_divider_width", 1) or 1),
+        "vg_wide_inter_row_gap": int(getattr(app, "vg_wide_inter_row_gap", 10) or 10),
+        "wide_folder_borderWidth": int(getattr(app, "wide_folder_borderWidth", 0) or 0),
+        "wide_folder_borderColor": str(
+            getattr(app, "wide_folder_borderColor", "#555555") or "#555555"
+        ),
+        "wide_folder_sel_outline_width": int(
+            getattr(app, "wide_folder_sel_outline_width", 3) or 3
+        ),
+        "wide_folder_sel_outline_color": str(
+            getattr(app, "wide_folder_sel_outline_color", getattr(app, "thumbSelColor", "#4f575f"))
+            or getattr(app, "thumbSelColor", "#4f575f")
+        ),
         "tree_font_size": app.base_font_size,
         "info_panel_expanded": app.info_panel_container.expanded if app.info_panel_container else True,
         "timeline_widget_expanded": app.timeline_container.expanded if app.timeline_container else True,
@@ -3116,6 +3348,156 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
             )
         except (TypeError, ValueError):
             app.wide_folder_gap = 15
+        try:
+            raw_bg = str(preferences.get("wide_folder_tile_bg", getattr(app, "wide_folder_tile_bg", "#000000")) or "#000000").strip()
+            if not raw_bg.startswith("#"):
+                raw_bg = "#" + raw_bg
+            hx = raw_bg[1:]
+            if len(hx) == 3:
+                hx = "".join(c * 2 for c in hx)
+            if len(hx) == 6:
+                int(hx, 16)
+                app.wide_folder_tile_bg = f"#{hx.lower()}"
+        except (TypeError, ValueError):
+            app.wide_folder_tile_bg = "#000000"
+        try:
+            app.wide_folder_tile_bg_alpha = max(
+                0, min(255, int(preferences.get("wide_folder_tile_bg_alpha", getattr(app, "wide_folder_tile_bg_alpha", 255))))
+            )
+        except (TypeError, ValueError):
+            app.wide_folder_tile_bg_alpha = 255
+        try:
+            app.wide_folder_strip_end_pad_px = max(
+                0, min(120, int(preferences.get("wide_folder_strip_end_pad_px", getattr(app, "wide_folder_strip_end_pad_px", 40))))
+            )
+        except (TypeError, ValueError):
+            app.wide_folder_strip_end_pad_px = 40
+        try:
+            app.wide_folder_tile_inset_px = max(
+                0, min(24, int(preferences.get("wide_folder_tile_inset_px", getattr(app, "wide_folder_tile_inset_px", 8))))
+            )
+        except (TypeError, ValueError):
+            app.wide_folder_tile_inset_px = 8
+        app.wide_folder_show_divider = bool(
+            preferences.get("wide_folder_show_divider", getattr(app, "wide_folder_show_divider", False))
+        )
+        app.vg_wide_show_divider = app.wide_folder_show_divider
+        try:
+            raw_div = str(
+                preferences.get(
+                    "wide_folder_divider_color",
+                    getattr(app, "wide_folder_divider_color", "#4a5056"),
+                )
+                or "#4a5056"
+            ).strip()
+            if not raw_div.startswith("#"):
+                raw_div = "#" + raw_div
+            hx = raw_div[1:]
+            if len(hx) == 3:
+                hx = "".join(c * 2 for c in hx)
+            if len(hx) == 6:
+                int(hx, 16)
+                app.wide_folder_divider_color = f"#{hx.lower()}"
+        except (TypeError, ValueError):
+            app.wide_folder_divider_color = "#4a5056"
+        try:
+            app.wide_folder_divider_width = max(
+                1,
+                min(
+                    12,
+                    int(
+                        preferences.get(
+                            "wide_folder_divider_width",
+                            getattr(app, "wide_folder_divider_width", 1),
+                        )
+                    ),
+                ),
+            )
+        except (TypeError, ValueError):
+            app.wide_folder_divider_width = 1
+        try:
+            app.vg_wide_inter_row_gap = max(
+                0,
+                min(
+                    80,
+                    int(
+                        preferences.get(
+                            "vg_wide_inter_row_gap",
+                            getattr(app, "vg_wide_inter_row_gap", 10),
+                        )
+                    ),
+                ),
+            )
+        except (TypeError, ValueError):
+            app.vg_wide_inter_row_gap = 10
+        try:
+            app.wide_folder_borderWidth = max(
+                0,
+                min(
+                    10,
+                    int(
+                        preferences.get(
+                            "wide_folder_borderWidth",
+                            getattr(app, "wide_folder_borderWidth", 0),
+                        )
+                    ),
+                ),
+            )
+        except (TypeError, ValueError):
+            app.wide_folder_borderWidth = 0
+        try:
+            raw_b = str(
+                preferences.get(
+                    "wide_folder_borderColor",
+                    getattr(app, "wide_folder_borderColor", "#555555"),
+                )
+                or "#555555"
+            ).strip()
+            if not raw_b.startswith("#"):
+                raw_b = "#" + raw_b
+            hx = raw_b[1:]
+            if len(hx) == 3:
+                hx = "".join(c * 2 for c in hx)
+            if len(hx) == 6:
+                int(hx, 16)
+                app.wide_folder_borderColor = f"#{hx.lower()}"
+        except (TypeError, ValueError):
+            app.wide_folder_borderColor = "#555555"
+        try:
+            app.wide_folder_sel_outline_width = max(
+                1,
+                min(
+                    10,
+                    int(
+                        preferences.get(
+                            "wide_folder_sel_outline_width",
+                            getattr(app, "wide_folder_sel_outline_width", 3),
+                        )
+                    ),
+                ),
+            )
+        except (TypeError, ValueError):
+            app.wide_folder_sel_outline_width = 3
+        try:
+            raw_s = str(
+                preferences.get(
+                    "wide_folder_sel_outline_color",
+                    getattr(app, "wide_folder_sel_outline_color", getattr(app, "thumbSelColor", "#4f575f")),
+                )
+                or getattr(app, "thumbSelColor", "#4f575f")
+            ).strip()
+            if not raw_s.startswith("#"):
+                raw_s = "#" + raw_s
+            hx = raw_s[1:]
+            if len(hx) == 3:
+                hx = "".join(c * 2 for c in hx)
+            if len(hx) == 6:
+                int(hx, 16)
+                app.wide_folder_sel_outline_color = f"#{hx.lower()}"
+        except (TypeError, ValueError):
+            app.wide_folder_sel_outline_color = getattr(app, "thumbSelColor", "#4f575f")
+        if hasattr(app, "_sync_wide_folder_border_flags"):
+            app._sync_wide_folder_border_flags()
         if hasattr(app, "_vg_apply_wide_label_fonts"):
             app._vg_apply_wide_label_fonts()
     except (TypeError, ValueError):

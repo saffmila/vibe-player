@@ -1785,6 +1785,35 @@ class VtpGridMixin:
         if int(getattr(self, "wide_folder_gap", -1)) == g:
             return
         self.wide_folder_gap = g
+        self._refresh_wide_folder_strips()
+
+    def _wide_tile_bg_rgba(self):
+        """RGBA for filmstrip gutters / tile chrome (Preferences → Debug)."""
+        raw = str(getattr(self, "wide_folder_tile_bg", "#000000") or "#000000").strip()
+        if not raw.startswith("#"):
+            raw = "#" + raw
+        hex6 = raw[1:]
+        if len(hex6) == 3:
+            hex6 = "".join(c * 2 for c in hex6)
+        try:
+            r = int(hex6[0:2], 16)
+            g = int(hex6[2:4], 16)
+            b = int(hex6[4:6], 16)
+        except (ValueError, IndexError):
+            r, g, b = 0, 0, 0
+        try:
+            a = max(0, min(255, int(getattr(self, "wide_folder_tile_bg_alpha", 255))))
+        except (TypeError, ValueError):
+            a = 255
+        return (r, g, b, a)
+
+    @staticmethod
+    def _wide_tile_bg_cache_tag(rgba) -> str:
+        r, g, b, a = rgba
+        return f"bg{r:02x}{g:02x}{b:02x}a{int(a)}"
+
+    def _refresh_wide_folder_strips(self):
+        """Drop cached filmstrips and redraw current folder (preserve scroll)."""
         try:
             if getattr(self, "memory_cache", None) is not None:
                 self.memory_cache.clear()
@@ -1796,6 +1825,197 @@ class VtpGridMixin:
             pass
         if getattr(self, "current_directory", None):
             self.display_thumbnails(self.current_directory, preserve_scroll=True)
+
+    def set_wide_folder_tile_bg(self, color_hex: str):
+        """Filmstrip container / gutter color (#RRGGBB)."""
+        raw = str(color_hex or "").strip()
+        if not raw.startswith("#"):
+            raw = "#" + raw
+        hex6 = raw[1:]
+        if len(hex6) == 3:
+            hex6 = "".join(c * 2 for c in hex6)
+        if len(hex6) != 6:
+            return
+        try:
+            int(hex6, 16)
+        except ValueError:
+            return
+        new = f"#{hex6.lower()}"
+        if str(getattr(self, "wide_folder_tile_bg", "")).lower() == new:
+            return
+        self.wide_folder_tile_bg = new
+        self._refresh_wide_folder_strips()
+
+    def set_wide_folder_tile_bg_alpha(self, alpha: int):
+        """Filmstrip container opacity (0..255)."""
+        a = max(0, min(255, int(alpha)))
+        if int(getattr(self, "wide_folder_tile_bg_alpha", -1)) == a:
+            return
+        self.wide_folder_tile_bg_alpha = a
+        self._refresh_wide_folder_strips()
+
+    def set_wide_folder_strip_end_pad(self, pad_px: int):
+        """Extend container past first/last thumb (cinematic side bars)."""
+        p = max(0, min(120, int(pad_px)))
+        if int(getattr(self, "wide_folder_strip_end_pad_px", -1)) == p:
+            return
+        self.wide_folder_strip_end_pad_px = p
+        self._refresh_wide_folder_strips()
+
+    def set_wide_folder_tile_inset(self, inset_px: int):
+        """Image inset inside each tile (visible chrome frame)."""
+        v = max(0, min(24, int(inset_px)))
+        if int(getattr(self, "wide_folder_tile_inset_px", -1)) == v:
+            return
+        self.wide_folder_tile_inset_px = v
+        self._refresh_wide_folder_strips()
+
+    def _refresh_wide_folder_layout(self):
+        """Redraw wide folders without regenerating filmstrip PNGs."""
+        if getattr(self, "current_directory", None):
+            self.display_thumbnails(self.current_directory, preserve_scroll=True)
+
+    def _wide_divider_width(self) -> int:
+        try:
+            return max(1, min(12, int(getattr(self, "wide_folder_divider_width", 1) or 1)))
+        except (TypeError, ValueError):
+            return 1
+
+    def _wide_divider_color(self) -> str:
+        raw = str(getattr(self, "wide_folder_divider_color", "#4a5056") or "#4a5056").strip()
+        if not raw.startswith("#"):
+            raw = "#" + raw
+        hx = raw[1:]
+        if len(hx) == 3:
+            hx = "".join(c * 2 for c in hx)
+        if len(hx) != 6:
+            return "#4a5056"
+        try:
+            int(hx, 16)
+        except ValueError:
+            return "#4a5056"
+        return f"#{hx.lower()}"
+
+    def set_wide_folder_show_divider(self, show: bool):
+        v = bool(show)
+        if bool(getattr(self, "wide_folder_show_divider", False)) == v:
+            self.vg_wide_show_divider = v
+            return
+        self.wide_folder_show_divider = v
+        self.vg_wide_show_divider = v
+        self._refresh_wide_folder_layout()
+
+    def set_wide_folder_divider_color(self, color_hex: str):
+        raw = str(color_hex or "").strip()
+        if not raw.startswith("#"):
+            raw = "#" + raw
+        hx = raw[1:]
+        if len(hx) == 3:
+            hx = "".join(c * 2 for c in hx)
+        if len(hx) != 6:
+            return
+        try:
+            int(hx, 16)
+        except ValueError:
+            return
+        new = f"#{hx.lower()}"
+        if str(getattr(self, "wide_folder_divider_color", "")).lower() == new:
+            return
+        self.wide_folder_divider_color = new
+        self._refresh_wide_folder_layout()
+
+    def set_wide_folder_divider_width(self, width_px: int):
+        w = max(1, min(12, int(width_px)))
+        if int(getattr(self, "wide_folder_divider_width", -1)) == w:
+            return
+        self.wide_folder_divider_width = w
+        self._refresh_wide_folder_layout()
+
+    def set_wide_folder_inter_row_gap(self, gap_px: int):
+        """Vertical spacing between wide-folder rows."""
+        g = max(0, min(80, int(gap_px)))
+        if int(getattr(self, "vg_wide_inter_row_gap", -1)) == g:
+            return
+        self.vg_wide_inter_row_gap = g
+        self._refresh_wide_folder_layout()
+
+    def _sync_wide_folder_border_flags(self):
+        """Keep VG border flags in sync with wide_folder_borderWidth/Color."""
+        try:
+            bw = max(0, min(10, int(getattr(self, "wide_folder_borderWidth", 0) or 0)))
+        except (TypeError, ValueError):
+            bw = 0
+        self.wide_folder_borderWidth = bw
+        self.vg_wide_border_width = max(1, bw) if bw > 0 else 0
+        self.vg_wide_show_border = bw > 0
+        self.vg_wide_border_color = getattr(self, "wide_folder_borderColor", "#555555")
+
+    def _refresh_wide_folder_chrome(self):
+        """Redraw wide-card outlines without regenerating filmstrip PNGs."""
+        self._sync_wide_folder_border_flags()
+        refreshed = False
+        for slot in getattr(self, "_vg_wide_pool", []) or []:
+            if not slot.get("strip_canvas"):
+                continue
+            try:
+                self._vg_redraw_wide_card(slot)
+                refreshed = True
+            except Exception:
+                pass
+        if not refreshed:
+            self._refresh_wide_folder_layout()
+
+    def set_wide_folder_border_width(self, width_px: int):
+        w = max(0, min(10, int(width_px)))
+        if int(getattr(self, "wide_folder_borderWidth", -1)) == w:
+            return
+        self.wide_folder_borderWidth = w
+        self._refresh_wide_folder_chrome()
+
+    def set_wide_folder_border_color(self, color_hex: str):
+        raw = str(color_hex or "").strip()
+        if not raw.startswith("#"):
+            raw = "#" + raw
+        hx = raw[1:]
+        if len(hx) == 3:
+            hx = "".join(c * 2 for c in hx)
+        if len(hx) != 6:
+            return
+        try:
+            int(hx, 16)
+        except ValueError:
+            return
+        new = f"#{hx.lower()}"
+        if str(getattr(self, "wide_folder_borderColor", "")).lower() == new:
+            return
+        self.wide_folder_borderColor = new
+        self._refresh_wide_folder_chrome()
+
+    def set_wide_folder_sel_outline_width(self, width_px: int):
+        w = max(1, min(10, int(width_px)))
+        if int(getattr(self, "wide_folder_sel_outline_width", -1)) == w:
+            return
+        self.wide_folder_sel_outline_width = w
+        self._refresh_wide_folder_chrome()
+
+    def set_wide_folder_sel_outline_color(self, color_hex: str):
+        raw = str(color_hex or "").strip()
+        if not raw.startswith("#"):
+            raw = "#" + raw
+        hx = raw[1:]
+        if len(hx) == 3:
+            hx = "".join(c * 2 for c in hx)
+        if len(hx) != 6:
+            return
+        try:
+            int(hx, 16)
+        except ValueError:
+            return
+        new = f"#{hx.lower()}"
+        if str(getattr(self, "wide_folder_sel_outline_color", "")).lower() == new:
+            return
+        self.wide_folder_sel_outline_color = new
+        self._refresh_wide_folder_chrome()
     
     def update_load_time(self, cache_hits, cache_misses, from_cache):
         """Display and update load timing information."""
@@ -5471,13 +5691,15 @@ class VtpGridMixin:
         img.putalpha(alpha)
         return img
 
-    @staticmethod
-    def _wide_placeholder_tile(tile_w: int, tile_h: int, slot_index: int, radius: int) -> Image.Image:
+    def _wide_placeholder_tile(
+        self, tile_w: int, tile_h: int, slot_index: int, radius: int, bg_rgba=None
+    ) -> Image.Image:
         """Quiet dark slot with a muted index — fills missing previews so rows align."""
         tile_w = max(8, int(tile_w))
         tile_h = max(8, int(tile_h))
         radius = max(2, min(int(radius), tile_w // 2, tile_h // 2))
-        img = Image.new("RGBA", (tile_w, tile_h), (0, 0, 0, 255))
+        fill = bg_rgba if bg_rgba is not None else self._wide_tile_bg_rgba()
+        img = Image.new("RGBA", (tile_w, tile_h), fill)
         draw = ImageDraw.Draw(img)
         # Soft inner rim (reads as empty slot, not a broken image)
         inset = max(2, radius // 3)
@@ -5503,7 +5725,7 @@ class VtpGridMixin:
                 font = ImageFont.load_default()
             except Exception:
                 font = None
-        fill = (70, 78, 88, 255)
+        text_fill = (70, 78, 88, 255)
         if font is not None:
             try:
                 bbox = draw.textbbox((0, 0), label, font=font)
@@ -5513,11 +5735,11 @@ class VtpGridMixin:
             draw.text(
                 ((tile_w - tw) / 2, (tile_h - th) / 2 - 2),
                 label,
-                fill=fill,
+                fill=text_fill,
                 font=font,
             )
         else:
-            draw.text((tile_w // 2 - 4, tile_h // 2 - 6), label, fill=fill)
+            draw.text((tile_w // 2 - 4, tile_h // 2 - 6), label, fill=text_fill)
         return img
 
     def create_wide_folder_thumbnail(self, folder_path, folderthumbnail_size=None, num_thumbnails=5):
@@ -5534,6 +5756,10 @@ class VtpGridMixin:
         radius_val = int(getattr(self, "wide_folder_innerThumbRadius", 10))
         cover = bool(getattr(self, "wide_folder_cover_tiles", True))
         fill_slots = bool(getattr(self, "wide_folder_fill_slots", True))
+        inset_px = max(0, int(getattr(self, "wide_folder_tile_inset_px", 8) or 0))
+        end_pad = max(0, int(getattr(self, "wide_folder_strip_end_pad_px", 40) or 0))
+        bg_rgba = self._wide_tile_bg_rgba()
+        bg_tag = self._wide_tile_bg_cache_tag(bg_rgba)
         # Uniform slots by default (aligned columns across rows)
         tile_aspect = float(getattr(self, "wide_folder_tile_aspect", 1.35) or 1.35)
         if tile_aspect < 0.2:
@@ -5545,7 +5771,10 @@ class VtpGridMixin:
 
         RADIUS = max(4, min(radius_val, max(4, target_height // 5)))
         aspect_key = int(round(tile_aspect * 100))
-        style = f"slots{num_slots}_c{int(cover)}_fill{int(fill_slots)}_a{aspect_key}_u1_blk"
+        style = (
+            f"slots{num_slots}_c{int(cover)}_fill{int(fill_slots)}_a{aspect_key}"
+            f"_u1_blk_i{inset_px}_p{end_pad}_{bg_tag}"
+        )
 
         wide_thumbnail_path = os.path.join(
             cache_dir_path,
@@ -5617,26 +5846,42 @@ class VtpGridMixin:
         for i in range(slot_count):
             if i < len(thumbnails):
                 pil_img = thumbnails[i]._light_image.convert("RGB")
+                # Container is full tile; image is inset so chrome shows as a thin frame
+                inner_w = max(8, tile_w - 2 * inset_px)
+                inner_h = max(8, target_height - 2 * inset_px)
                 if cover:
                     src = self._wide_trim_letterbox(pil_img)
-                    prepared.append(
-                        self._wide_cover_tile(src, tile_w, target_height).convert("RGBA")
-                    )
+                    inner = self._wide_cover_tile(src, inner_w, inner_h).convert("RGBA")
                 else:
-                    prepared.append(
-                        ImageOps.fit(
-                            pil_img, (tile_w, target_height), method=Image.LANCZOS
-                        ).convert("RGBA")
+                    inner = ImageOps.fit(
+                        pil_img, (inner_w, inner_h), method=Image.LANCZOS
+                    ).convert("RGBA")
+                tile = Image.new("RGBA", (tile_w, target_height), bg_rgba)
+                ox = (tile_w - inner_w) // 2
+                oy = (target_height - inner_h) // 2
+                # Soft-round the inner image slightly less than the outer tile
+                r_inner = int(max(2, min(RADIUS - 2, inner_w // 2, inner_h // 2)))
+                if r_inner >= 2:
+                    imask = Image.new("L", (inner_w, inner_h), 0)
+                    ImageDraw.Draw(imask).rounded_rectangle(
+                        (0, 0, inner_w - 1, inner_h - 1), radius=r_inner, fill=255
                     )
+                    rounded_inner = Image.new("RGBA", (inner_w, inner_h), (0, 0, 0, 0))
+                    rounded_inner.paste(inner, (0, 0), mask=imask)
+                    tile.paste(rounded_inner, (ox, oy), rounded_inner)
+                else:
+                    tile.paste(inner, (ox, oy))
+                prepared.append(tile)
             else:
                 prepared.append(
-                    self._wide_placeholder_tile(tile_w, target_height, i, RADIUS)
+                    self._wide_placeholder_tile(tile_w, target_height, i, RADIUS, bg_rgba)
                 )
 
-        total_width = slot_count * tile_w + max(0, slot_count - 1) * GAP
-        # Black gutters between slots (no light fringe / card bleed)
-        wide_image = Image.new("RGBA", (total_width, target_height), (0, 0, 0, 255))
-        x_offset = 0
+        content_w = slot_count * tile_w + max(0, slot_count - 1) * GAP
+        total_width = content_w + 2 * end_pad
+        # Gutters / end pads use the same chrome color as tile frames
+        wide_image = Image.new("RGBA", (total_width, target_height), bg_rgba)
+        x_offset = end_pad
 
         for resized_thumb in prepared:
             thumb_width = resized_thumb.width
@@ -5647,8 +5892,8 @@ class VtpGridMixin:
                 (0, 0, thumb_width - 1, target_height - 1), radius=r_tile, fill=255
             )
 
-            # Composite tile onto black so antialiased corners don't pick up white/card colors
-            rounded_thumb = Image.new("RGBA", (thumb_width, target_height), (0, 0, 0, 255))
+            # Outer rounded container (image already inset inside)
+            rounded_thumb = Image.new("RGBA", (thumb_width, target_height), bg_rgba)
             rounded_thumb.paste(resized_thumb, (0, 0), mask=mask)
 
             wide_image.paste(rounded_thumb, (x_offset, 0))
@@ -6023,7 +6268,7 @@ class VtpGridMixin:
         Left column width for wide folders in a row: ~25% of one grid cell
         (wide_folders_frame width / column count). Keeps separator alignment in px.
         """
-        nc = max(1, getattr(self, "numwidefolders_in_col", 2))
+        nc = max(1, getattr(self, "numwidefolders_in_col", 1))
         try:
             tw = int(target_frame.winfo_width())
         except tk.TclError:
@@ -6057,7 +6302,7 @@ class VtpGridMixin:
             except tk.TclError:
                 tw = 680
         tw = max(tw, 400)
-        nc = max(1, getattr(self, "numwidefolders_in_col", 2))
+        nc = max(1, getattr(self, "numwidefolders_in_col", 1))
         cell_w = max(220.0, (tw - 8 * nc) / nc)
         g = int(max(180, min(520, round(cell_w * float(getattr(self, "wide_folder_left_frac", 0.30) or 0.30)))))
         self._wide_folder_left_gutter_px = g
@@ -6314,15 +6559,16 @@ class VtpGridMixin:
             left_panel = ctk.CTkFrame(left_holder, fg_color=folder_bg_color, corner_radius=0)
             left_panel.pack(fill="both", expand=True, padx=(4, 6), pady=(2, 0))
 
-            sep_color = "#3a4046"
+            sep_color = self._wide_divider_color() if hasattr(self, "_wide_divider_color") else "#3a4046"
+            div_w = self._wide_divider_width() if hasattr(self, "_wide_divider_width") else 1
             sep = tk.Frame(
                 wide_folder_frame,
-                width=1,
+                width=div_w,
                 bg=sep_color,
                 bd=0,
                 highlightthickness=0,
             )
-            _show_wide_div = bool(getattr(self, "wide_folder_show_divider", True))
+            _show_wide_div = bool(getattr(self, "wide_folder_show_divider", False))
 
             right_panel = ctk.CTkFrame(wide_folder_frame, fg_color=folder_bg_color, corner_radius=0)
             right_panel.grid_rowconfigure(0, weight=1)
@@ -6346,7 +6592,7 @@ class VtpGridMixin:
                     x0 = _PAD_L_OUTER + _cr_in
                     x_sep = x0 + _left_px
                     if _show_wide_div:
-                        x_right = x_sep + 1 + _PAD_SEP_TO_RIGHT
+                        x_right = x_sep + div_w + _PAD_SEP_TO_RIGHT
                     else:
                         # No hard rule — small soft gap between label column and filmstrip
                         x_right = x_sep + 2
@@ -6354,7 +6600,7 @@ class VtpGridMixin:
                     y0 = _VPAD_INNER + _cr_in
                     left_holder.place(x=x0, y=y0, width=_left_px, height=ph)
                     if _show_wide_div:
-                        sep.place(x=x_sep, y=y0, width=1, height=ph)
+                        sep.place(x=x_sep, y=y0, width=div_w, height=ph)
                     else:
                         try:
                             sep.place_forget()
@@ -7492,7 +7738,12 @@ class VtpGridMixin:
             return
         if isinstance(widget, ctk.CTkFrame):
             if is_selected:
-                widget.configure(border_width=2, border_color=self.thumbSelColor)
+                try:
+                    sel_w = max(1, int(getattr(self, "wide_folder_sel_outline_width", 3) or 3))
+                except (TypeError, ValueError):
+                    sel_w = 2
+                sel_c = getattr(self, "wide_folder_sel_outline_color", None) or self.thumbSelColor
+                widget.configure(border_width=sel_w, border_color=sel_c)
             else:
                 def_width = getattr(widget, "default_border_width", 0)
                 def_color = getattr(widget, "default_border_color", None)
@@ -7517,12 +7768,17 @@ class VtpGridMixin:
                 return
             if not hasattr(widget, "default_border_color"):
                 return
-            wsel = int(getattr(self, "Select_outlinewidth", 2) or 2)
+            try:
+                wsel = max(1, int(getattr(self, "wide_folder_sel_outline_width",
+                                          getattr(self, "Select_outlinewidth", 2)) or 2))
+            except (TypeError, ValueError):
+                wsel = 2
+            sel_c = getattr(self, "wide_folder_sel_outline_color", None) or self.thumbSelColor
             if is_selected:
                 widget.configure(
                     highlightthickness=max(wsel, 2),
-                    highlightbackground=self.thumbSelColor,
-                    highlightcolor=self.thumbSelColor,
+                    highlightbackground=sel_c,
+                    highlightcolor=sel_c,
                 )
             else:
                 try:

@@ -469,24 +469,36 @@ class VideoThumbnailPlayer(
         # Wide folder styling variables
         self.wide_folder_cornerRadius = 12     # corner radius for wide-folder cards
         self.wide_folder_gap = 15              # filmstrip spacing between tiles
-        self.wide_folder_borderWidth = 0       # permanent border thickness
-        self.wide_folder_borderColor = "#383838"  # subtle gray border (dark theme)
+        self.wide_folder_borderWidth = 0       # idle card outline (0 = none)
+        self.wide_folder_borderColor = "#555555"  # idle outline color
+        self.wide_folder_sel_outline_width = 3    # selected card outline
+        self.wide_folder_sel_outline_color = self.thumbSelColor  # same as standard folders
         self.wide_folder_innerThumbRadius = 10  # corner radius for thumbs inside wide strip
         # Fixed uniform slots (aligned across rows) + silent placeholders for empty slots
         self.wide_folder_cover_tiles = True
         self.wide_folder_tile_aspect = 1.35    # uniform W/H for every slot
         self.wide_folder_fill_slots = True     # pad missing thumbs with placeholders
+        self.wide_folder_tile_inset_px = 8     # black frame: image inset inside tile
         self.wide_folder_min_tile_aspect = 0.62
         self.wide_folder_max_tile_aspect = 2.05
         self.wide_folder_hero_scale = 1.0
+        # Filmstrip container chrome (Preferences → Debug, only with run_debug.bat / --debug)
+        self.wide_folder_tile_bg = "#000000"   # gutters + tile frame color
+        self.wide_folder_tile_bg_alpha = 255   # 0..255 (255 = opaque)
+        self.wide_folder_strip_end_pad_px = 40  # cinematic pad past first/last thumb
         # Edge fade is applied at DISPLAY time on the preview edges (not baked into PNG)
         self.wide_folder_edge_fade_px = 56
         self.wide_folder_edge_fade_strength = 0.5  # 1.0 = full fade-to-transparent; 0.5 = softer
-        self.wide_folder_show_divider = True   # classic-grid vertical rule
+        self.wide_folder_show_divider = False  # title/filmstrip rule off by default
+        self.wide_folder_divider_color = "#4a5056"
+        self.wide_folder_divider_width = 1     # px
+        self.vg_wide_show_divider = False      # keep in sync with wide_folder_show_divider
         self.vg_wide_preview_count = 5        # configurable slot count (also in View menu)
         self.wide_folder_left_frac = 0.27      # title column; divider sits just after it
+        # Preferences → Debug section only when launched via run_debug.bat (--debug)
+        self.debug_prefs_enabled = "--debug" in sys.argv
 
-        self.numwidefolders_in_col = 2
+        self.numwidefolders_in_col = 1
         # StringVar for controlling thumbnail time via slider
         self.thumbnail_time_var = tk.IntVar(value=int(self.thumbnail_time * 100))  # Convert to percentage for the slider
         self.showFolderImages = True

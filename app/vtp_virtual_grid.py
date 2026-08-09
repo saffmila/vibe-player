@@ -144,8 +144,8 @@ class VtpVirtualGridMixin:
         # Extra space below folder title before first stats line; None = use label_row_gap
         self.vg_wide_title_bottom_gap = None
 
-        # Divider (vertical line) visibility — always on for consistent chrome
-        self.vg_wide_show_divider = True
+        # Divider (vertical line) — keep in sync with wide_folder_show_divider
+        self.vg_wide_show_divider = bool(getattr(self, "wide_folder_show_divider", False))
 
         # Strip / card chrome (None = fall back to folder_color_media / wide_folder_borderColor)
         self.vg_wide_bg_color = None
@@ -280,7 +280,8 @@ class VtpVirtualGridMixin:
         show_border = getattr(self, "vg_wide_show_border", True)
         border_w = int(getattr(self, "vg_wide_border_width", 1)) if show_border else 0
         left_px = 220
-        sep_color = "#4a5056"
+        sep_color = str(getattr(self, "wide_folder_divider_color", None) or "#4a5056")
+        sep_w = max(1, min(12, int(getattr(self, "wide_folder_divider_width", 1) or 1)))
         muted = "#9aa4ad"
         kw_color = "#8ecae6"
 
@@ -372,9 +373,9 @@ class VtpVirtualGridMixin:
             rating_canvas.pack(side="top", anchor="w", pady=(0, row_gap))
             rating_canvas.pack_forget()
 
-            sep = tk.Frame(strip, bg=sep_color, width=1)
-            if getattr(self, "vg_wide_show_divider", True):
-                sep.place(x=10 + left_px + 4, y=8, width=1, relheight=1.0, height=-16)
+            sep = tk.Frame(strip, bg=sep_color, width=sep_w)
+            if getattr(self, "vg_wide_show_divider", False):
+                sep.place(x=10 + left_px + 4, y=8, width=sep_w, relheight=1.0, height=-16)
 
             img_canvas = tk.Canvas(strip, bg=card_bg, bd=0, highlightthickness=0)
             # Left-aligned preview (nw); coords set in _vg_bind_wide_slot
@@ -502,11 +503,15 @@ class VtpVirtualGridMixin:
         cover = int(bool(getattr(self, "wide_folder_cover_tiles", True)))
         fill = int(bool(getattr(self, "wide_folder_fill_slots", True)))
         aspect = int(round(float(getattr(self, "wide_folder_tile_aspect", 1.35) or 1.35) * 100))
+        inset = int(getattr(self, "wide_folder_tile_inset_px", 8) or 0)
+        end_pad = int(getattr(self, "wide_folder_strip_end_pad_px", 40) or 0)
+        bg_tag = self._wide_tile_bg_cache_tag(self._wide_tile_bg_rgba())
         return (
             f"{file_path}\x00wide\x00n={int(nprev)}"
             f"\x00size={int(wide_w)}x{int(wide_h)}"
             f"\x00g={gap}\x00r={radius}"
-            f"\x00slots{int(nprev)}_c{cover}_fill{fill}_a{aspect}_u1_blk"
+            f"\x00slots{int(nprev)}_c{cover}_fill{fill}_a{aspect}_u1_blk_i{inset}"
+            f"_p{end_pad}_{bg_tag}"
         )
 
     def _wide_strip_dir_signature(self, folder_path: str):
@@ -585,9 +590,13 @@ class VtpVirtualGridMixin:
             getattr(self, "vg_wide_bg_color", None),
             getattr(self, "folder_color_media", "#2a3a4a"),
         )
-        show_border = getattr(self, "vg_wide_show_border", True)
-        bw = int(getattr(self, "vg_wide_border_width", 1)) if show_border else 0
-        border_raw = getattr(self, "vg_wide_border_color", None)
+        try:
+            bw = max(0, int(getattr(self, "wide_folder_borderWidth", 0) or 0))
+        except (TypeError, ValueError):
+            bw = 0
+        border_raw = getattr(self, "wide_folder_borderColor", None) or getattr(
+            self, "vg_wide_border_color", None
+        )
         border_c = self._vg_safe_color(
             border_raw, getattr(self, "wide_folder_borderColor", "#555555"))
 
@@ -598,20 +607,9 @@ class VtpVirtualGridMixin:
                 selected = True
                 break
 
-        # Card chrome (behind photos) stays at base color — lightening it against a
-        # PhotoImage flattened onto the base tone creates a dark "frame" around thumbs.
+        # Card chrome stays at base color; selection uses outline only (no hover).
         fill_bg = card_bg
         left_bg = card_bg
-        if slot.get("_hover") and not selected and isinstance(card_bg, str) and card_bg.startswith("#") and len(card_bg) == 7:
-            try:
-                r = int(card_bg[1:3], 16)
-                g = int(card_bg[3:5], 16)
-                b = int(card_bg[5:7], 16)
-                left_bg = "#{:02x}{:02x}{:02x}".format(
-                    min(255, r + 18), min(255, g + 18), min(255, b + 20)
-                )
-            except Exception:
-                left_bg = card_bg
 
         if slot.get("_painted_bg") != left_bg:
             slot["_painted_bg"] = left_bg
@@ -627,9 +625,17 @@ class VtpVirtualGridMixin:
                     pass
 
         if selected:
-            outline_c = self.thumbSelColor
-            ow = max(int(getattr(self, "Select_outlinewidth", 2) or 2), 2)
-        elif show_border and bw > 0:
+            sel_raw = getattr(self, "wide_folder_sel_outline_color", None)
+            outline_c = self._vg_safe_color(
+                sel_raw, getattr(self, "thumbSelColor", "#4f575f")
+            )
+            try:
+                ow = max(1, min(10, int(
+                    getattr(self, "wide_folder_sel_outline_width", 3) or 3
+                )))
+            except (TypeError, ValueError):
+                ow = 3
+        elif bw > 0:
             outline_c = border_c
             ow = max(bw, 1)
         else:
@@ -716,9 +722,21 @@ class VtpVirtualGridMixin:
         if not sep:
             return
         try:
-            if getattr(self, "vg_wide_show_divider", True):
+            show = bool(getattr(self, "wide_folder_show_divider",
+                                getattr(self, "vg_wide_show_divider", False)))
+            if show:
+                div_w = self._wide_divider_width() if hasattr(self, "_wide_divider_width") else max(
+                    1, int(getattr(self, "wide_folder_divider_width", 1) or 1)
+                )
+                div_c = self._wide_divider_color() if hasattr(self, "_wide_divider_color") else str(
+                    getattr(self, "wide_folder_divider_color", "#4a5056") or "#4a5056"
+                )
+                try:
+                    sep.configure(bg=div_c, width=div_w)
+                except Exception:
+                    pass
                 # Sit just after the title column (x=10 + left_px + small gap)
-                sep.place(x=10 + left_px + 4, y=8, width=1, relheight=1.0, height=-16)
+                sep.place(x=10 + left_px + 4, y=8, width=div_w, relheight=1.0, height=-16)
             else:
                 sep.place_forget()
         except Exception:
@@ -726,20 +744,24 @@ class VtpVirtualGridMixin:
 
     def _vg_compute_wide_left_px(self, strip_w: int) -> int:
         """Match _vg_bind_wide_slot left panel width (for divider sync on layout)."""
-        show_div = getattr(self, "vg_wide_show_divider", True)
+        show_div = bool(getattr(self, "wide_folder_show_divider",
+                                getattr(self, "vg_wide_show_divider", False)))
         frac = float(getattr(self, "wide_folder_left_frac", 0.27) or 0.27)
         left_px = max(180, min(520, int(round(strip_w * frac))))
         pad_side = int(getattr(self, "vg_wide_preview_pad_side", _WIDE_PREVIEW_PAD_SIDE))
         pad_after = int(getattr(self, "vg_wide_preview_pad_after_div", _WIDE_PREVIEW_PAD_AFTER_DIV))
+        div_w = self._wide_divider_width() if hasattr(self, "_wide_divider_width") else max(
+            1, int(getattr(self, "wide_folder_divider_width", 1) or 1)
+        )
         if show_div:
             sep_x = 10 + left_px + 4
-            preview_start = sep_x + 1 + pad_after
+            preview_start = sep_x + div_w + pad_after
         else:
             preview_start = 10 + left_px + pad_side
         min_preview_w = 140
         if (strip_w - (preview_start + pad_side)) < min_preview_w:
             if show_div:
-                left_px = max(180, strip_w - (10 + 4 + 1 + pad_after + pad_side + min_preview_w))
+                left_px = max(180, strip_w - (10 + 4 + div_w + pad_after + pad_side + min_preview_w))
             else:
                 left_px = max(180, strip_w - (10 + pad_side + pad_side + min_preview_w))
         return left_px
@@ -852,7 +874,7 @@ class VtpVirtualGridMixin:
             self.columns = self._vg_cols
 
             if self._vg_is_wide and self._vg_folder_count > 0:
-                wide_cols = max(1, getattr(self, "numwidefolders_in_col", 2))
+                wide_cols = max(1, getattr(self, "numwidefolders_in_col", 1))
                 self._vg_wide_rows = math.ceil(self._vg_folder_count / wide_cols)
                 self._vg_wide_cols = wide_cols
                 file_count = len(self._vg_data) - self._vg_folder_count
@@ -1639,24 +1661,28 @@ class VtpVirtualGridMixin:
         strip_w = max(1, int(strip_w))
         strip_h = max(1, int(strip_h))
 
-        show_div = getattr(self, "vg_wide_show_divider", True)
+        show_div = bool(getattr(self, "wide_folder_show_divider",
+                                getattr(self, "vg_wide_show_divider", False)))
         frac = float(getattr(self, "wide_folder_left_frac", 0.27) or 0.27)
         left_px = max(180, min(520, int(round(strip_w * frac))))
         pad_side = int(getattr(self, "vg_wide_preview_pad_side", _WIDE_PREVIEW_PAD_SIDE))
         pad_after = int(getattr(self, "vg_wide_preview_pad_after_div", _WIDE_PREVIEW_PAD_AFTER_DIV))
+        div_w = self._wide_divider_width() if hasattr(self, "_wide_divider_width") else max(
+            1, int(getattr(self, "wide_folder_divider_width", 1) or 1)
+        )
         # Divider sits just after the title column; thumbs start after a small gap.
         if show_div:
             sep_x = 10 + left_px + 4
-            preview_x0 = sep_x + 1 + pad_after
+            preview_x0 = sep_x + div_w + pad_after
         else:
             sep_x = 10 + left_px
             preview_x0 = sep_x + pad_side
         min_preview_w = 140
         if (strip_w - (preview_x0 + pad_side)) < min_preview_w:
             if show_div:
-                left_px = max(180, strip_w - (10 + 4 + 1 + pad_after + pad_side + min_preview_w))
+                left_px = max(180, strip_w - (10 + 4 + div_w + pad_after + pad_side + min_preview_w))
                 sep_x = 10 + left_px + 4
-                preview_x0 = sep_x + 1 + pad_after
+                preview_x0 = sep_x + div_w + pad_after
             else:
                 left_px = max(180, strip_w - (10 + pad_side + pad_side + min_preview_w))
                 sep_x = 10 + left_px
@@ -1996,25 +2022,8 @@ class VtpVirtualGridMixin:
             w.bind("<Double-Button-1>",
                    lambda e, p=file_path: self.display_thumbnails(p))
 
-        def _wide_hover_enter(_e=None, s=slot):
-            if s.get("_hover"):
-                return
-            s["_hover"] = True
-            self._vg_redraw_wide_card(s)
-
-        def _wide_hover_leave(_e=None, s=slot):
-            if not s.get("_hover"):
-                return
-            s["_hover"] = False
-            self._vg_redraw_wide_card(s)
-
-        # Bind only on the outer card shell so moving between left/preview children
-        # does not flicker hover off/on.
-        try:
-            slot["frame"].bind("<Enter>", _wide_hover_enter, add="+")
-            slot["frame"].bind("<Leave>", _wide_hover_leave, add="+")
-        except Exception:
-            pass
+        # No hover chrome on wide folders (matches standard folders — selection only).
+        slot["_hover"] = False
 
         self.thumbnail_labels[file_path] = {
             "row": data_idx, "col": 0, "index": data_idx,

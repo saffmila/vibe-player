@@ -281,7 +281,7 @@ class VtpPreferencesMixin:
                 except (TypeError, ValueError):
                     self.search_results_page_size = 250
                 # New additions
-                self.numwidefolders_in_col = settings.get("numwidefolders_in_col", 2)  # Default to 2
+                self.numwidefolders_in_col = settings.get("numwidefolders_in_col", 1)  # Default to 1
                 try:
                     self.vg_wide_preview_count = max(
                         3, min(10, int(settings.get("vg_wide_preview_count", 5)))
@@ -324,6 +324,114 @@ class VtpPreferencesMixin:
                     )
                 except (TypeError, ValueError):
                     self.wide_folder_gap = 15
+                try:
+                    raw_bg = str(settings.get("wide_folder_tile_bg", "#000000") or "#000000").strip()
+                    if not raw_bg.startswith("#"):
+                        raw_bg = "#" + raw_bg
+                    hx = raw_bg[1:]
+                    if len(hx) == 3:
+                        hx = "".join(c * 2 for c in hx)
+                    if len(hx) == 6:
+                        int(hx, 16)
+                        self.wide_folder_tile_bg = f"#{hx.lower()}"
+                except (TypeError, ValueError):
+                    self.wide_folder_tile_bg = "#000000"
+                try:
+                    self.wide_folder_tile_bg_alpha = max(
+                        0, min(255, int(settings.get("wide_folder_tile_bg_alpha", 255)))
+                    )
+                except (TypeError, ValueError):
+                    self.wide_folder_tile_bg_alpha = 255
+                try:
+                    self.wide_folder_strip_end_pad_px = max(
+                        0, min(120, int(settings.get("wide_folder_strip_end_pad_px", 40)))
+                    )
+                except (TypeError, ValueError):
+                    self.wide_folder_strip_end_pad_px = 40
+                try:
+                    self.wide_folder_tile_inset_px = max(
+                        0, min(24, int(settings.get("wide_folder_tile_inset_px", 8)))
+                    )
+                except (TypeError, ValueError):
+                    self.wide_folder_tile_inset_px = 8
+                self.wide_folder_show_divider = bool(
+                    settings.get("wide_folder_show_divider", False)
+                )
+                self.vg_wide_show_divider = self.wide_folder_show_divider
+                try:
+                    raw_div = str(
+                        settings.get("wide_folder_divider_color", "#4a5056") or "#4a5056"
+                    ).strip()
+                    if not raw_div.startswith("#"):
+                        raw_div = "#" + raw_div
+                    hx = raw_div[1:]
+                    if len(hx) == 3:
+                        hx = "".join(c * 2 for c in hx)
+                    if len(hx) == 6:
+                        int(hx, 16)
+                        self.wide_folder_divider_color = f"#{hx.lower()}"
+                except (TypeError, ValueError):
+                    self.wide_folder_divider_color = "#4a5056"
+                try:
+                    self.wide_folder_divider_width = max(
+                        1, min(12, int(settings.get("wide_folder_divider_width", 1)))
+                    )
+                except (TypeError, ValueError):
+                    self.wide_folder_divider_width = 1
+                try:
+                    self.vg_wide_inter_row_gap = max(
+                        0, min(80, int(settings.get("vg_wide_inter_row_gap", 10)))
+                    )
+                except (TypeError, ValueError):
+                    self.vg_wide_inter_row_gap = 10
+                try:
+                    self.wide_folder_borderWidth = max(
+                        0, min(10, int(settings.get("wide_folder_borderWidth", 0)))
+                    )
+                except (TypeError, ValueError):
+                    self.wide_folder_borderWidth = 0
+                try:
+                    raw_b = str(
+                        settings.get("wide_folder_borderColor", "#555555") or "#555555"
+                    ).strip()
+                    if not raw_b.startswith("#"):
+                        raw_b = "#" + raw_b
+                    hx = raw_b[1:]
+                    if len(hx) == 3:
+                        hx = "".join(c * 2 for c in hx)
+                    if len(hx) == 6:
+                        int(hx, 16)
+                        self.wide_folder_borderColor = f"#{hx.lower()}"
+                except (TypeError, ValueError):
+                    self.wide_folder_borderColor = "#555555"
+                try:
+                    self.wide_folder_sel_outline_width = max(
+                        1, min(10, int(settings.get("wide_folder_sel_outline_width", 3)))
+                    )
+                except (TypeError, ValueError):
+                    self.wide_folder_sel_outline_width = 3
+                try:
+                    raw_s = str(
+                        settings.get(
+                            "wide_folder_sel_outline_color",
+                            getattr(self, "thumbSelColor", "#4f575f"),
+                        )
+                        or getattr(self, "thumbSelColor", "#4f575f")
+                    ).strip()
+                    if not raw_s.startswith("#"):
+                        raw_s = "#" + raw_s
+                    hx = raw_s[1:]
+                    if len(hx) == 3:
+                        hx = "".join(c * 2 for c in hx)
+                    if len(hx) == 6:
+                        int(hx, 16)
+                        self.wide_folder_sel_outline_color = f"#{hx.lower()}"
+                except (TypeError, ValueError):
+                    self.wide_folder_sel_outline_color = getattr(
+                        self, "thumbSelColor", "#4f575f"
+                    )
+                if hasattr(self, "_sync_wide_folder_border_flags"):
+                    self._sync_wide_folder_border_flags()
                 try:
                     self.wide_folder_stats_font = ctk.CTkFont(size=self.vg_wide_stats_font_size)
                 except Exception:
@@ -459,7 +567,7 @@ class VtpPreferencesMixin:
             self.thumbnail_time = 0.1  # Default to 10% for thumbnail creation time
             self.thumbnail_time_var.set(10)
             self.search_results_page_size = 250
-            self.numwidefolders_in_col = 2  # Default
+            self.numwidefolders_in_col = 1  # Default
             # self.wide_folders_var.set(settings.get("wide_folders_var", False))  # Default
             # self.folder_view_mode.set("Wide" if settings.get("wide_folders_var") else "Standard")
             self.wide_folders_check_var.set(False)  # Default False (Standard)
