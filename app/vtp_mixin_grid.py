@@ -7449,6 +7449,7 @@ class VtpGridMixin:
                 vlc_audio_device=vlc_audio_device,
                 auto_play=self.auto_play,
                 subtitles_enabled=self.subtitles_enabled,
+                playlist_manager=getattr(self, "playlist_manager", None),
                 use_gpu_upscale=getattr(self, "gpu_upscale", False)
             )
             logging.info("[OpenVideo TIMING] VideoPlayer constructor: %.3fs", time.perf_counter() - ctor_start)

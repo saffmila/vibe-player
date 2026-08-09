@@ -381,6 +381,11 @@ class VideoPlayer:
         self._open_full_app_overlay_hide_job = None
         self._cleaning_up = False
         self._cleanup_done = False
+        self._media_end_handled_path = None
+        self._playlist_advance_in_progress = False
+        self._saw_playing_since_media_load = False
+        self._media_load_mono = 0.0
+        self._fast_poll_until = 0.0
 
         self.global_listener = None
         pynput_start = time.perf_counter()
@@ -952,9 +957,10 @@ class VideoPlayer:
             # 1. Získání informací
             # Index (např. [1/12])
             index_str = ""
-            if self.playlist_manager and self.playlist_manager.playlist:
-                current = self.playlist_manager.current_playing_index + 1
-                total = len(self.playlist_manager.playlist)
+            pm = self._get_playlist_manager()
+            if pm and pm.playlist:
+                current = pm.current_playing_index + 1
+                total = len(pm.playlist)
                 index_str = f"[{current}/{total}] "
             elif self.controller.video_files:
                  # Fallback for folder
@@ -4368,6 +4374,11 @@ class VideoPlayer:
             return
         _log_vlc_timing("play_video ensure_vlc_player", ensure_start)
 
+        self._media_end_handled_path = None
+        self._saw_playing_since_media_load = False
+        self._media_load_mono = time.monotonic()
+        self._fast_poll_until = time.monotonic() + 3.0
+
         norm = self._normalized_media_path(self.video_path)
 
         # Resume from pause: do NOT call set_media again. Re-loading media on every
@@ -4586,6 +4597,13 @@ class VideoPlayer:
                 ctrl.refresh_bookmark_manager_if_open(path)
             except Exception as e:
                 logging.info("[safe_switch] bookmark manager refresh: %s", e)
+        # Restart end/position polling after the switch flag clears (never sync-nested).
+        if self.playing:
+            try:
+                self._slider_poll_after_id = self.video_window.after(100, self.update_time_slider)
+            except Exception:
+                self._slider_poll_after_id = None
+            self.update_timer()
 
     def safe_switch_video(self, path, name):
         """
@@ -4612,6 +4630,10 @@ class VideoPlayer:
 
         was_loop_active = bool(getattr(self, "loop_active", False))
         self._media_switch_in_progress = True
+        self._media_end_handled_path = None
+        self._saw_playing_since_media_load = False
+        self._media_load_mono = time.monotonic()
+        self._fast_poll_until = time.monotonic() + 3.0
         try:
             self._cancel_broken_decode_checks()
             self._hide_broken_playback_overlay()
@@ -4663,14 +4685,19 @@ class VideoPlayer:
                 self._refresh_loop_state_after_video_switch(keep_enabled=was_loop_active)
                 self._schedule_decode_placeholder_checks()
                 self._media_switch_in_progress = False
-
-            if self.playlist_manager and self.playlist_manager.is_playlist_open and self.playlist_manager.playlist:
                 try:
-                    current_idx = self.playlist_manager.playlist.index(path)
-                    self.playlist_manager.current_playing_index = current_idx
-                    if hasattr(self.playlist_manager, "update_ui_selection"):
-                        self.playlist_manager.update_ui_selection(current_idx)
-                except ValueError:
+                    self._slider_poll_after_id = self.video_window.after(100, self.update_time_slider)
+                except Exception:
+                    self._slider_poll_after_id = None
+                self.update_timer()
+
+            pm = self._get_playlist_manager()
+            if pm and pm.playlist:
+                idx = self._playlist_index_for_path(path)
+                if idx is not None:
+                    pm.current_playing_index = idx
+                    pm.update_playlist_selection()
+                else:
                     logging.info("[Playlist Sync] Video %s není v aktuálním playlistu.", name)
         except Exception as e:
             logging.exception("[safe_switch] media switch failed: %s", e)
@@ -4727,60 +4754,247 @@ class VideoPlayer:
 
 
 
+    def _get_playlist_manager(self):
+        """Prefer the player-bound manager; fall back to the controller's instance."""
+        pm = getattr(self, "playlist_manager", None)
+        if pm is None and getattr(self, "controller", None) is not None:
+            pm = getattr(self.controller, "playlist_manager", None)
+            if pm is not None:
+                self.playlist_manager = pm
+        return pm
+
+    @staticmethod
+    def _norm_media_path(path: str) -> str:
+        try:
+            return os.path.normcase(os.path.normpath(path))
+        except Exception:
+            return path or ""
+
+    def _playlist_index_for_path(self, path: str | None) -> int | None:
+        pm = self._get_playlist_manager()
+        if not pm or not pm.playlist or not path:
+            return None
+        try:
+            return pm.playlist.index(path)
+        except ValueError:
+            pass
+        norm = self._norm_media_path(path)
+        for i, item in enumerate(pm.playlist):
+            if self._norm_media_path(item) == norm:
+                return i
+        return None
+
+    def _playlist_index_for_current(self) -> int | None:
+        return self._playlist_index_for_path(getattr(self, "video_path", None))
+
+    def _playback_has_ended(self) -> bool:
+        """
+        True when the *current* media has naturally finished.
+
+        Stale ``Ended`` from the previous file is ignored until this media has
+        been observed in Playing/Buffering (or made measurable progress). A
+        fixed multi-second grace window is intentionally avoided — it skips
+        ~1–2s clips entirely.
+        """
+        if not self.player:
+            return False
+        try:
+            st = self.player.get_state()
+        except Exception:
+            return False
+
+        if st in (vlc.State.Playing, vlc.State.Paused, vlc.State.Buffering):
+            self._saw_playing_since_media_load = True
+            return False
+
+        # Progress fallback for ultra-short clips that finish between polls.
+        try:
+            t_ms = int(self.player.get_time())
+        except Exception:
+            t_ms = -1
+        if t_ms > 50:
+            self._saw_playing_since_media_load = True
+
+        if st != vlc.State.Ended:
+            return False
+
+        if getattr(self, "_saw_playing_since_media_load", False):
+            return True
+
+        # Still no Playing observed: only accept Ended after the media has had
+        # time to start. Prevents cascading on a leftover Ended from the
+        # previous file right after set_media/play.
+        loaded_at = float(getattr(self, "_media_load_mono", 0.0) or 0.0)
+        elapsed = (time.monotonic() - loaded_at) if loaded_at else 0.0
+        try:
+            length_ms = int(self.player.get_length())
+        except Exception:
+            length_ms = -1
+
+        if length_ms > 0 and elapsed >= max(0.35, (length_ms / 1000.0) * 0.6):
+            logging.info(
+                "[Playlist] Short-clip end fallback (len=%.2fs elapsed=%.2fs)",
+                length_ms / 1000.0,
+                elapsed,
+            )
+            return True
+        if elapsed >= 2.0:
+            logging.info("[Playlist] End fallback after %.2fs without Playing", elapsed)
+            return True
+        return False
+
+    def _mark_playback_stopped_at_end(self) -> None:
+        """UI + state after natural end when we are not advancing."""
+        self.playing = False
+        if hasattr(self, "play_button") and self.show_video_button_bar:
+            try:
+                self.play_button.configure(
+                    image=self.play_button_icon if self.play_button_icon else None,
+                    text="" if self.play_button_icon else "play",
+                )
+            except Exception:
+                pass
+
+    def _advance_playlist_to_index(self, next_idx: int) -> None:
+        """Deferred playlist advance — must not run nested inside VLC poll callbacks."""
+        if getattr(self, "_cleaning_up", False):
+            return
+        pm = self._get_playlist_manager()
+        if not pm or not pm.playlist:
+            self._playlist_advance_in_progress = False
+            self._mark_playback_stopped_at_end()
+            return
+        if not (0 <= next_idx < len(pm.playlist)):
+            self._playlist_advance_in_progress = False
+            self._mark_playback_stopped_at_end()
+            return
+        next_path = pm.playlist[next_idx]
+        logging.info(
+            "[Playlist] Advancing to %s (%d/%d)",
+            os.path.basename(next_path),
+            next_idx + 1,
+            len(pm.playlist),
+        )
+        try:
+            pm.current_playing_index = next_idx
+            self.safe_switch_video(next_path, os.path.basename(next_path))
+            pm.update_playlist_selection()
+        finally:
+            self._playlist_advance_in_progress = False
+
+    def _maybe_handle_media_ended(self) -> bool:
+        """
+        On natural media end: schedule playlist advance, or stop.
+
+        Returns True when the end was handled (caller should not keep treating
+        this tick as active playback).
+        """
+        if self.embed or getattr(self, "_cleaning_up", False):
+            return False
+        if getattr(self, "_media_switch_in_progress", False):
+            return False
+        if getattr(self, "_playlist_advance_in_progress", False):
+            return False
+        if self.is_repeating or getattr(self, "loop_active", False):
+            return False
+        if not self._playback_has_ended():
+            return False
+
+        path = getattr(self, "video_path", None)
+        if path and getattr(self, "_media_end_handled_path", None) == path:
+            return True
+        self._media_end_handled_path = path
+
+        pm = self._get_playlist_manager()
+        idx = self._playlist_index_for_current() if pm else None
+        if pm and idx is not None:
+            next_idx = idx + 1
+            if next_idx < len(pm.playlist):
+                logging.info(
+                    "[Playlist] End reached — scheduling advance %s -> #%d",
+                    os.path.basename(path or ""),
+                    next_idx + 1,
+                )
+                # Leave the VLC poll stack before stop/set_media (avoids UI freeze).
+                self._playlist_advance_in_progress = True
+                self.playing = False
+                try:
+                    self.video_window.after(50, lambda i=next_idx: self._advance_playlist_to_index(i))
+                except Exception:
+                    self._playlist_advance_in_progress = False
+                    self._advance_playlist_to_index(next_idx)
+                return True
+
+            logging.info("[Playlist] End of playlist reached — stopping.")
+            pm.current_playing_index = idx
+            pm.update_playlist_selection()
+
+        self._mark_playback_stopped_at_end()
+        return True
+
     def skip_next(self, event=None):
-        if self.playlist_manager and self.playlist_manager.is_playlist_open and self.playlist_manager.playlist:
-            self.playlist_manager.current_playing_index = (self.playlist_manager.current_playing_index + 1) % len(self.playlist_manager.playlist)
-            path = self.playlist_manager.playlist[self.playlist_manager.current_playing_index]
+        pm = self._get_playlist_manager()
+        idx = self._playlist_index_for_current() if pm else None
+        if pm and pm.playlist and idx is not None:
+            pm.current_playing_index = (idx + 1) % len(pm.playlist)
+            path = pm.playlist[pm.current_playing_index]
             name = os.path.basename(path)
-        else:
-            current_index = self.controller.current_video_index
-            video_files = self.controller.video_files
-            if not video_files:
-                return
-            next_index = (current_index + 1) % len(video_files)
-            self.controller.current_video_index = next_index
-            path = video_files[next_index]['path']
-            name = video_files[next_index]['name']
+            self.safe_switch_video(path, name)
+            pm.update_playlist_selection()
+            return
 
+        current_index = self.controller.current_video_index
+        video_files = self.controller.video_files
+        if not video_files:
+            return
+        next_index = (current_index + 1) % len(video_files)
+        self.controller.current_video_index = next_index
+        path = video_files[next_index]['path']
+        name = video_files[next_index]['name']
         self.safe_switch_video(path, name)
-
-
-    
-
 
     def skip_back(self, event=None):
-        if self.playlist_manager and self.playlist_manager.is_playlist_open and self.playlist_manager.playlist:
-            self.playlist_manager.current_playing_index = (self.playlist_manager.current_playing_index - 1) % len(self.playlist_manager.playlist)
-            path = self.playlist_manager.playlist[self.playlist_manager.current_playing_index]
+        pm = self._get_playlist_manager()
+        idx = self._playlist_index_for_current() if pm else None
+        if pm and pm.playlist and idx is not None:
+            pm.current_playing_index = (idx - 1) % len(pm.playlist)
+            path = pm.playlist[pm.current_playing_index]
             name = os.path.basename(path)
-        else:
-            current_index = self.controller.current_video_index
-            video_files = self.controller.video_files
-            if not video_files:
-                return
-            previous_index = (current_index - 1) % len(video_files)
-            self.controller.current_video_index = previous_index
-            path = video_files[previous_index]['path']
-            name = video_files[previous_index]['name']
+            self.safe_switch_video(path, name)
+            pm.update_playlist_selection()
+            return
 
+        current_index = self.controller.current_video_index
+        video_files = self.controller.video_files
+        if not video_files:
+            return
+        previous_index = (current_index - 1) % len(video_files)
+        self.controller.current_video_index = previous_index
+        path = video_files[previous_index]['path']
+        name = video_files[previous_index]['name']
         self.safe_switch_video(path, name)
 
-
-
-
     def skip_next_in_playlist(self):
-        if self.playlist_manager and self.playlist_manager.playlist:
-            self.playlist_manager.current_playing_index = (self.playlist_manager.current_playing_index + 1) % len(self.playlist_manager.playlist)
-            next_video = self.playlist_manager.playlist[self.playlist_manager.current_playing_index]
+        pm = self._get_playlist_manager()
+        if pm and pm.playlist:
+            idx = self._playlist_index_for_current()
+            if idx is None:
+                idx = pm.current_playing_index
+            pm.current_playing_index = (idx + 1) % len(pm.playlist)
+            next_video = pm.playlist[pm.current_playing_index]
             self.safe_switch_video(next_video, os.path.basename(next_video))
-            self.playlist_manager.update_playlist_selection()
+            pm.update_playlist_selection()
 
     def skip_previous_in_playlist(self):
-        if self.playlist_manager and self.playlist_manager.playlist:
-            self.playlist_manager.current_playing_index = (self.playlist_manager.current_playing_index - 1) % len(self.playlist_manager.playlist)
-            previous_video = self.playlist_manager.playlist[self.playlist_manager.current_playing_index]
+        pm = self._get_playlist_manager()
+        if pm and pm.playlist:
+            idx = self._playlist_index_for_current()
+            if idx is None:
+                idx = pm.current_playing_index
+            pm.current_playing_index = (idx - 1) % len(pm.playlist)
+            previous_video = pm.playlist[pm.current_playing_index]
             self.safe_switch_video(previous_video, os.path.basename(previous_video))
-            self.playlist_manager.update_playlist_selection()
+            pm.update_playlist_selection()
 
 
     # def skip_next(self):
@@ -5367,10 +5581,19 @@ class VideoPlayer:
 
 
     def update_time_slider(self):
-        if getattr(self, "_cleaning_up", False) or getattr(self, "_media_switch_in_progress", False):
+        if getattr(self, "_cleaning_up", False):
             return
           # POISTKA: Ak okno už neexistuje, okamžite skonči
         if not hasattr(self, 'video_window') or not self.video_window.winfo_exists():
+            return
+
+        # Keep the poll chain alive across media switches; work resumes when the flag clears.
+        if getattr(self, "_media_switch_in_progress", False):
+            try:
+                delay = 100 if time.monotonic() < float(getattr(self, "_fast_poll_until", 0.0) or 0.0) else 300
+                self._slider_poll_after_id = self.video_window.after(delay, self.update_time_slider)
+            except Exception:
+                self._slider_poll_after_id = None
             return
         
        # Spouštěj jen pokud hraje video A máme validní video_path
@@ -5378,6 +5601,10 @@ class VideoPlayer:
             return
         
         if self.playing:
+            if self._maybe_handle_media_ended():
+                # Stopped, or advance scheduled via after() — do not nest safe_switch here.
+                return
+
             duration = self.player.get_length()
             current_time = self.player.get_time()
 
@@ -5414,7 +5641,9 @@ class VideoPlayer:
                     self.parent.timeline_window = None
 
         try:
-            self._slider_poll_after_id = self.video_window.after(300, self.update_time_slider)
+            # Poll faster right after a switch so ~1–2s clips still register Playing.
+            delay = 100 if time.monotonic() < float(getattr(self, "_fast_poll_until", 0.0) or 0.0) else 300
+            self._slider_poll_after_id = self.video_window.after(delay, self.update_time_slider)
         except Exception:
             self._slider_poll_after_id = None
 
