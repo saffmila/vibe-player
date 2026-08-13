@@ -7,6 +7,7 @@ parented to the image viewer so it stays above fullscreen / topmost windows.
 Button labels are action verbs (users often read buttons before body text):
   - Keep editing   → stay in the current edit (safe)
   - Discard & skip → abandon edit and continue next/prev
+  - Discard        → abandon edit and leave crop mode (Esc / Cancel)
 """
 
 from __future__ import annotations
@@ -38,10 +39,51 @@ def confirm_leave_image_edit(parent, processes: list[str]) -> bool:
         "Unsaved changes will be lost."
     )
 
-    return _show_leave_dialog(parent, title, message)
+    return _show_leave_dialog(
+        parent,
+        title,
+        message,
+        discard_text="Discard & skip",
+    )
 
 
-def _show_leave_dialog(parent, title: str, message: str) -> bool:
+def confirm_discard_image_edit(parent, processes: list[str]) -> bool:
+    """
+    Ask whether to abandon an active edit (Esc / Cancel) without navigating.
+
+    Returns True if there is nothing to guard, or the user chooses Discard.
+    """
+    labels = [p for p in (processes or []) if p]
+    if not labels:
+        return True
+
+    if len(labels) == 1:
+        title = f"{labels[0]} in progress"
+        process_bit = labels[0].lower()
+    else:
+        title = "Edit in progress"
+        process_bit = " / ".join(labels).lower()
+
+    message = (
+        f"Discard this {process_bit}?\n"
+        "Unsaved changes will be lost."
+    )
+
+    return _show_leave_dialog(
+        parent,
+        title,
+        message,
+        discard_text="Discard",
+    )
+
+
+def _show_leave_dialog(
+    parent,
+    title: str,
+    message: str,
+    *,
+    discard_text: str = "Discard & skip",
+) -> bool:
     result = {"value": False}
 
     if parent is None:
@@ -96,15 +138,23 @@ def _show_leave_dialog(parent, title: str, message: str) -> bool:
 
     # Same packing order as universal_dialog: confirm left, cancel right.
     ctk.CTkButton(
-        btn_row, text="Discard & skip", width=130, command=_discard
+        btn_row, text=discard_text, width=130, command=_discard
     ).pack(side="left", padx=6)
     ctk.CTkButton(
         btn_row, text="Keep editing", width=120, command=_keep
     ).pack(side="right", padx=6)
 
     dialog.protocol("WM_DELETE_WINDOW", _keep)
-    dialog.bind("<Escape>", lambda e: _keep())
-    dialog.bind("<Return>", lambda e: _discard())
+    # Escape/Return are bound after idle so the key that opened this dialog
+    # (viewer Esc) cannot immediately dismiss it as Keep editing.
+    def _bind_keys():
+        try:
+            if not dialog.winfo_exists():
+                return
+            dialog.bind("<Escape>", lambda e: _keep())
+            dialog.bind("<Return>", lambda e: _discard())
+        except Exception:
+            pass
 
     try:
         dialog.update_idletasks()
@@ -119,6 +169,7 @@ def _show_leave_dialog(parent, title: str, message: str) -> bool:
         dialog.lift()
         dialog.focus_force()
         dialog.grab_set()
+        dialog.after_idle(_bind_keys)
         dialog.wait_window()
     except Exception as e:
         logging.info("leave-edit dialog failed: %s", e)

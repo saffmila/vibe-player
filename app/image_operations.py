@@ -32,7 +32,7 @@ from gui_elements import (
     _current_file_rating,
 )
 from image_crop_hud import CropModeController
-from image_edit_guard import confirm_leave_image_edit
+from image_edit_guard import confirm_discard_image_edit, confirm_leave_image_edit
 from image_loader import load_pil_frames, load_pil_image
 from image_resize_dialog import open_resize_image_dialog
 from external_apps import append_external_apps_cascade, append_external_apps_flat_commands
@@ -609,13 +609,25 @@ class ImageViewerLegacy:
         self.crop.enter()
 
     def exit_crop_mode(self):
-        """Cancel crop mode without applying."""
+        """Cancel crop mode without applying (no confirm — caller must guard)."""
         self.crop.exit()
+
+    def _request_cancel_crop(self):
+        """Ask before leaving crop/rotate (Esc, Cancel, X toggle, context menu)."""
+        if not self._crop_active():
+            return
+        if not confirm_discard_image_edit(self.image_window, ["Crop / Rotate"]):
+            return
+        self.exit_crop_mode()
 
     def _on_escape_key(self, event=None):
         """Escape cancels crop when active; otherwise closes the viewer."""
         if self._crop_active():
-            self.exit_crop_mode()
+            # Defer so this Esc KeyPress cannot hit the confirm dialog as Keep.
+            try:
+                self.image_window.after_idle(self._request_cancel_crop)
+            except Exception:
+                self._request_cancel_crop()
             return
         self._do_close()
 
@@ -659,7 +671,7 @@ class ImageViewerLegacy:
     def _hotkey_crop(self, event=None):
         """Toggle crop mode with the image_crop hotkey (default: X)."""
         if self._crop_active():
-            self.exit_crop_mode()
+            self._request_cancel_crop()
         else:
             self.enter_crop_mode()
 
@@ -1765,7 +1777,7 @@ class ImageViewerLegacy:
         menu.add_command(label=f"Flip Vertical ({hk_label('image_flip_v', 'V')})", command=self.flip_vertical)
         menu.add_separator()
         if self._crop_active():
-            menu.add_command(label="Cancel Crop (Esc)", command=self.exit_crop_mode)
+            menu.add_command(label="Cancel Crop (Esc)", command=self._request_cancel_crop)
         else:
             menu.add_command(
                 label=f"Crop… ({hk_label('image_crop', 'X')})",

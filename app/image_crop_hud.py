@@ -556,6 +556,7 @@ class CropModeController:
         self._preview_after = None
         self._preview_pending = False
         self._preview_busy = False
+        self._preview_generation = 0
         self._last_preview_angle = None
         # Bind once; handlers no-op while inactive (avoids stacking add="+" on re-enter).
         canvas = viewer.canvas
@@ -606,7 +607,7 @@ class CropModeController:
             on_angle_change=self._on_hud_angle,
             on_rotate_90=self._on_hud_rotate_90,
             on_angle_reset=self._on_hud_angle_reset,
-            on_cancel=self.exit,
+            on_cancel=getattr(v, "_request_cancel_crop", self.exit),
             on_apply_overwrite=lambda: self.apply("overwrite"),
             on_apply_copy=lambda: self.apply("copy"),
             on_apply_clipboard=lambda: self.apply("clipboard"),
@@ -625,10 +626,15 @@ class CropModeController:
         if not self.active:
             return
         v = self.v
+        # Mark inactive first so an in-flight rotate preview cannot re-install
+        # a proxy frame after we restore the original (looks like Discard failed).
         self.active = False
         self._drag = None
         self.rect = None
         self._cancel_preview_timer()
+        self._preview_busy = False
+        self._preview_pending = False
+        self._preview_generation = getattr(self, "_preview_generation", 0) + 1
 
         canvas = v.canvas
         canvas.delete(_CROP_TAG)
@@ -1325,6 +1331,7 @@ class CropModeController:
             return
 
         dragging = bool(self._drag and self._drag.get("mode") == "rotate")
+        gen = getattr(self, "_preview_generation", 0)
         self._preview_busy = True
         try:
             if abs(angle) < 1e-6:
@@ -1337,6 +1344,9 @@ class CropModeController:
                 preview = self._rotate_pil(src, angle, resample=resample)
                 frames = [preview]
                 durations = [0]
+            # Discard/exit may have finished while rotate was still computing.
+            if not self.active or gen != getattr(self, "_preview_generation", 0):
+                return
             v._apply_loaded_frames(frames, durations, reset_title=False)
             new_size = v.original_image.size
             self._remap_rect_to_new_size(old_size, old_rect, new_size)
@@ -1352,6 +1362,8 @@ class CropModeController:
                     v.zoom_factor = (old_size[0] * float(v.zoom_factor)) / float(new_size[0])
                 except Exception:
                     pass
+            if not self.active or gen != getattr(self, "_preview_generation", 0):
+                return
             # Avoid re-centering every motion tick (layout thrash); center only when settled.
             v.update_image(
                 high_quality=False,

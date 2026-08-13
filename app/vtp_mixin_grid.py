@@ -4498,7 +4498,6 @@ class VtpGridMixin:
                 command=lambda: self.open_upscale_dialog(file_path),
             )
 
-        # menu.add_command(label="Create New Virtual Library", command=self.create_virtual_library)
         # Add to / Remove from Virtual Library
         virtual_libraries = list(load_virtual_folders()["virtual_folders"].keys())
         active_vl = None
@@ -4508,33 +4507,35 @@ class VtpGridMixin:
             if active_vl and active_vl not in virtual_libraries:
                 active_vl = None
 
+        add_menu = tk.Menu(menu, tearoff=0)
+        for name in virtual_libraries:
+            add_menu.add_command(
+                label=name,
+                command=lambda name=name: self.add_to_virtual_library(
+                    self.selected_thumbnails, name
+                ),
+            )
         if virtual_libraries:
-            add_menu = tk.Menu(menu, tearoff=0)
-            for name in virtual_libraries:
-                add_menu.add_command(
-                    label=name,
-                    command=lambda name=name: self.add_to_virtual_library(
-                        self.selected_thumbnails, name
-                    ),
-                )
-            menu.add_cascade(label="Add to Virtual Library", menu=add_menu)
+            add_menu.add_separator()
+        add_menu.add_command(
+            label="Create New Virtual Library",
+            command=self.create_virtual_library,
+        )
+        menu.add_cascade(label="Add to Virtual Library", menu=add_menu)
 
-            # Remove: only the library currently open (listing every VL is confusing).
-            if active_vl:
-                menu.add_command(
-                    label=f"Remove from Virtual Library ({active_vl})",
-                    command=lambda name=active_vl: self.remove_from_virtual_library(
-                        self.selected_thumbnails, name
-                    ),
-                )
-            else:
-                menu.add_command(
-                    label="Remove from Virtual Library",
-                    state=tk.DISABLED,
-                )
+        # Remove: only the library currently open (listing every VL is confusing).
+        if active_vl:
+            menu.add_command(
+                label=f"Remove from Virtual Library ({active_vl})",
+                command=lambda name=active_vl: self.remove_from_virtual_library(
+                    self.selected_thumbnails, name
+                ),
+            )
         else:
-            menu.add_command(label="Add to Virtual Library", state=tk.DISABLED)
-            menu.add_command(label="Remove from Virtual Library", state=tk.DISABLED)
+            menu.add_command(
+                label="Remove from Virtual Library",
+                state=tk.DISABLED,
+            )
 
         menu.tk_popup(event.x_root, event.y_root)
 
