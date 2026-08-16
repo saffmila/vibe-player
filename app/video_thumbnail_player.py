@@ -544,6 +544,7 @@ class VideoThumbnailPlayer(
         self.executor.submit(simple_test_task)
 
         self.img_cache = {}
+        self._status_queue_after_id = None
         self.check_status_queue()
         self.recursive_tree_refresh = False
         self.get_vidsize = False
@@ -961,6 +962,13 @@ class VideoThumbnailPlayer(
      
         self.after(500, self.toggle_fullscreen)
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
+        # Auto-dump all thread stacks to app.fault.log if the UI thread stalls.
+        try:
+            from ui_hang_watchdog import start as _start_ui_hang_watchdog
+
+            _start_ui_hang_watchdog(self)
+        except Exception:
+            logging.debug("UI hang watchdog failed to start", exc_info=True)
 
         self.playlist_manager = PlaylistManager(self, self)
         self.demo_notifier = (
@@ -2036,6 +2044,7 @@ class VideoThumbnailPlayer(
         def perform_deletion():
             errors = []
             reboot_queued = []
+            deleted_ok = []
             current_dir_deleted = False
             parent_of_deleted = None
 
@@ -2065,6 +2074,7 @@ class VideoThumbnailPlayer(
                             logging.info("[Delete] Removal deferred until restart: %s", path)
                         else:
                             logging.info("[Delete] Deleted: %s", path)
+                            deleted_ok.append(path)
                         if was_dir:
                             _prune_selection_after_dir_removed(path)
 
@@ -2099,11 +2109,21 @@ class VideoThumbnailPlayer(
                     self.process_directory(parent_node, dest)
             else:
                 if self.current_directory and os.path.isdir(self.current_directory):
-                    self.display_thumbnails(
-                        self.current_directory,
-                        force_refresh=False,
-                        preserve_scroll=True,
-                    )
+                    # Prefer in-place VGrid remove: full display_thumbnails clears all
+                    # slots and rebuilds (seconds on large folders → blank thumbs).
+                    surgical = False
+                    if deleted_ok and getattr(self, "_vg_active", False):
+                        try:
+                            surgical = bool(self._vg_remove_paths(deleted_ok))
+                        except Exception:
+                            logging.exception("[Delete] Surgical VGrid remove failed")
+                            surgical = False
+                    if not surgical:
+                        self.display_thumbnails(
+                            self.current_directory,
+                            force_refresh=False,
+                            preserve_scroll=True,
+                        )
                     self.refresh_folder_icons_subtree(self.current_directory)
                     self.after_idle(self.select_current_folder_in_tree)
 
@@ -2232,18 +2252,36 @@ class VideoThumbnailPlayer(
 
 
     def check_status_queue(self):
+        """Drain status_queue on the UI thread. Exactly one after() loop may run."""
         try:
             while not self.status_queue.empty():
                 folder_count, file_count, total_size, selected_count, selected_size = self.status_queue.get_nowait()
                 self.status_bar.update_status(folder_count, file_count, total_size, selected_count, selected_size)
         except queue.Empty:
             pass
-        self.after(100, self.check_status_queue)  # Check the queue every 100 ms
+        # Single polling chain — never stack another via update_status_bar()/selection.
+        self._status_queue_after_id = self.after(100, self.check_status_queue)
 
     def update_status_bar(self):
-        # Ensure the queue checking loop is running
-        self.check_status_queue()
-                    
+        """Refresh status bar from queue without starting extra after() loops.
+
+        Historically this called check_status_queue() which always scheduled a new
+        after(100) poll. Every thumb click / folder render stacked another 10 Hz
+        callback chain until the UI event loop froze (last log: on_thumb_click only).
+        """
+        try:
+            while not self.status_queue.empty():
+                folder_count, file_count, total_size, selected_count, selected_size = (
+                    self.status_queue.get_nowait()
+                )
+                self.status_bar.update_status(
+                    folder_count, file_count, total_size, selected_count, selected_size
+                )
+        except queue.Empty:
+            pass
+        if getattr(self, "_status_queue_after_id", None) is None:
+            self._status_queue_after_id = self.after(100, self.check_status_queue)
+
     def delete_thumbnail_cache(self, path):
             """
             Safely deletes the thumbnail cache directory for a given path.
@@ -4331,6 +4369,12 @@ class VideoThumbnailPlayer(
         self.on_closing()  # Perform any cleanup tasks before exiting    
 
     def on_closing(self):
+        try:
+            from ui_hang_watchdog import stop as _stop_ui_hang_watchdog
+
+            _stop_ui_hang_watchdog()
+        except Exception:
+            pass
         try:
             self.stop_directory_watcher()
         except Exception:

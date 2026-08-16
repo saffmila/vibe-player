@@ -2680,6 +2680,136 @@ class VtpVirtualGridMixin:
     # 11. Activation / deactivation
     # ------------------------------------------------------------------
 
+    def _vg_remove_paths(self, paths) -> bool:
+        """Drop items from the live virtual grid without clear+full reload.
+
+        Used after delete/move so a large folder (hundreds of thumbs) does not
+        flash empty and wait several seconds for ``display_thumbnails``.
+        Returns True if the grid was updated (or nothing in-grid needed remove).
+        """
+        if not getattr(self, "_vg_active", False) or not paths:
+            return False
+
+        dead = set()
+        for p in paths:
+            if not p:
+                continue
+            try:
+                dead.add(self._vg_norm_path(p))
+            except Exception:
+                continue
+        if not dead:
+            return False
+
+        data = getattr(self, "_vg_data", None) or []
+        before = len(data)
+        kept = []
+        for item in data:
+            try:
+                if self._vg_norm_path(item.get("path", "")) in dead:
+                    continue
+            except Exception:
+                pass
+            kept.append(item)
+
+        # Nothing visible in this folder belonged to the deleted set (e.g. tree
+        # delete elsewhere) — grid is already fine.
+        if len(kept) == before:
+            return True
+
+        self._vg_data = kept
+        self.video_files = [
+            v
+            for v in (getattr(self, "video_files", None) or [])
+            if self._vg_norm_path(v.get("path", "")) not in dead
+        ]
+        self._vg_folder_count = sum(1 for v in self._vg_data if v.get("is_folder"))
+        self._vg_index_data()
+
+        for key in list(getattr(self, "thumbnail_labels", {}) or ()):
+            try:
+                if self._vg_norm_path(key) in dead:
+                    self.thumbnail_labels.pop(key, None)
+            except Exception:
+                continue
+
+        # Remap multi-selection indices after the list shrank.
+        path_to_idx = {
+            self._vg_norm_path(v.get("path", "")): i
+            for i, v in enumerate(self.video_files)
+            if v.get("path")
+        }
+        new_sel = []
+        for t in list(getattr(self, "selected_thumbnails", None) or []):
+            if not isinstance(t, (list, tuple)) or not t:
+                continue
+            try:
+                nfp = self._vg_norm_path(t[0])
+            except Exception:
+                continue
+            idx = path_to_idx.get(nfp)
+            if idx is None:
+                continue
+            label_info = self.thumbnail_labels.get(t[0])
+            if not isinstance(label_info, dict):
+                label_info = {"index": idx}
+            else:
+                label_info = dict(label_info)
+                label_info["index"] = idx
+            new_sel.append((t[0], label_info, idx))
+        self.selected_thumbnails = new_sel
+        if new_sel:
+            self.selected_thumbnail_index = new_sel[-1][2]
+            self.selected_file_path = new_sel[-1][0]
+        else:
+            self.selected_thumbnail_index = None
+            if getattr(self, "selected_file_path", None):
+                try:
+                    if self._vg_norm_path(self.selected_file_path) in dead:
+                        self.selected_file_path = None
+                except Exception:
+                    pass
+        self._prev_selected_indices = set()
+
+        for slot in getattr(self, "_vg_std_pool", None) or []:
+            slot["data_idx"] = -1
+        for slot in getattr(self, "_vg_wide_pool", None) or []:
+            slot["data_idx"] = -1
+            slot.pop("_wide_photo_key", None)
+            slot.pop("_vg_wide_slot_path", None)
+        self._vg_visible_std_slots_by_path.clear()
+        self._vg_visible_wide_slots_by_path.clear()
+        self._vg_last_first_row = -1
+
+        try:
+            frac = float(self.canvas.yview()[0])
+        except Exception:
+            frac = 0.0
+        frac = max(0.0, min(1.0, frac))
+
+        self._vg_recalc()
+        try:
+            self.canvas.yview_moveto(frac)
+        except Exception:
+            pass
+        scroll_px = frac * float(getattr(self, "_vg_scrollregion_h", 0) or 1)
+        self._vg_layout_slots(scroll_px)
+        try:
+            self._vg_reapply_selection()
+        except Exception:
+            pass
+        try:
+            self.update_status_bar()
+        except Exception:
+            pass
+
+        logging.info(
+            "[VGrid] Surgical remove: removed=%d remaining=%d",
+            before - len(kept),
+            len(kept),
+        )
+        return True
+
     def activate_virtual_grid(self, video_files: list[dict]):
         self._vg_last_first_row = -1
         self._vg_active = True

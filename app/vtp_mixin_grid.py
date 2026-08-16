@@ -7940,9 +7940,11 @@ class VtpGridMixin:
             self._preview_blocked = True
             logging.info(f"Opening video player for {video_name} with path {video_path}")  # Debug
             try:
-                faulthandler.dump_traceback_later(8, repeat=False)
-                dump_armed = True
-                logging.info("[OpenVideo] Armed 8s faulthandler dump for player creation.")
+                from ui_hang_watchdog import arm_dump_later
+
+                dump_armed = arm_dump_later(8.0)
+                if dump_armed:
+                    logging.info("[OpenVideo] Armed 8s faulthandler dump for player creation.")
             except Exception as exc:
                 logging.debug("[OpenVideo] Could not arm faulthandler dump: %s", exc)
 
@@ -8003,7 +8005,9 @@ class VtpGridMixin:
         finally:
             if dump_armed:
                 try:
-                    faulthandler.cancel_dump_traceback_later()
+                    from ui_hang_watchdog import cancel_dump_later
+
+                    cancel_dump_later()
                     logging.info("[OpenVideo] Canceled faulthandler dump; player creation finished.")
                 except Exception:
                     pass

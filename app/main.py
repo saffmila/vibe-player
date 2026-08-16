@@ -101,8 +101,13 @@ if faulthandler_output_file:
 def handle_freeze_signal(signum, frame):
     """Handle SIGBREAK to dump thread tracebacks when freeze is detected."""
     logging.error("=" * 20 + " FREEZE DETECTED (SIGNAL) " + "=" * 20)
-    if faulthandler_output_file:
-        faulthandler.dump_traceback(file=faulthandler_output_file, all_threads=True)
+    try:
+        from ui_hang_watchdog import dump_all_threads
+
+        dump_all_threads("sigbreak")
+    except Exception:
+        if faulthandler_output_file:
+            faulthandler.dump_traceback(file=faulthandler_output_file, all_threads=True)
     logging.error("=" * 20 + " THREAD STATE WRITTEN TO LOG " + "=" * 20)
 
 

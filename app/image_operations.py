@@ -54,6 +54,22 @@ _MIP_INTERACTIVE_COVER = 0.55
 _MIP_HQ_COVER = 0.95
 _HQ_DELAY_MS = 500
 _HQ_LANCZOS_MAX_SIDE = 4096
+# FastStone-style neighbor decode cache (prev/next kept warm in RAM).
+_PREFETCH_RADIUS = 1
+_DECODE_CACHE_MAX = 5
+
+# Load-path timing (decode / mip / prefetch / paint). Opt-in: VIBE_IMAGE_PERF=1.
+_IMAGE_VIEWER_PERF = os.environ.get("VIBE_IMAGE_PERF", "0").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+
+
+def _img_perf_log(msg: str) -> None:
+    if _IMAGE_VIEWER_PERF:
+        logging.info("[IMAGE-PERF] %s", msg)
 
 
 def _with_native_dialogs(win, fn):
@@ -136,8 +152,23 @@ class ImageViewerLegacy:
         self._anim_index = 0
         self._anim_after_id = None
         self._image_mips: list = []
+        self._mip_gen = 0
+        self._mips_idle_after = None
+        self._decode_cache: dict = {}
+        self._decode_cache_lock = threading.Lock()
+        self._prefetch_gen = 0
+        self._prefetch_after = None
+        self._perf_last_mip_ms = 0.0
+        self._perf_open_t0 = time.perf_counter() if _IMAGE_VIEWER_PERF else 0.0
 
+        t_dec = time.perf_counter() if _IMAGE_VIEWER_PERF else 0.0
         frames, durations = load_pil_frames(self.image_path)
+        if _IMAGE_VIEWER_PERF:
+            dec_ms = (time.perf_counter() - t_dec) * 1000.0
+            self._perf_last_decode_ms = dec_ms
+            _img_perf_log(
+                f"open decode={dec_ms:.0f}ms file={self.image_name!r}"
+            )
         self._apply_loaded_frames(frames, durations, reset_title=False)
         # Never upload full-res PhotoImage here — 8K DJI (~8064×4536) would flash
         # a huge bitmap before the first scaled paint and can stall Tk for seconds.
@@ -253,12 +284,30 @@ class ImageViewerLegacy:
         # Same flags as Pyglet viewer — used by main.py fast-open and delete flow
         self._running = True
         self._start_animation_if_needed()
+        # Warm RAM cache with the image we just decoded; prefetch neighbors after paint.
+        self._decode_cache_put(self.image_path, self._anim_frames, self._anim_durations)
 
         open_fs = bool(getattr(self.controller, "image_viewer_open_fullscreen", True))
         self._layout_initial_window(open_fullscreen=open_fs)
+        if _IMAGE_VIEWER_PERF and not getattr(self, "_settle_open_fit", False):
+            # Windowed open paints inside _layout_initial_window; fullscreen waits settle.
+            total_ms = (time.perf_counter() - self._perf_open_t0) * 1000.0
+            iw, ih = self.original_image.size
+            _img_perf_log(
+                f"open first-paint-done total={total_ms:.0f}ms "
+                f"(decode={getattr(self, '_perf_last_decode_ms', 0):.0f}ms "
+                f"mips={self._perf_last_mip_ms:.0f}ms) "
+                f"size={iw}x{ih} zoom={self.zoom_factor:.3f} mode={self._view_fit_mode}"
+            )
+        self._schedule_neighbor_prefetch()
 
         #Na konci initu vynutíme první vykreslení HUDu
         self._overlay_after_id = self.image_window.after(100, self._refresh_overlays)
+        if _IMAGE_VIEWER_PERF:
+            _img_perf_log(
+                "timing ON (VIBE_IMAGE_PERF=1). Watch [IMAGE-PERF] in app.log; "
+                "disable: VIBE_IMAGE_PERF=0"
+            )
 
         def _on_toplevel_close():
             self._do_close()
@@ -408,7 +457,19 @@ class ImageViewerLegacy:
             return
 
         self._settle_open_fit = False
+        t_paint = time.perf_counter() if _IMAGE_VIEWER_PERF else 0.0
         self.best_fit(high_quality=True)
+        if _IMAGE_VIEWER_PERF:
+            paint_ms = (time.perf_counter() - t_paint) * 1000.0
+            total_ms = (time.perf_counter() - getattr(self, "_perf_open_t0", t_paint)) * 1000.0
+            iw, ih = self.original_image.size
+            _img_perf_log(
+                f"open first-paint-done total={total_ms:.0f}ms "
+                f"(decode={getattr(self, '_perf_last_decode_ms', 0):.0f}ms "
+                f"mips={self._perf_last_mip_ms:.0f}ms paint={paint_ms:.0f}ms) "
+                f"size={iw}x{ih} zoom={self.zoom_factor:.3f} canvas={cw}x{ch}"
+            )
+        self._schedule_neighbor_prefetch()
 
     def _deferred_initial_best_fit(self):
         """Back-compat alias — same as settle callback."""
@@ -429,8 +490,14 @@ class ImageViewerLegacy:
             raise ValueError("no image frames")
         self._stop_animation()
         frames = list(frames)
+        t_norm = time.perf_counter() if _IMAGE_VIEWER_PERF else 0.0
         if len(frames) == 1:
             frames[0] = self._normalize_pil_for_view(frames[0])
+        if _IMAGE_VIEWER_PERF and len(frames) == 1:
+            _img_perf_log(
+                f"normalize={(time.perf_counter() - t_norm) * 1000.0:.0f}ms "
+                f"mode={frames[0].mode} size={frames[0].size[0]}x{frames[0].size[1]}"
+            )
         self._anim_frames = frames
         self._anim_durations = list(durations) if durations else [0] * len(frames)
         if len(self._anim_durations) < len(self._anim_frames):
@@ -440,7 +507,8 @@ class ImageViewerLegacy:
         self._anim_index = 0
         self.image = self._anim_frames[0]
         self.original_image = self._anim_frames[0]
-        self._rebuild_mips()
+        # Defer mip pyramid until after first paint — ~300ms on large stills.
+        self._invalidate_mips()
         if reset_title:
             self.image_window.title(self.image_name)
 
@@ -452,19 +520,266 @@ class ImageViewerLegacy:
         )
         return im.convert("RGBA" if has_alpha else "RGB")
 
-    def _rebuild_mips(self) -> None:
-        """Power-of-two pyramid for cheap fit / zoomed-out paints (static images only)."""
+    @staticmethod
+    def _norm_cache_key(path: str) -> str:
+        try:
+            return os.path.normcase(os.path.normpath(path))
+        except Exception:
+            return path
+
+    @staticmethod
+    def _file_sig(path: str):
+        try:
+            st = os.stat(path)
+            return (int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))), int(st.st_size))
+        except Exception:
+            return None
+
+    def _viewer_image_files(self) -> list:
+        try:
+            files = [
+                f
+                for f in (getattr(self.controller, "video_files", None) or [])
+                if str(f.get("path", "")).lower().endswith(IMAGE_FORMATS)
+            ]
+        except Exception:
+            files = []
+        return files
+
+    def _neighbor_image_entries(self, radius: int = _PREFETCH_RADIUS) -> list:
+        files = self._viewer_image_files()
+        if not files:
+            return []
+        cur = self._norm_cache_key(self.image_path)
+        idx = next(
+            (
+                i
+                for i, f in enumerate(files)
+                if self._norm_cache_key(f.get("path", "")) == cur
+            ),
+            None,
+        )
+        if idx is None:
+            return []
+        n = len(files)
+        out = []
+        seen = set()
+        for d in range(-radius, radius + 1):
+            if d == 0:
+                continue
+            f = files[(idx + d) % n]
+            key = self._norm_cache_key(f.get("path", ""))
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(f)
+        return out
+
+    def _decode_cache_get(self, path: str):
+        key = self._norm_cache_key(path)
+        sig = self._file_sig(path)
+        with self._decode_cache_lock:
+            ent = self._decode_cache.get(key)
+            if not ent:
+                return None
+            if sig is not None and ent.get("sig") != sig:
+                self._decode_cache.pop(key, None)
+                return None
+            return ent.get("frames"), ent.get("durations")
+
+    def _decode_cache_put(self, path: str, frames, durations) -> None:
+        if not path or not frames:
+            return
+        if getattr(self, "_image_dirty", False) and self._norm_cache_key(
+            path
+        ) == self._norm_cache_key(getattr(self, "image_path", "")):
+            return
+        key = self._norm_cache_key(path)
+        sig = self._file_sig(path)
+        with self._decode_cache_lock:
+            self._decode_cache[key] = {
+                "frames": list(frames),
+                "durations": list(durations) if durations is not None else [0] * len(frames),
+                "sig": sig,
+            }
+            self._decode_cache_trim_unlocked()
+
+    def _decode_cache_invalidate(self, path: str | None = None) -> None:
+        with self._decode_cache_lock:
+            if path is None:
+                self._decode_cache.clear()
+                return
+            self._decode_cache.pop(self._norm_cache_key(path), None)
+
+    def _decode_cache_trim_unlocked(self) -> None:
+        cache = self._decode_cache
+        if len(cache) <= _DECODE_CACHE_MAX:
+            return
+        keep = {self._norm_cache_key(self.image_path)}
+        for f in self._neighbor_image_entries(_PREFETCH_RADIUS):
+            keep.add(self._norm_cache_key(f.get("path", "")))
+        # Drop entries farthest from keep set first (anything not neighbor/current).
+        for key in list(cache.keys()):
+            if len(cache) <= _DECODE_CACHE_MAX:
+                break
+            if key not in keep:
+                cache.pop(key, None)
+        while len(cache) > _DECODE_CACHE_MAX:
+            # Still over budget (tiny folder / wrap) — drop an arbitrary non-current.
+            for key in list(cache.keys()):
+                if key not in keep or key != self._norm_cache_key(self.image_path):
+                    cache.pop(key, None)
+                    break
+            else:
+                break
+
+    def _schedule_neighbor_prefetch(self) -> None:
+        if not getattr(self, "_running", False):
+            return
+        job = getattr(self, "_prefetch_after", None)
+        if job is not None:
+            try:
+                self.image_window.after_cancel(job)
+            except Exception:
+                pass
+        try:
+            # Slight delay so first paint / HQ timer aren't fighting disk.
+            self._prefetch_after = self.image_window.after(30, self._prefetch_neighbors_now)
+        except Exception:
+            self._prefetch_after = None
+
+    def _prefetch_neighbors_now(self) -> None:
+        self._prefetch_after = None
+        if not getattr(self, "_running", False):
+            return
+        self._prefetch_gen += 1
+        gen = self._prefetch_gen
+        neighbors = self._neighbor_image_entries(_PREFETCH_RADIUS)
+        for f in neighbors:
+            path = f.get("path")
+            if not path:
+                continue
+            if self._decode_cache_get(path) is not None:
+                continue
+            threading.Thread(
+                target=self._prefetch_decode_worker,
+                args=(path, gen),
+                daemon=True,
+                name="image-prefetch",
+            ).start()
+
+    def _prefetch_decode_worker(self, path: str, gen: int) -> None:
+        t0 = time.perf_counter() if _IMAGE_VIEWER_PERF else 0.0
+        try:
+            if gen != getattr(self, "_prefetch_gen", None):
+                return
+            frames, durations = load_pil_frames(path)
+            if len(frames) == 1:
+                frames[0] = self._normalize_pil_for_view(frames[0])
+            if gen != getattr(self, "_prefetch_gen", None):
+                return
+            self._decode_cache_put(path, frames, durations)
+            if _IMAGE_VIEWER_PERF:
+                ms = (time.perf_counter() - t0) * 1000.0
+                _img_perf_log(
+                    f"prefetch={ms:.0f}ms file={os.path.basename(path)!r} "
+                    f"cache_n={len(self._decode_cache)}"
+                )
+        except Exception as exc:
+            logging.debug("[ImageViewer] prefetch failed for %s: %s", path, exc)
+
+    def _invalidate_mips(self) -> None:
+        """Drop pyramid + cancel pending build (new image / transform)."""
+        self._mip_gen = int(getattr(self, "_mip_gen", 0)) + 1
         self._image_mips = []
+        self._perf_last_mip_ms = 0.0
+        job = getattr(self, "_mips_idle_after", None)
+        if job is not None:
+            try:
+                self.image_window.after_cancel(job)
+            except Exception:
+                pass
+            self._mips_idle_after = None
+
+    def _schedule_deferred_mips(self) -> None:
+        """Build mip pyramid after first paint (idle), off the critical load path."""
+        if not getattr(self, "_running", False):
+            return
         if self._is_animated() or self.original_image is None:
             return
-        levels = [self.original_image]
-        cur = self.original_image
+        if self._image_mips:
+            return
+        if getattr(self, "_mips_idle_after", None) is not None:
+            return
+        try:
+            self._mips_idle_after = self.image_window.after_idle(self._deferred_mips_start)
+        except Exception:
+            self._mips_idle_after = None
+
+    def _deferred_mips_start(self) -> None:
+        self._mips_idle_after = None
+        if not getattr(self, "_running", False):
+            return
+        if self._is_animated() or self.original_image is None or self._image_mips:
+            return
+        gen = self._mip_gen
+        src = self.original_image
+
+        def worker():
+            t0 = time.perf_counter() if _IMAGE_VIEWER_PERF else 0.0
+            try:
+                levels = self._build_mip_levels(src)
+            except Exception as exc:
+                logging.debug("[ImageViewer] deferred mips failed: %s", exc)
+                return
+            ms = (time.perf_counter() - t0) * 1000.0 if _IMAGE_VIEWER_PERF else 0.0
+
+            def apply():
+                if not getattr(self, "_running", False):
+                    return
+                if gen != getattr(self, "_mip_gen", None) or self.original_image is not src:
+                    return
+                self._image_mips = levels
+                self._perf_last_mip_ms = ms
+                if _IMAGE_VIEWER_PERF:
+                    sizes = "→".join(f"{im.size[0]}x{im.size[1]}" for im in levels)
+                    _img_perf_log(
+                        f"mips={ms:.0f}ms deferred=1 levels={len(levels)} pyramid={sizes}"
+                    )
+
+            try:
+                self.image_window.after(0, apply)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="image-mips").start()
+
+    @staticmethod
+    def _build_mip_levels(full: PILImage.Image) -> list:
+        levels = [full]
+        cur = full
         while max(cur.size) > _MIP_MIN_SIDE and len(levels) < _MIP_MAX_LEVELS:
             nw = max(1, cur.size[0] // 2)
             nh = max(1, cur.size[1] // 2)
             cur = cur.resize((nw, nh), PILImage.BOX)
             levels.append(cur)
+        return levels
+
+    def _rebuild_mips(self) -> None:
+        """Sync pyramid rebuild (transforms). Prefer deferred path on load."""
+        self._invalidate_mips()
+        if self._is_animated() or self.original_image is None:
+            return
+        t0 = time.perf_counter() if _IMAGE_VIEWER_PERF else 0.0
+        levels = self._build_mip_levels(self.original_image)
         self._image_mips = levels
+        if _IMAGE_VIEWER_PERF:
+            ms = (time.perf_counter() - t0) * 1000.0
+            self._perf_last_mip_ms = ms
+            sizes = "→".join(f"{im.size[0]}x{im.size[1]}" for im in levels)
+            _img_perf_log(
+                f"mips={ms:.0f}ms deferred=0 levels={len(levels)} pyramid={sizes}"
+            )
 
     def _pick_mip(
         self, full_box, out_w: int, out_h: int, *, interactive: bool = False, bias=None
@@ -563,7 +878,9 @@ class ImageViewerLegacy:
         self._anim_index = min(self._anim_index, len(self._anim_frames) - 1)
         self.original_image = self._anim_frames[self._anim_index]
         self.image = self.original_image
+        # Sync rebuild — rotate/flip already on screen; next paint wants mips ready.
         self._rebuild_mips()
+        self._decode_cache_invalidate(self.image_path)
         if was_animated:
             self._start_animation_if_needed()
 
@@ -574,6 +891,8 @@ class ImageViewerLegacy:
             "_zoom_timer",
             "_viewport_refresh_after",
             "_anim_after_id",
+            "_mips_idle_after",
+            "_prefetch_after",
         ):
             job = getattr(self, attr, None)
             if job is None:
@@ -583,6 +902,9 @@ class ImageViewerLegacy:
             except Exception:
                 pass
             setattr(self, attr, None)
+        # Invalidate in-flight worker apply via generation bump.
+        self._mip_gen = int(getattr(self, "_mip_gen", 0)) + 1
+        self._prefetch_gen = int(getattr(self, "_prefetch_gen", 0)) + 1
 
     def _do_close(self):
         """Match Pyglet viewer API for controller / fast-open code paths."""
@@ -590,6 +912,7 @@ class ImageViewerLegacy:
             self.crop.exit()
         self._running = False
         self._cancel_pending_image_timers()
+        self._decode_cache_invalidate()
         self._anim_frames = []
         self._anim_durations = []
         try:
@@ -865,9 +1188,24 @@ class ImageViewerLegacy:
         self.image_name = name
 
         try:
-            frames, durations = load_pil_frames(path)
+            t0 = time.perf_counter() if _IMAGE_VIEWER_PERF else 0.0
+            cached = self._decode_cache_get(path)
+            if cached is not None:
+                frames, durations = cached
+                if _IMAGE_VIEWER_PERF:
+                    self._perf_last_decode_ms = 0.0
+                    _img_perf_log(f"nav decode=0ms cache=1 file={name!r}")
+            else:
+                t_dec = time.perf_counter() if _IMAGE_VIEWER_PERF else 0.0
+                frames, durations = load_pil_frames(path)
+                if _IMAGE_VIEWER_PERF:
+                    dec_ms = (time.perf_counter() - t_dec) * 1000.0
+                    self._perf_last_decode_ms = dec_ms
+                    _img_perf_log(f"nav decode={dec_ms:.0f}ms cache=0 file={name!r}")
             self._apply_loaded_frames(frames, durations, reset_title=True)
+            self._decode_cache_put(path, self._anim_frames, self._anim_durations)
 
+            t_paint = time.perf_counter() if _IMAGE_VIEWER_PERF else 0.0
             mode = self._view_fit_mode
             if mode == "best_fit":
                 self.best_fit()
@@ -881,8 +1219,19 @@ class ImageViewerLegacy:
             else:
                 self.zoom_factor = 1.0
                 self.update_image(center=True)
+            if _IMAGE_VIEWER_PERF:
+                paint_ms = (time.perf_counter() - t_paint) * 1000.0
+                total_ms = (time.perf_counter() - t0) * 1000.0
+                iw, ih = self.original_image.size
+                _img_perf_log(
+                    f"nav done total={total_ms:.0f}ms "
+                    f"(decode={getattr(self, '_perf_last_decode_ms', 0):.0f}ms "
+                    f"mips={self._perf_last_mip_ms:.0f}ms paint={paint_ms:.0f}ms) "
+                    f"size={iw}x{ih} zoom={self.zoom_factor:.3f} mode={mode} file={name!r}"
+                )
 
             self._start_animation_if_needed()
+            self._schedule_neighbor_prefetch()
 
             # --- AKTUALIZACE HUD ---
             # Zavoláme to explicitně, aby se aktualizoval index souboru (např. 5/120)
@@ -1293,6 +1642,7 @@ class ImageViewerLegacy:
                 pass
             self._viewport_refresh_after = None
 
+        t_paint = time.perf_counter() if _IMAGE_VIEWER_PERF else 0.0
         width = max(1, int(self.original_image.width * self.zoom_factor))
         height = max(1, int(self.original_image.height * self.zoom_factor))
         interactive = not high_quality
@@ -1304,10 +1654,9 @@ class ImageViewerLegacy:
         except Exception:
             cw, ch = 1, 1
 
-        if not self._image_mips and not self._is_animated():
-            self._rebuild_mips()
-
+        # First paint may run without mips (fullres fallback); pyramid builds idle after.
         use_viewport = self._should_use_viewport(width, height, cw, ch)
+        mip_lvl = -1
         if use_viewport:
             self._paint_viewport_tile(
                 width,
@@ -1321,7 +1670,7 @@ class ImageViewerLegacy:
             prev_meta = self._tile_meta
             self._tile_meta = None
             iw, ih = self.original_image.size
-            mip, _lvl, box = self._pick_mip(
+            mip, mip_lvl, box = self._pick_mip(
                 (0, 0, iw, ih),
                 width,
                 height,
@@ -1358,6 +1707,20 @@ class ImageViewerLegacy:
 
         if refresh_overlays:
             self._refresh_overlays()
+
+        # After first paint: build zoom/pan pyramid in the background.
+        self._schedule_deferred_mips()
+
+        if _IMAGE_VIEWER_PERF:
+            paint_ms = (time.perf_counter() - t_paint) * 1000.0
+            # Skip chatty pan/zoom ticks — log open/nav paints and slow frames.
+            if paint_ms >= 25.0 or high_quality or center:
+                path = "viewport" if use_viewport else "full"
+                _img_perf_log(
+                    f"paint={paint_ms:.0f}ms path={path} hq={high_quality} "
+                    f"out={width}x{height} mip_lvl={mip_lvl} "
+                    f"interactive={interactive}"
+                )
 
     def _should_use_viewport(self, disp_w: int, disp_h: int, cw: int, ch: int) -> bool:
         if self._is_animated() or self._crop_active():
