@@ -380,14 +380,63 @@ def _has_audio_stream(path):
         return False
 
 
+# Official FFmpeg transpose dirs (docs): 1=clock (90° CW), 2=cclock (90° CCW).
+# Phone/MKV files often carry displaymatrix rotation; FFmpeg autorotates by default,
+# which *adds* to our transpose and looks like a 180° flip. Always decode with
+# -noautorotate when baking a user rotate/mirror, then clear output rotate tags.
+_VIDEO_ROTATE_FILTERS = {
+    "rotate_right": "transpose=1",  # 90° CW
+    "rotate_left": "transpose=2",  # 90° CCW
+    "rotate_180": "transpose=1,transpose=1",
+}
+
+
+def has_video_transform(settings) -> bool:
+    if not settings:
+        return False
+    if settings.get("rotate_op") in _VIDEO_ROTATE_FILTERS:
+        return True
+    return bool(settings.get("flip_h") or settings.get("flip_v"))
+
+
+def transform_input_args(settings) -> list[str]:
+    """Disable autorotate so user transpose matches stored pixels (what OpenCV thumbs show)."""
+    if has_video_transform(settings):
+        return ["-noautorotate"]
+    return []
+
+
+def baked_video_output_args(settings) -> list[str]:
+    """Orientation is in pixels; do not leave rotate/displaymatrix on the output."""
+    if not has_video_transform(settings):
+        return []
+    return ["-map_metadata", "-1", "-metadata:s:v:0", "rotate=0"]
+
+
+def _transform_video_filter_parts(settings) -> list[str]:
+    """User rotate / mirror only (no source-metadata compounding)."""
+    parts: list[str] = []
+    rotate_op = settings.get("rotate_op")
+    if rotate_op in _VIDEO_ROTATE_FILTERS:
+        parts.append(_VIDEO_ROTATE_FILTERS[rotate_op])
+    if settings.get("flip_h"):
+        parts.append("hflip")
+    if settings.get("flip_v"):
+        parts.append("vflip")
+    return parts
+
+
 def _custom_video_filter(settings):
+    parts = _transform_video_filter_parts(settings)
     # keep_size: re-encode without scale/fps so source resolution & rate stay native.
     if settings.get("keep_size"):
-        return "format=yuv420p"
-    width = int(settings["width"])
-    height = int(settings["height"])
-    fps = float(settings["fps"])
-    return f"scale={width}:{height}:flags=lanczos,fps={fps:g},format=yuv420p"
+        parts.append("format=yuv420p")
+    else:
+        width = int(settings["width"])
+        height = int(settings["height"])
+        fps = float(settings["fps"])
+        parts.append(f"scale={width}:{height}:flags=lanczos,fps={fps:g},format=yuv420p")
+    return ",".join(parts)
 
 
 _X264_CRF = {"Low": "28", "Medium": "23", "High": "18"}

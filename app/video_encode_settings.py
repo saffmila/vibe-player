@@ -15,8 +15,16 @@ AUDIO_BITRATE_LEVELS = ("96k", "128k", "192k", "256k")
 DEFAULT_VIDEO_QUALITY = "High"
 DEFAULT_AUDIO_BITRATE = "192k"
 SUPPORTED_FORMATS = [".mp4", ".avi", ".mkv", ".mov", ".webm"]
-CUSTOM_SCROLL_HEIGHT = 420
-EXPORT_CUSTOM_SCROLL_HEIGHT = 340
+CUSTOM_SCROLL_HEIGHT = 500
+EXPORT_CUSTOM_SCROLL_HEIGHT = 400
+
+# Rotate labels → ops (same keys as image batch / convert transforms).
+VIDEO_ROTATE_OPTIONS: dict[str, str | None] = {
+    "None": None,
+    "90° CW": "rotate_right",
+    "90° CCW": "rotate_left",
+    "180°": "rotate_180",
+}
 
 # SeedVR-like section cards
 _UI_SECTION_BG = ("gray88", "#2a2a2a")
@@ -140,7 +148,7 @@ def set_info_text(box, text: str):
 
 class VideoEncodeSettingsPanel(ctk.CTkFrame):
     """
-    Scrollable Preset / Video / Audio cards shared by Convert + Export dialogs.
+    Scrollable Preset / Video / Video operations / Audio cards shared by Convert + Export.
     """
 
     def __init__(
@@ -171,6 +179,9 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
         self.sound_var = ctk.BooleanVar(value=True)
         self.video_quality_var = ctk.StringVar(value=DEFAULT_VIDEO_QUALITY)
         self.audio_bitrate_var = ctk.StringVar(value=DEFAULT_AUDIO_BITRATE)
+        self.rotate_var = ctk.StringVar(value="None")
+        self.mirror_var = ctk.BooleanVar(value=False)
+        self.flip_v_var = ctk.BooleanVar(value=False)
         self._dim_entries: list[ctk.CTkEntry] = []
 
         self._scroll = ctk.CTkScrollableFrame(
@@ -225,6 +236,31 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
         )
         self._quality_menu.pack(side="left", fill="x", expand=True)
         q_row.pack(fill="x", pady=(2, 2))
+
+        ops_card, ops_body = make_section(self._scroll, "Video operations")
+        ops_card.pack(fill="x", pady=(0, 8))
+        rot_row = ctk.CTkFrame(ops_body, fg_color="transparent")
+        rot_row.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(rot_row, text="Rotate/Transform:", width=120, anchor="w").pack(
+            side="left"
+        )
+        self._rotate_menu = ctk.CTkOptionMenu(
+            rot_row,
+            variable=self.rotate_var,
+            values=list(VIDEO_ROTATE_OPTIONS.keys()),
+            height=28,
+        )
+        self._rotate_menu.pack(side="left", fill="x", expand=True)
+        flip_row = ctk.CTkFrame(ops_body, fg_color="transparent")
+        flip_row.pack(fill="x", pady=(0, 2))
+        self._mirror_check = ctk.CTkCheckBox(
+            flip_row, text="Mirror horizontal", variable=self.mirror_var
+        )
+        self._mirror_check.pack(side="left", padx=(0, 16))
+        self._flip_v_check = ctk.CTkCheckBox(
+            flip_row, text="Flip vertical", variable=self.flip_v_var
+        )
+        self._flip_v_check.pack(side="left")
 
         audio_card, audio_body = make_section(self._scroll, "Audio")
         audio_card.pack(fill="x", pady=(0, 4))
@@ -373,6 +409,12 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
             )
             or DEFAULT_AUDIO_BITRATE,
         }
+        rotate_op = VIDEO_ROTATE_OPTIONS.get(self.rotate_var.get())
+        transform = {
+            "rotate_op": rotate_op,
+            "flip_h": bool(self.mirror_var.get()),
+            "flip_v": bool(self.flip_v_var.get()),
+        }
         if keep_size:
             if not self._source_width or not self._source_height:
                 raise ValueError(
@@ -384,6 +426,7 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
                 "keep_size": True,
                 "include_audio": bool(self.sound_var.get()),
                 **quality,
+                **transform,
             }
 
         settings = {
@@ -394,6 +437,7 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
             "fps": float(self.fps_var.get()),
             "include_audio": bool(self.sound_var.get()),
             **quality,
+            **transform,
         }
         if settings["width"] <= 0 or settings["height"] <= 0 or settings["fps"] <= 0:
             raise ValueError("Width, height, and FPS must be positive.")

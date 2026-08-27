@@ -1066,18 +1066,13 @@ class VtpVirtualGridMixin:
                             slot["_wide_place_key"] = place_key
                             slot["_last_y"] = abs_y
                     else:
-                        if slot["data_idx"] != -1:
-                            self._vg_forget_slot_path(slot, self._vg_visible_wide_slots_by_path)
-                            self.canvas.coords(slot["win_id"], 0, _OFFSCREEN_Y)
-                            slot["data_idx"] = -1
-                            slot["_last_y"] = _OFFSCREEN_Y
+                        self._vg_hide_slot_offscreen(slot, self._vg_visible_wide_slots_by_path)
 
         for i in range(self._vg_wide_pool_size):
-            if i not in used_wide_slots and self._vg_wide_pool[i]["data_idx"] != -1:
-                self._vg_forget_slot_path(self._vg_wide_pool[i], self._vg_visible_wide_slots_by_path)
-                self.canvas.coords(self._vg_wide_pool[i]["win_id"], 0, _OFFSCREEN_Y)
-                self._vg_wide_pool[i]["data_idx"] = -1
-                self._vg_wide_pool[i]["_last_y"] = _OFFSCREEN_Y
+            if i not in used_wide_slots:
+                self._vg_hide_slot_offscreen(
+                    self._vg_wide_pool[i], self._vg_visible_wide_slots_by_path
+                )
 
         # ── Standard file slots (modulo mapping) ───────────────────
         cols = self._vg_cols
@@ -1117,18 +1112,13 @@ class VtpVirtualGridMixin:
                         self.canvas.coords(slot["win_id"], x, abs_y)
                         slot["_last_y"] = abs_y
                 else:
-                    if slot["data_idx"] != -1:
-                        self._vg_forget_slot_path(slot, self._vg_visible_std_slots_by_path)
-                        self.canvas.coords(slot["win_id"], 0, _OFFSCREEN_Y)
-                        slot["data_idx"] = -1
-                        slot["_last_y"] = _OFFSCREEN_Y
+                    self._vg_hide_slot_offscreen(slot, self._vg_visible_std_slots_by_path)
 
         for i in range(self._vg_std_pool_size):
-            if i not in used_std_slots and self._vg_std_pool[i]["data_idx"] != -1:
-                self._vg_forget_slot_path(self._vg_std_pool[i], self._vg_visible_std_slots_by_path)
-                self.canvas.coords(self._vg_std_pool[i]["win_id"], 0, _OFFSCREEN_Y)
-                self._vg_std_pool[i]["data_idx"] = -1
-                self._vg_std_pool[i]["_last_y"] = _OFFSCREEN_Y
+            if i not in used_std_slots:
+                self._vg_hide_slot_offscreen(
+                    self._vg_std_pool[i], self._vg_visible_std_slots_by_path
+                )
 
         self._vg_reapply_selection()
 
@@ -1194,6 +1184,36 @@ class VtpVirtualGridMixin:
             return
         if slot_map.get(old_key) is slot:
             slot_map.pop(old_key, None)
+
+    def _vg_hide_slot_offscreen(self, slot: dict, slot_map: dict[str, dict]) -> None:
+        """Move a pooled slot off-screen and clear stale click/bind state."""
+        if slot.get("_last_y") == _OFFSCREEN_Y and slot.get("data_idx", -1) == -1:
+            return
+        self._vg_forget_slot_path(slot, slot_map)
+        canvas = slot.get("canvas")
+        if canvas is not None:
+            try:
+                fp = getattr(canvas, "file_path", None) or ""
+                if fp:
+                    key = self._vg_norm_path(fp)
+                    if slot_map.get(key) is slot:
+                        slot_map.pop(key, None)
+            except Exception:
+                pass
+        try:
+            self.canvas.coords(slot["win_id"], 0, _OFFSCREEN_Y)
+        except Exception:
+            pass
+        slot["data_idx"] = -1
+        slot["_last_y"] = _OFFSCREEN_Y
+        slot["photo"] = None
+        if canvas is not None:
+            try:
+                canvas.file_path = ""
+                canvas.itemconfig("thumbnail", image="")
+                canvas.image = None
+            except Exception:
+                pass
 
     def _vg_get_item_photo(self, item: dict, file_path: str, force_rebuild: bool = False):
         photo = item.get("_photo")
@@ -1536,18 +1556,20 @@ class VtpVirtualGridMixin:
     # ------------------------------------------------------------------
 
     def _vg_bind_slot(self, slot: dict, data_idx: int):
+        item = self._vg_data[data_idx]
+        file_path = item["path"]
+        norm_path = self._vg_norm_path(file_path)
         if slot["data_idx"] == data_idx:
             try:
-                self._vg_visible_std_slots_by_path[
-                    self._vg_norm_path(self._vg_data[data_idx]["path"])
-                ] = slot
+                canvas_fp = getattr(slot["canvas"], "file_path", "")
+                if self._vg_norm_path(canvas_fp) == norm_path:
+                    self._vg_visible_std_slots_by_path[norm_path] = slot
+                    return
             except Exception:
                 pass
-            return
         self._vg_forget_slot_path(slot, self._vg_visible_std_slots_by_path)
         slot["data_idx"] = data_idx
-        item = self._vg_data[data_idx]
-        file_path, file_name = item["path"], item["name"]
+        file_name = item["name"]
         is_folder = item.get("is_folder", False)
         self._vg_visible_std_slots_by_path[self._vg_norm_path(file_path)] = slot
 
@@ -2679,6 +2701,135 @@ class VtpVirtualGridMixin:
     # ------------------------------------------------------------------
     # 11. Activation / deactivation
     # ------------------------------------------------------------------
+
+    def _vg_rename_path(self, old_path: str, new_path: str) -> bool:
+        """Update the live virtual grid after an in-place rename (same parent folder).
+
+        Avoids ``display_thumbnails`` so scroll position and visible slots are preserved.
+        """
+        if not getattr(self, "_vg_active", False) or not old_path or not new_path:
+            return False
+        try:
+            old_norm = self._vg_norm_path(old_path)
+            new_norm = self._vg_norm_path(new_path)
+        except Exception:
+            return False
+        if old_norm == new_norm:
+            return True
+
+        data_idx = self._vg_data_index_by_path.get(old_norm)
+        if data_idx is None:
+            return False
+
+        new_name = os.path.basename(new_path)
+        item = self._vg_data[data_idx]
+        is_folder = bool(item.get("is_folder")) or os.path.isdir(new_path)
+        item["path"] = new_path
+        item["name"] = new_name
+        item["is_folder"] = is_folder
+        item.pop("_vg_info_parts", None)
+        item.pop("_vg_info_key", None)
+
+        video_files = getattr(self, "video_files", None) or []
+        for vf in video_files:
+            try:
+                if self._vg_norm_path(vf.get("path", "")) == old_norm:
+                    vf["path"] = new_path
+                    vf["name"] = new_name
+                    vf["is_folder"] = is_folder
+                    break
+            except Exception:
+                continue
+
+        try:
+            self.current_path_map = {
+                self._vg_norm_path(v.get("path", "")): i
+                for i, v in enumerate(video_files)
+                if v.get("path")
+            }
+        except Exception:
+            pass
+
+        self._vg_index_data()
+
+        old_label_key = None
+        for k in list(getattr(self, "thumbnail_labels", {}) or {}):
+            try:
+                if self._vg_norm_path(k) == old_norm:
+                    old_label_key = k
+                    break
+            except Exception:
+                continue
+        if old_label_key is not None:
+            label_info = self.thumbnail_labels.pop(old_label_key, None)
+        else:
+            label_info = self.thumbnail_labels.pop(old_path, None)
+        if isinstance(label_info, dict):
+            label_info = dict(label_info)
+            label_info["index"] = data_idx
+            self.thumbnail_labels[new_path] = label_info
+
+        path_to_idx = {
+            self._vg_norm_path(v.get("path", "")): i
+            for i, v in enumerate(video_files)
+            if v.get("path")
+        }
+        new_sel = []
+        for t in list(getattr(self, "selected_thumbnails", None) or []):
+            if not isinstance(t, (list, tuple)) or not t:
+                continue
+            try:
+                nfp = self._vg_norm_path(str(t[0]))
+            except Exception:
+                continue
+            if nfp == old_norm:
+                li = self.thumbnail_labels.get(new_path)
+                if not isinstance(li, dict):
+                    li = {"index": data_idx}
+                new_sel.append((new_path, li, path_to_idx.get(new_norm, data_idx)))
+            else:
+                new_sel.append(t)
+        self.selected_thumbnails = new_sel
+
+        sfp = getattr(self, "selected_file_path", None)
+        if sfp:
+            try:
+                if self._vg_norm_path(sfp) == old_norm:
+                    self.selected_file_path = new_path
+            except Exception:
+                pass
+
+        self._vg_visible_std_slots_by_path.pop(old_norm, None)
+        self._vg_visible_wide_slots_by_path.pop(old_norm, None)
+
+        rebound = False
+        for slot in getattr(self, "_vg_std_pool", None) or []:
+            if slot.get("data_idx") == data_idx:
+                self._vg_bind_slot(slot, data_idx)
+                rebound = True
+        for slot in getattr(self, "_vg_wide_pool", None) or []:
+            if slot.get("data_idx") == data_idx:
+                slot.pop("_wide_photo_key", None)
+                self._vg_bind_wide_slot(slot, data_idx)
+                rebound = True
+
+        try:
+            self._vg_reapply_selection()
+        except Exception:
+            pass
+        try:
+            self.update_status_bar()
+        except Exception:
+            pass
+
+        logging.info(
+            "[VGrid] Surgical rename: %s -> %s (idx=%d rebound=%s)",
+            os.path.basename(old_path),
+            os.path.basename(new_path),
+            data_idx,
+            rebound,
+        )
+        return True
 
     def _vg_remove_paths(self, paths) -> bool:
         """Drop items from the live virtual grid without clear+full reload.

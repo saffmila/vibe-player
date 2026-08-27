@@ -34,12 +34,14 @@ from video_merge import (
     _run_ffmpeg_with_progress,
     _set_status,
     _ui_call,
+    baked_video_output_args,
+    transform_input_args,
 )
 
 CONVERT_DIALOG_WIDTH = 420
 CONVERT_DIALOG_MIN_WIDTH = 380
 CONVERT_DIALOG_SCREEN_MARGIN = 24
-CONVERT_DIALOG_MAX_HEIGHT = 780
+CONVERT_DIALOG_MAX_HEIGHT = 820
 
 _FRAGILE_LOSSLESS_CONTAINERS = (
     ".mpg",
@@ -733,6 +735,7 @@ def _convert_custom(input_path, save_path, settings, set_status, progress_prefix
         "warning",
         "-y",
         "-nostdin",
+        *transform_input_args(settings),
         "-i",
         input_path,
         "-vf",
@@ -745,7 +748,7 @@ def _convert_custom(input_path, save_path, settings, set_status, progress_prefix
         cmd += ["-map", "0:a?", *_custom_audio_args(save_path, settings)]
     else:
         cmd += ["-an"]
-    cmd += ["-progress", "pipe:1", save_path]
+    cmd += [*baked_video_output_args(settings), "-progress", "pipe:1", save_path]
 
     _run_ffmpeg_with_progress(cmd, save_path, set_status, total_seconds, label)
 

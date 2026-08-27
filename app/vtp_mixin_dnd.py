@@ -50,6 +50,170 @@ class VtpDndMixin:
         self._dnd_last_internal_drag_paths = tuple(sorted(set(normalized)))
         self._dnd_last_internal_drag_ts = time.monotonic()
 
+    def _dnd_mark_drag_out_snapshot(self, paths: list[str]):
+        """Capture path + is_dir before OLE move so DragEnd can reconcile external drag-out."""
+        snap = []
+        for p in paths:
+            if not isinstance(p, str) or not p:
+                continue
+            try:
+                if os.path.exists(p):
+                    snap.append((p, os.path.isdir(p)))
+            except OSError:
+                pass
+        self._dnd_drag_out_snapshot = tuple(snap) if snap else None
+
+    def _dnd_mark_internal_drop_consumed(self):
+        """Internal drop handled the move — skip external drag-out tree reconcile."""
+        self._dnd_internal_drop_consumed = True
+
+    def _dnd_purge_cache_for_gone_path(self, path: str, *, was_dir: bool):
+        """Best-effort cache cleanup when a dragged-out path no longer exists at source."""
+        try:
+            cache_root = self.thumbnail_cache_path
+            abs_path = os.path.abspath(path)
+            rel = abs_path.replace(":", "")
+            cache_path = os.path.join(cache_root, rel)
+
+            if was_dir:
+                if os.path.isdir(cache_path):
+                    shutil.rmtree(cache_path, ignore_errors=True)
+            else:
+                cache_dir = os.path.dirname(cache_path)
+                cache_base = os.path.basename(cache_path)
+                if os.path.isdir(cache_dir):
+                    for fn in os.listdir(cache_dir):
+                        if fn.startswith(cache_base):
+                            try:
+                                os.remove(os.path.join(cache_dir, fn))
+                            except Exception:
+                                pass
+
+            tc = getattr(self, "thumbnail_cache", None)
+            if tc is not None and hasattr(tc, "cache"):
+                tc.cache.pop(path, None)
+                tc.cache.pop(os.path.normcase(os.path.normpath(path)), None)
+                fps = getattr(tc, "fingerprints", None)
+                if isinstance(fps, dict):
+                    fps.pop(path, None)
+                    fps.pop(os.path.normcase(os.path.normpath(path)), None)
+            try:
+                self.database.update_cache_status(path, False)
+            except Exception:
+                pass
+        except Exception as e:
+            logging.warning("[DnD] cache purge after external drag-out failed for %s: %s", path, e)
+
+    def _dnd_reconcile_external_drag_out(self, snapshot: tuple):
+        """Refresh tree/grid after paths were moved out to an external app (Explorer, etc.)."""
+        self._dnd_drag_out_snapshot = None
+        if getattr(self, "_dnd_internal_drop_consumed", False):
+            logging.debug("[DnD] external drag-out reconcile skipped (internal drop handled)")
+            self._dnd_internal_drop_consumed = False
+            return
+        if not snapshot:
+            return
+
+        def _norm(p):
+            try:
+                return os.path.normcase(os.path.normpath(os.path.abspath(p)))
+            except Exception:
+                return os.path.normcase(os.path.normpath(p))
+
+        gone = [(p, was_dir) for p, was_dir in snapshot if not os.path.exists(p)]
+        if not gone:
+            logging.debug("[DnD] external drag-out reconcile: nothing removed (copy or cancelled)")
+            return
+
+        logging.info("[DnD] external drag-out reconcile: %d path(s) left source", len(gone))
+
+        parents_to_refresh = set()
+        current_dir_affected = False
+        cur = getattr(self, "current_directory", None)
+        cur_norm = _norm(cur) if cur else None
+
+        self._suppress_tree_select_navigation = True
+        try:
+            for path, was_dir in gone:
+                parent = os.path.dirname(path)
+                if parent:
+                    parents_to_refresh.add(parent)
+
+                if was_dir:
+                    node = self.find_node_by_path(path)
+                    if node:
+                        self.tree.delete(node)
+                    elif parent:
+                        parent_node = self.find_node_by_path(parent)
+                        if parent_node and os.path.isdir(parent):
+                            self.process_directory(parent_node, parent)
+                    try:
+                        self.database.remove_entry(path)
+                    except Exception:
+                        pass
+                    if hasattr(self, "_invalidate_folder_preview_caches"):
+                        try:
+                            self._invalidate_folder_preview_caches(path)
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        self.database.remove_entry(path)
+                    except Exception:
+                        pass
+
+                self._dnd_purge_cache_for_gone_path(path, was_dir=was_dir)
+
+                if cur_norm:
+                    pn = _norm(path)
+                    if cur_norm == pn or cur_norm.startswith(pn + os.sep):
+                        current_dir_affected = True
+                    elif not was_dir and cur_norm == _norm(parent):
+                        current_dir_affected = True
+
+            for parent in parents_to_refresh:
+                if os.path.isdir(parent):
+                    self.refresh_folder_icon(parent)
+                    parent_node = self.find_node_by_path(parent)
+                    if parent_node:
+                        self.process_directory(parent_node, parent)
+
+            st = getattr(self, "selected_thumbnails", None) or []
+            dead = {_norm(p) for p, _ in gone}
+            self.selected_thumbnails = [
+                t
+                for t in st
+                if isinstance(t, (list, tuple))
+                and len(t) > 0
+                and _norm(str(t[0])) not in dead
+            ]
+            sfp = getattr(self, "selected_file_path", None)
+            if sfp and _norm(sfp) in dead:
+                self.selected_file_path = None
+
+            if current_dir_affected and cur:
+                for path, was_dir in gone:
+                    if not was_dir:
+                        continue
+                    pn = _norm(path)
+                    if cur_norm == pn or (cur_norm and cur_norm.startswith(pn + os.sep)):
+                        parent = os.path.dirname(path)
+                        if parent and os.path.isdir(parent):
+                            self.current_directory = parent
+                            try:
+                                self.select_current_folder_in_tree()
+                            except Exception:
+                                pass
+                        break
+
+            view = getattr(self, "current_directory", None)
+            if view and os.path.isdir(view):
+                self.display_thumbnails(view, force_refresh=True, preserve_scroll=True)
+        finally:
+            self.after_idle(
+                lambda: setattr(self, "_suppress_tree_select_navigation", False)
+            )
+
     def _dnd_payload_matches_internal(self, paths: list[str]) -> bool:
         """Check whether dropped paths match the most recent internal drag payload."""
         saved = getattr(self, "_dnd_last_internal_drag_paths", ())
@@ -414,6 +578,9 @@ class VtpDndMixin:
         """
         if not sources or not dest:
             return
+
+        if self._dnd_is_internal_drag_active() or self._dnd_payload_matches_internal(sources):
+            self._dnd_mark_internal_drop_consumed()
 
         if self._dnd_is_virtual_library_path(dest):
             def _deferred_vl():
@@ -1617,7 +1784,9 @@ class VtpDndMixin:
         data = self._dnd_format_paths(paths)
         logging.info("[DnD] DRAG OUT thumbnail: %d file(s), first=%s", len(paths), paths[0])
         self._dnd_internal_drag = True
+        self._dnd_internal_drop_consumed = False
         self._dnd_mark_internal_drag_payload(paths)
+        self._dnd_mark_drag_out_snapshot(paths)
         self._dnd_internal_drag_end_ts = 0.0
         self._dnd_drag_happened = True
         return ((dnd.MOVE, dnd.COPY), dnd.DND_FILES, data)
@@ -1739,7 +1908,9 @@ class VtpDndMixin:
         data = self._dnd_format_paths(paths)
         logging.info("[DnD] DRAG OUT tree: %d folder(s), first=%s", len(paths), paths[0])
         self._dnd_internal_drag = True
+        self._dnd_internal_drop_consumed = False
         self._dnd_mark_internal_drag_payload(paths)
+        self._dnd_mark_drag_out_snapshot(paths)
         self._dnd_internal_drag_end_ts = 0.0
         return ((dnd.MOVE, dnd.COPY), dnd.DND_FILES, data)
 
@@ -1747,6 +1918,10 @@ class VtpDndMixin:
         self._cancel_tree_dnd_autoscroll()
         end_ts = time.monotonic()
         self._dnd_internal_drag_end_ts = end_ts
+
+        snapshot = getattr(self, "_dnd_drag_out_snapshot", None)
+        if snapshot:
+            self.after(250, lambda s=snapshot: self._dnd_reconcile_external_drag_out(s))
 
         # On Windows, DragEnd may fire just before Drop handlers; keep internal marker
         # briefly so Drop can still resolve correct move/copy semantics.

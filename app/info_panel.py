@@ -62,6 +62,8 @@ class InfoPanelFrame(ctk.CTkFrame):
         # Preview: worker may only push file-check results; VLC + Tk stay on the main thread.
         self._preview_ticket = 0
         self._preview_ready_queue = queue.Queue(maxsize=64)
+        self._preview_io_queue: queue.Queue = queue.Queue(maxsize=8)
+        self._preview_io_worker_started = False
         self._preview_anim_after_id = None
         self._preview_anim_photos = []
         self._preview_anim_durations = []
@@ -500,6 +502,37 @@ class InfoPanelFrame(ctk.CTkFrame):
         finally:
             menu.grab_release()
 
+    def _ensure_preview_io_worker(self) -> None:
+        """Single background worker for preview I/O (avoid Thread.start storm on thumb browse)."""
+        if self._preview_io_worker_started:
+            return
+        self._preview_io_worker_started = True
+
+        def loop() -> None:
+            while True:
+                job = self._preview_io_queue.get()
+                if job is None:
+                    break
+                try:
+                    job()
+                except Exception:
+                    logging.debug("[Preview] IO worker job failed", exc_info=True)
+
+        threading.Thread(target=loop, daemon=True, name="PreviewIO").start()
+
+    def _submit_preview_io(self, job) -> None:
+        """Enqueue preview decode/exists work; drop stale queued jobs, keep the latest."""
+        self._ensure_preview_io_worker()
+        try:
+            while True:
+                self._preview_io_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            self._preview_io_queue.put_nowait(job)
+        except queue.Full:
+            pass
+
     def show_image_preview(self, image_path):
         """Show an image preview (animated GIF/WebP when applicable).
 
@@ -528,9 +561,12 @@ class InfoPanelFrame(ctk.CTkFrame):
         if not image_path:
             return
 
-        self.tab_preview.update_idletasks()
         target_width = self.tab_preview.winfo_width() - 20
         target_height = self.tab_preview.winfo_height() - 20
+        if target_width <= 1 or target_height <= 1:
+            self.tab_preview.update_idletasks()
+            target_width = self.tab_preview.winfo_width() - 20
+            target_height = self.tab_preview.winfo_height() - 20
         if target_width <= 0:
             target_width = 400
         if target_height <= 0:
@@ -540,12 +576,15 @@ class InfoPanelFrame(ctk.CTkFrame):
         self._preview_ticket += 1
         ticket = self._preview_ticket
         path = image_path
+        tw, th = target_width, target_height
 
         def worker():
             err = None
             pil_frames = None
             durations = None
             try:
+                if ticket != getattr(self, "_preview_ticket", ticket):
+                    return
                 if not os.path.isfile(path):
                     err = "File not found."
                 else:
@@ -562,13 +601,13 @@ class InfoPanelFrame(ctk.CTkFrame):
                             img_w, img_h = frame.size
                             img_ratio = (img_w / img_h) if img_h else 1.0
                             panel_ratio = (
-                                target_width / target_height if target_height else 1.0
+                                tw / th if th else 1.0
                             )
                             if panel_ratio > img_ratio:
-                                new_height = target_height
+                                new_height = th
                                 new_width = max(1, int(new_height * img_ratio))
                             else:
-                                new_width = target_width
+                                new_width = tw
                                 new_height = max(1, int(new_width / img_ratio))
                             fit_box = (new_width, new_height)
                         # thumbnail() mutates — copy so animation frames stay independent
@@ -620,7 +659,7 @@ class InfoPanelFrame(ctk.CTkFrame):
             except Exception:
                 pass
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._submit_preview_io(worker)
 
     def _stop_preview_image_animation(self):
         """Cancel GIF/WebP preview playback and drop frame PhotoImage refs."""
@@ -691,6 +730,11 @@ class InfoPanelFrame(ctk.CTkFrame):
         self._stop_preview_image_animation()
         self._pending_preview_path = None
         self._preview_ticket += 1
+        try:
+            while True:
+                self._preview_io_queue.get_nowait()
+        except queue.Empty:
+            pass
 
     def _preview_process_ready_queue(self, retries: int = 0) -> None:
         """Tk main thread: consume file-check result from worker, then run VLC."""
@@ -822,12 +866,14 @@ class InfoPanelFrame(ctk.CTkFrame):
 
         def worker_file_check():
             try:
+                if ticket != getattr(self, "_preview_ticket", ticket):
+                    return
                 ok = os.path.isfile(vp)
                 self._preview_ready_queue.put_nowait((ticket, vp, ok))
             except queue.Full:
                 pass
 
-        threading.Thread(target=worker_file_check, daemon=True).start()
+        self._submit_preview_io(worker_file_check)
         self.after(0, lambda: self._preview_process_ready_queue(0))
 
 

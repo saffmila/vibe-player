@@ -17,6 +17,7 @@ import queue as _Q
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from PIL import Image as PILImage, ImageTk
 from screeninfo import get_monitors
@@ -108,6 +109,127 @@ def _with_native_dialogs(win, fn):
             pass
 
 
+def _image_files_list(controller):
+    return [
+        f for f in controller.video_files
+        if f["path"].lower().endswith(IMAGE_FORMATS)
+    ]
+
+
+def peek_image_after_delete(controller, current_path):
+    """
+    Return (path, name) of the image to show after deleting ``current_path``,
+    or None when the viewer should close (only image / unknown index).
+    """
+    all_files = _image_files_list(controller)
+    idx = next((i for i, f in enumerate(all_files) if f["path"] == current_path), None)
+    if idx is None:
+        return None
+    if len(all_files) <= 1:
+        return None
+    if idx < len(all_files) - 1:
+        nf = all_files[idx + 1]
+    else:
+        nf = all_files[idx - 1]
+    return nf["path"], nf["name"]
+
+
+class ImageOpenError(Exception):
+    """The image viewer could not open the requested file."""
+
+
+def image_file_exists(path: str) -> bool:
+    try:
+        return bool(path) and os.path.isfile(path)
+    except OSError:
+        return False
+
+
+def notify_missing_image(controller, path: str) -> None:
+    name = os.path.basename(path) if path else "?"
+    logging.info("[ImageViewer] File not found: %s", path)
+    message = f"The file no longer exists:\n\n{name}"
+    dialog = getattr(controller, "universal_dialog", None)
+    if callable(dialog):
+        dialog(title="File not found", message=message, show_cancel=False, confirm_text="OK")
+        return
+    status_bar = getattr(controller, "status_bar", None)
+    if status_bar is not None and hasattr(status_bar, "set_action_message"):
+        status_bar.set_action_message(f"File not found: {name}", color="#ff6b6b")
+
+
+def _find_loadable_neighbor(
+    controller, current_path: str, direction: int = 1
+) -> tuple[str, str] | None:
+    """Return (path, name) of the next on-disk image, or None."""
+    all_files = _image_files_list(controller)
+    if not all_files:
+        return None
+    try:
+        cur = os.path.normcase(os.path.normpath(current_path))
+    except Exception:
+        cur = current_path
+    idx = next(
+        (
+            i
+            for i, f in enumerate(all_files)
+            if os.path.normcase(os.path.normpath(f.get("path", ""))) == cur
+        ),
+        None,
+    )
+    if idx is None:
+        for f in all_files:
+            p = f.get("path")
+            if p and image_file_exists(p):
+                return p, f.get("name") or os.path.basename(p)
+        return None
+    n = len(all_files)
+    for step in range(1, n):
+        f = all_files[(idx + direction * step) % n]
+        p = f.get("path")
+        if p and image_file_exists(p):
+            return p, f.get("name") or os.path.basename(p)
+    return None
+
+
+def _advance_viewer_past_missing(viewer, path: str) -> None:
+    nxt = _find_loadable_neighbor(viewer.controller, path, direction=1)
+    if nxt:
+        viewer.load_image(nxt[0], nxt[1])
+    else:
+        viewer._do_close()
+
+
+_image_worker_pool = None
+_image_worker_pool_lock = threading.Lock()
+
+
+def _image_worker_executor(controller=None):
+    """Background pool for decode / mips / prefetch — never start threads on the Tk UI thread."""
+    ex = getattr(controller, "io_executor", None) if controller is not None else None
+    if ex is not None:
+        try:
+            if not ex._shutdown:
+                return ex
+        except Exception:
+            pass
+    global _image_worker_pool
+    with _image_worker_pool_lock:
+        if _image_worker_pool is None:
+            _image_worker_pool = ThreadPoolExecutor(
+                max_workers=2, thread_name_prefix="ImageWorker"
+            )
+        return _image_worker_pool
+
+
+def _submit_image_worker(controller, fn, *, name: str = "image-worker") -> None:
+    """Fire-and-forget on a pool thread; ``submit`` does not block like ``Thread.start()``."""
+    try:
+        _image_worker_executor(controller).submit(fn)
+    except Exception as exc:
+        logging.debug("[%s] worker submit failed: %s", name, exc)
+
+
 class ImageViewerLegacy:
    
     def __init__(self, parent, image_path, image_name):
@@ -158,18 +280,15 @@ class ImageViewerLegacy:
         self._decode_cache_lock = threading.Lock()
         self._prefetch_gen = 0
         self._prefetch_after = None
+        self._open_load_gen = 0
+        self._nav_load_gen = 0
         self._perf_last_mip_ms = 0.0
+        self._perf_last_decode_ms = 0.0
         self._perf_open_t0 = time.perf_counter() if _IMAGE_VIEWER_PERF else 0.0
 
-        t_dec = time.perf_counter() if _IMAGE_VIEWER_PERF else 0.0
-        frames, durations = load_pil_frames(self.image_path)
-        if _IMAGE_VIEWER_PERF:
-            dec_ms = (time.perf_counter() - t_dec) * 1000.0
-            self._perf_last_decode_ms = dec_ms
-            _img_perf_log(
-                f"open decode={dec_ms:.0f}ms file={self.image_name!r}"
-            )
-        self._apply_loaded_frames(frames, durations, reset_title=False)
+        # Placeholder until async decode finishes (keeps UI responsive on large JPGs).
+        self.original_image = PILImage.new("RGB", (1, 1), "black")
+        self.image = self.original_image
         # Never upload full-res PhotoImage here — 8K DJI (~8064×4536) would flash
         # a huge bitmap before the first scaled paint and can stall Tk for seconds.
         self.photo = ImageTk.PhotoImage(PILImage.new("RGB", (1, 1), "black"))
@@ -283,14 +402,81 @@ class ImageViewerLegacy:
 
         # Same flags as Pyglet viewer — used by main.py fast-open and delete flow
         self._running = True
+
+        def _on_toplevel_close():
+            self._do_close()
+
+        self.image_window.protocol("WM_DELETE_WINDOW", _on_toplevel_close)
+
+        if _IMAGE_VIEWER_PERF:
+            _img_perf_log(
+                "timing ON (VIBE_IMAGE_PERF=1). Watch [IMAGE-PERF] in app.log; "
+                "disable: VIBE_IMAGE_PERF=0"
+            )
+
+        self._begin_open_load()
+
+    def _begin_open_load(self) -> None:
+        """Decode the first image off the UI thread, then finish setup on the main loop."""
+        self._open_load_gen = int(getattr(self, "_open_load_gen", 0)) + 1
+        gen = self._open_load_gen
+        path = self.image_path
+        name = self.image_name
+        try:
+            self.image_window.title(f"{name} — loading…")
+        except Exception:
+            pass
+
+        def worker() -> None:
+            err = None
+            frames = None
+            durations = None
+            dec_ms = 0.0
+            try:
+                if not image_file_exists(path):
+                    raise FileNotFoundError(path)
+                t_dec = time.perf_counter() if _IMAGE_VIEWER_PERF else 0.0
+                frames, durations = load_pil_frames(path)
+                if _IMAGE_VIEWER_PERF:
+                    dec_ms = (time.perf_counter() - t_dec) * 1000.0
+            except Exception as exc:
+                err = exc
+
+            def apply() -> None:
+                if gen != getattr(self, "_open_load_gen", None):
+                    return
+                if not getattr(self, "_running", False):
+                    return
+                try:
+                    if not self.image_window.winfo_exists():
+                        return
+                except tk.TclError:
+                    return
+                if err is not None:
+                    logging.error("[ImageViewer] Failed to open %s: %s", name, err)
+                    notify_missing_image(self.controller, path)
+                    self._do_close()
+                    return
+                if _IMAGE_VIEWER_PERF:
+                    self._perf_last_decode_ms = dec_ms
+                    _img_perf_log(f"open decode={dec_ms:.0f}ms file={name!r}")
+                self._finish_open_after_decode(frames, durations)
+
+            try:
+                self.image_window.after(0, apply)
+            except Exception:
+                pass
+
+        _submit_image_worker(self.controller, worker, name="image-open")
+
+    def _finish_open_after_decode(self, frames, durations) -> None:
+        self._apply_loaded_frames(frames, durations, reset_title=False)
         self._start_animation_if_needed()
-        # Warm RAM cache with the image we just decoded; prefetch neighbors after paint.
         self._decode_cache_put(self.image_path, self._anim_frames, self._anim_durations)
 
         open_fs = bool(getattr(self.controller, "image_viewer_open_fullscreen", True))
         self._layout_initial_window(open_fullscreen=open_fs)
         if _IMAGE_VIEWER_PERF and not getattr(self, "_settle_open_fit", False):
-            # Windowed open paints inside _layout_initial_window; fullscreen waits settle.
             total_ms = (time.perf_counter() - self._perf_open_t0) * 1000.0
             iw, ih = self.original_image.size
             _img_perf_log(
@@ -300,19 +486,7 @@ class ImageViewerLegacy:
                 f"size={iw}x{ih} zoom={self.zoom_factor:.3f} mode={self._view_fit_mode}"
             )
         self._schedule_neighbor_prefetch()
-
-        #Na konci initu vynutíme první vykreslení HUDu
         self._overlay_after_id = self.image_window.after(100, self._refresh_overlays)
-        if _IMAGE_VIEWER_PERF:
-            _img_perf_log(
-                "timing ON (VIBE_IMAGE_PERF=1). Watch [IMAGE-PERF] in app.log; "
-                "disable: VIBE_IMAGE_PERF=0"
-            )
-
-        def _on_toplevel_close():
-            self._do_close()
-
-        self.image_window.protocol("WM_DELETE_WINDOW", _on_toplevel_close)
 
     def _monitor_at(self, x, y):
         """Return the monitor containing screen point (x, y), or the primary."""
@@ -655,23 +829,31 @@ class ImageViewerLegacy:
         self._prefetch_gen += 1
         gen = self._prefetch_gen
         neighbors = self._neighbor_image_entries(_PREFETCH_RADIUS)
+        paths: list[str] = []
         for f in neighbors:
             path = f.get("path")
-            if not path:
+            if not path or not image_file_exists(path):
                 continue
             if self._decode_cache_get(path) is not None:
                 continue
-            threading.Thread(
-                target=self._prefetch_decode_worker,
-                args=(path, gen),
-                daemon=True,
-                name="image-prefetch",
-            ).start()
+            paths.append(path)
+        if not paths:
+            return
+
+        def _prefetch_batch() -> None:
+            for path in paths:
+                if gen != getattr(self, "_prefetch_gen", None):
+                    return
+                self._prefetch_decode_worker(path, gen)
+
+        _submit_image_worker(self.controller, _prefetch_batch, name="image-prefetch")
 
     def _prefetch_decode_worker(self, path: str, gen: int) -> None:
         t0 = time.perf_counter() if _IMAGE_VIEWER_PERF else 0.0
         try:
             if gen != getattr(self, "_prefetch_gen", None):
+                return
+            if not image_file_exists(path):
                 return
             frames, durations = load_pil_frames(path)
             if len(frames) == 1:
@@ -752,7 +934,7 @@ class ImageViewerLegacy:
             except Exception:
                 pass
 
-        threading.Thread(target=worker, daemon=True, name="image-mips").start()
+        _submit_image_worker(self.controller, worker, name="image-mips")
 
     @staticmethod
     def _build_mip_levels(full: PILImage.Image) -> list:
@@ -766,20 +948,11 @@ class ImageViewerLegacy:
         return levels
 
     def _rebuild_mips(self) -> None:
-        """Sync pyramid rebuild (transforms). Prefer deferred path on load."""
+        """Rebuild pyramid after in-memory transforms (off UI thread)."""
         self._invalidate_mips()
         if self._is_animated() or self.original_image is None:
             return
-        t0 = time.perf_counter() if _IMAGE_VIEWER_PERF else 0.0
-        levels = self._build_mip_levels(self.original_image)
-        self._image_mips = levels
-        if _IMAGE_VIEWER_PERF:
-            ms = (time.perf_counter() - t0) * 1000.0
-            self._perf_last_mip_ms = ms
-            sizes = "→".join(f"{im.size[0]}x{im.size[1]}" for im in levels)
-            _img_perf_log(
-                f"mips={ms:.0f}ms deferred=0 levels={len(levels)} pyramid={sizes}"
-            )
+        self._schedule_deferred_mips()
 
     def _pick_mip(
         self, full_box, out_w: int, out_h: int, *, interactive: bool = False, bias=None
@@ -905,6 +1078,8 @@ class ImageViewerLegacy:
         # Invalidate in-flight worker apply via generation bump.
         self._mip_gen = int(getattr(self, "_mip_gen", 0)) + 1
         self._prefetch_gen = int(getattr(self, "_prefetch_gen", 0)) + 1
+        self._open_load_gen = int(getattr(self, "_open_load_gen", 0)) + 1
+        self._nav_load_gen = int(getattr(self, "_nav_load_gen", 0)) + 1
 
     def _do_close(self):
         """Match Pyglet viewer API for controller / fast-open code paths."""
@@ -920,6 +1095,45 @@ class ImageViewerLegacy:
                 self.image_window.destroy()
         except tk.TclError:
             pass
+        if getattr(self.controller, "current_image_window", None) is self:
+            self.controller.current_image_window = None
+
+    def release_image_file_handles(self, path=None):
+        """Drop in-memory decode/anim data so the file can be removed on disk."""
+        path = path or self.image_path
+        self._stop_animation()
+        if path and os.path.normcase(path) == os.path.normcase(getattr(self, "image_path", "")):
+            self._anim_frames = []
+            self._anim_durations = []
+        self._decode_cache_invalidate(path)
+
+    def get_delete_dialog_parent(self):
+        try:
+            if self.image_window.winfo_exists():
+                return self.image_window
+        except tk.TclError:
+            pass
+        return self.parent
+
+    def apply_after_delete(self):
+        """After a confirmed delete: show the next image or close if none remain."""
+        target = getattr(self, "_pending_after_delete", None)
+        self._pending_after_delete = None
+        if not getattr(self, "_running", False):
+            return
+        try:
+            if not self.image_window.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        if target is None:
+            self._do_close()
+            return
+        path, name = target
+        if os.path.isfile(path):
+            self.load_image(path, name)
+            return
+        self.show_next_image()
 
     def _crop_active(self) -> bool:
         return bool(getattr(self, "crop", None) and self.crop.active)
@@ -935,22 +1149,31 @@ class ImageViewerLegacy:
         """Cancel crop mode without applying (no confirm — caller must guard)."""
         self.crop.exit()
 
-    def _request_cancel_crop(self):
-        """Ask before leaving crop/rotate (Esc, Cancel, X toggle, context menu)."""
+    def _request_cancel_crop(self, *, close_viewer: bool = False):
+        """Ask before leaving crop/rotate (Esc, Cancel, X toggle, context menu).
+
+        When ``close_viewer`` is True (Esc), Discard exits crop and closes the
+        viewer — Esc means close, and the dialog only confirms abandoning the edit.
+        Cancel / X / context menu keep the viewer open after Discard.
+        """
         if not self._crop_active():
             return
         if not confirm_discard_image_edit(self.image_window, ["Crop / Rotate"]):
             return
         self.exit_crop_mode()
+        if close_viewer:
+            self._do_close()
 
     def _on_escape_key(self, event=None):
-        """Escape cancels crop when active; otherwise closes the viewer."""
+        """Escape: discard crop then close viewer; otherwise close the viewer."""
         if self._crop_active():
             # Defer so this Esc KeyPress cannot hit the confirm dialog as Keep.
             try:
-                self.image_window.after_idle(self._request_cancel_crop)
+                self.image_window.after_idle(
+                    lambda: self._request_cancel_crop(close_viewer=True)
+                )
             except Exception:
-                self._request_cancel_crop()
+                self._request_cancel_crop(close_viewer=True)
             return
         self._do_close()
 
@@ -1098,12 +1321,12 @@ class ImageViewerLegacy:
 
     def delete_current_image(self, event=None):
         """Vyžádá smazání aktuálního obrázku."""
-        logging.info(f"[Image] Requesting delete for: {self.image_path}")
-        if hasattr(self.controller, 'confirm_delete_item'):
-            # Zavřeme okno, protože soubor zmizí
-            self._do_close()
-            # Vyvoláme dialog v hlavním okně
-            self.controller.confirm_delete_item(paths=[self.image_path])
+        path = self.image_path
+        logging.info(f"[Image] Requesting delete for: {path}")
+        if not hasattr(self.controller, "confirm_delete_item"):
+            return
+        self._pending_after_delete = peek_image_after_delete(self.controller, path)
+        self.controller.confirm_delete_item(paths=[path], from_image_viewer=self)
 
     def center_image(self):
         if not getattr(self, "_running", False):
@@ -1187,21 +1410,74 @@ class ImageViewerLegacy:
         self.image_path = path
         self.image_name = name
 
-        try:
-            t0 = time.perf_counter() if _IMAGE_VIEWER_PERF else 0.0
-            cached = self._decode_cache_get(path)
-            if cached is not None:
-                frames, durations = cached
-                if _IMAGE_VIEWER_PERF:
-                    self._perf_last_decode_ms = 0.0
-                    _img_perf_log(f"nav decode=0ms cache=1 file={name!r}")
-            else:
+        if not image_file_exists(path):
+            notify_missing_image(self.controller, path)
+            _advance_viewer_past_missing(self, path)
+            return
+
+        self._nav_load_gen = int(getattr(self, "_nav_load_gen", 0)) + 1
+        gen = self._nav_load_gen
+
+        cached = self._decode_cache_get(path)
+        if cached is not None:
+            self._apply_nav_loaded(path, name, cached[0], cached[1], gen, from_cache=True)
+            return
+
+        def worker() -> None:
+            err = None
+            frames = None
+            durations = None
+            dec_ms = 0.0
+            try:
                 t_dec = time.perf_counter() if _IMAGE_VIEWER_PERF else 0.0
                 frames, durations = load_pil_frames(path)
                 if _IMAGE_VIEWER_PERF:
                     dec_ms = (time.perf_counter() - t_dec) * 1000.0
-                    self._perf_last_decode_ms = dec_ms
-                    _img_perf_log(f"nav decode={dec_ms:.0f}ms cache=0 file={name!r}")
+            except Exception as exc:
+                err = exc
+
+            def apply() -> None:
+                if gen != getattr(self, "_nav_load_gen", None):
+                    return
+                if not getattr(self, "_running", False):
+                    return
+                if os.path.normcase(path) != os.path.normcase(getattr(self, "image_path", "")):
+                    return
+                try:
+                    if not self.image_window.winfo_exists():
+                        return
+                except tk.TclError:
+                    return
+                if err is not None:
+                    logging.error("Failed to load image %s: %s", name, err)
+                    if not image_file_exists(path):
+                        notify_missing_image(self.controller, path)
+                        _advance_viewer_past_missing(self, path)
+                    return
+                self._apply_nav_loaded(
+                    path, name, frames, durations, gen, decode_ms=dec_ms
+                )
+
+            try:
+                self.image_window.after(0, apply)
+            except Exception:
+                pass
+
+        _submit_image_worker(self.controller, worker, name="image-nav")
+
+    def _apply_nav_loaded(
+        self, path, name, frames, durations, gen, *, decode_ms=0.0, from_cache=False
+    ) -> None:
+        if gen != getattr(self, "_nav_load_gen", None) or not getattr(self, "_running", False):
+            return
+        try:
+            t0 = time.perf_counter() if _IMAGE_VIEWER_PERF else 0.0
+            if _IMAGE_VIEWER_PERF:
+                self._perf_last_decode_ms = 0.0 if from_cache else decode_ms
+                if from_cache:
+                    _img_perf_log(f"nav decode=0ms cache=1 file={name!r}")
+                else:
+                    _img_perf_log(f"nav decode={decode_ms:.0f}ms cache=0 file={name!r}")
             self._apply_loaded_frames(frames, durations, reset_title=True)
             self._decode_cache_put(path, self._anim_frames, self._anim_durations)
 
@@ -1232,30 +1508,33 @@ class ImageViewerLegacy:
 
             self._start_animation_if_needed()
             self._schedule_neighbor_prefetch()
-
-            # --- AKTUALIZACE HUD ---
-            # Zavoláme to explicitně, aby se aktualizoval index souboru (např. 5/120)
             self.draw_info_hud()
-
         except Exception as e:
             logging.error(f"Failed to load image {name}: {e}")
-
-
-
+            if not image_file_exists(path):
+                notify_missing_image(self.controller, path)
+                _advance_viewer_past_missing(self, path)
 
     def skip(self, direction):
         if not self._confirm_leave_edit_for_navigation():
             return
         try:
-            all_files = [f for f in self.controller.video_files if f['path'].lower().endswith(IMAGE_FORMATS)]
-            # Najít index pomocí cesty k souboru
-            current_index = next((i for i, f in enumerate(all_files) if f['path'] == self.image_path), None)
-            
+            all_files = _image_files_list(self.controller)
+            current_index = next(
+                (i for i, f in enumerate(all_files) if f["path"] == self.image_path),
+                None,
+            )
             if current_index is None:
                 return
-            new_index = (current_index + direction) % len(all_files)
-            new_file = all_files[new_index]
-            self.load_image(new_file['path'], new_file['name'])
+            n = len(all_files)
+            for step in range(1, n):
+                new_index = (current_index + direction * step) % n
+                new_file = all_files[new_index]
+                if image_file_exists(new_file["path"]):
+                    self.load_image(new_file["path"], new_file["name"])
+                    return
+            notify_missing_image(self.controller, self.image_path)
+            self._do_close()
         except Exception as e:
             logging.info("[DEBUG] ImageViewer skip error: %s", e)
 
@@ -2201,9 +2480,22 @@ def create_image_viewer(parent, image_path, image_name, use_gpu_viewer: bool = F
         on timeout or error, return Legacy so hybrid-GPU laptops do not hang the UI thread.
       * **Other platforms:** construct ``ImageViewerGPU`` directly (same class still waits on
         the worker with its own timeout).
+
+    Returns ``None`` when the file is missing or cannot be decoded.
     """
-    if not use_gpu_viewer:
+    if not image_file_exists(image_path):
+        notify_missing_image(parent, image_path)
+        return None
+
+    def _open_legacy():
         return ImageViewerLegacy(parent, image_path, image_name)
+
+    try:
+        if not use_gpu_viewer:
+            return _open_legacy()
+    except ImageOpenError:
+        notify_missing_image(parent, image_path)
+        return None
 
     logging.info("[ImageViewer] Attempting GPU startup (Timeout 3s)...")
 
@@ -2212,14 +2504,22 @@ def create_image_viewer(parent, image_path, image_name, use_gpu_viewer: bool = F
             _ensure_pyglet_worker()
         except Exception:
             logging.exception("[ImageViewer] GPU worker start failed; using Canvas viewer.")
-            return ImageViewerLegacy(parent, image_path, image_name)
+            try:
+                return _open_legacy()
+            except ImageOpenError:
+                notify_missing_image(parent, image_path)
+                return None
 
         if not _pyglet_ready.wait(timeout=_GPU_STARTUP_TIMEOUT_S):
             logging.warning(
                 "[ImageViewer] GPU worker not ready within %.1fs; using Canvas viewer.",
                 _GPU_STARTUP_TIMEOUT_S,
             )
-            return ImageViewerLegacy(parent, image_path, image_name)
+            try:
+                return _open_legacy()
+            except ImageOpenError:
+                notify_missing_image(parent, image_path)
+                return None
 
         try:
             return ImageViewerGPU(
@@ -2229,17 +2529,28 @@ def create_image_viewer(parent, image_path, image_name, use_gpu_viewer: bool = F
                 gpu_init_timeout=_GPU_STARTUP_TIMEOUT_S,
                 strict_gpu_init=True,
             )
+        except ImageOpenError:
+            notify_missing_image(parent, image_path)
+            return None
         except Exception:
             logging.exception("[ImageViewer] GPU viewer failed; using Canvas viewer.")
-            return ImageViewerLegacy(parent, image_path, image_name)
+            try:
+                return _open_legacy()
+            except ImageOpenError:
+                notify_missing_image(parent, image_path)
+                return None
 
-    return ImageViewerGPU(
-        parent,
-        image_path,
-        image_name,
-        gpu_init_timeout=_GPU_STARTUP_TIMEOUT_S,
-        strict_gpu_init=True,
-    )
+    try:
+        return ImageViewerGPU(
+            parent,
+            image_path,
+            image_name,
+            gpu_init_timeout=_GPU_STARTUP_TIMEOUT_S,
+            strict_gpu_init=True,
+        )
+    except ImageOpenError:
+        notify_missing_image(parent, image_path)
+        return None
 
 
 def _use_gpu_from_parent(parent) -> bool:
@@ -2476,7 +2787,11 @@ class ImageViewerGPU:
         self.is_fullscreen = False
 
         # Load PIL image (no GL, safe in any thread)
-        raw = load_pil_image(image_path)
+        try:
+            raw = load_pil_image(image_path)
+        except Exception as exc:
+            logging.error("[ImageViewer] Failed to open %s: %s", image_name, exc)
+            raise ImageOpenError(str(exc)) from exc
         if raw.mode not in ('RGB', 'RGBA'):
             raw = raw.convert('RGBA')
         self.original_image = raw
@@ -3058,6 +3373,8 @@ class ImageViewerGPU:
         self.image_path = path
         self.image_name = name
         try:
+            if not image_file_exists(path):
+                raise FileNotFoundError(path)
             img = load_pil_image(path)
             if img.mode not in ('RGB', 'RGBA'):
                 img = img.convert('RGBA')
@@ -3070,6 +3387,16 @@ class ImageViewerGPU:
             self._update_hud()
         except Exception as e:
             logging.error(f"[ImageViewer] Failed to load {name}: {e}")
+            if not image_file_exists(path):
+                try:
+                    self.parent.after(
+                        0, lambda p=path: notify_missing_image(self.controller, p)
+                    )
+                    self.parent.after(
+                        0, lambda p=path: _advance_viewer_past_missing(self, p)
+                    )
+                except Exception:
+                    pass
 
     def _do_zoom_in(self):
         self._view_fit_mode = "manual"
@@ -3154,20 +3481,36 @@ class ImageViewerGPU:
 
     def load_image(self, path, name):
         self._abandon_image_edits()
+        if not image_file_exists(path):
+            notify_missing_image(self.controller, path)
+            _advance_viewer_past_missing(self, path)
+            return
         self._schedule_pyglet(self._do_load_image, path, name)
 
     def skip(self, direction):
         if not self._confirm_leave_edit_for_navigation():
             return
         try:
-            files = [f for f in self.controller.video_files
-                     if f['path'].lower().endswith(IMAGE_FORMATS)]
-            idx   = next((i for i, f in enumerate(files)
-                          if f['path'] == self.image_path), None)
+            files = _image_files_list(self.controller)
+            idx = next(
+                (i for i, f in enumerate(files) if f["path"] == self.image_path),
+                None,
+            )
             if idx is None:
                 return
-            nf = files[(idx + direction) % len(files)]
-            self.load_image(nf['path'], nf['name'])
+            n = len(files)
+            for step in range(1, n):
+                nf = files[(idx + direction * step) % n]
+                if image_file_exists(nf["path"]):
+                    self.load_image(nf["path"], nf["name"])
+                    return
+            try:
+                self.parent.after(
+                    0, lambda: notify_missing_image(self.controller, self.image_path)
+                )
+                self.parent.after(0, self._do_close)
+            except Exception:
+                self._do_close()
         except Exception as e:
             logging.warning(f"[ImageViewer] skip error: {e}")
 
@@ -3251,11 +3594,40 @@ class ImageViewerGPU:
     def resize_image(self, new_width, new_height, resampling_filter=PILImage.LANCZOS):
         self._schedule_pyglet(self._do_resize, new_width, new_height, resampling_filter)
 
-    def delete_current_image(self, event=None):
-        logging.info(f"[ImageViewer] Requesting delete: {self.image_path}")
-        if hasattr(self.controller, 'confirm_delete_item'):
+    def release_image_file_handles(self, path=None):
+        path = path or self.image_path
+        self._schedule_pyglet(self._do_release_image_handles, path)
+
+    def _do_release_image_handles(self, path):
+        if path and os.path.normcase(path) == os.path.normcase(getattr(self, "image_path", "")):
+            self.original_image = None
+
+    def get_delete_dialog_parent(self):
+        return self.parent
+
+    def apply_after_delete(self):
+        target = getattr(self, "_pending_after_delete", None)
+        self._pending_after_delete = None
+        if not getattr(self, "_running", False):
+            return
+        if target is None:
             self._do_close()
-            self.controller.confirm_delete_item(paths=[self.image_path])
+            if getattr(self.controller, "current_image_window", None) is self:
+                self.controller.current_image_window = None
+            return
+        path, name = target
+        if os.path.isfile(path):
+            self.load_image(path, name)
+            return
+        self.show_next_image()
+
+    def delete_current_image(self, event=None):
+        path = self.image_path
+        logging.info(f"[ImageViewer] Requesting delete: {path}")
+        if not hasattr(self.controller, "confirm_delete_item"):
+            return
+        self._pending_after_delete = peek_image_after_delete(self.controller, path)
+        self.controller.confirm_delete_item(paths=[path], from_image_viewer=self)
 
     def copy_image_to_clipboard(self, event=None):
         try:

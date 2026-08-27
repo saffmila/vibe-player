@@ -7,7 +7,7 @@ parented to the image viewer so it stays above fullscreen / topmost windows.
 Button labels are action verbs (users often read buttons before body text):
   - Keep editing   → stay in the current edit (safe)
   - Discard & skip → abandon edit and continue next/prev
-  - Discard        → abandon edit and leave crop mode (Esc / Cancel)
+  - Discard        → abandon edit (Cancel / X); Esc path also closes the viewer
 """
 
 from __future__ import annotations
@@ -49,9 +49,11 @@ def confirm_leave_image_edit(parent, processes: list[str]) -> bool:
 
 def confirm_discard_image_edit(parent, processes: list[str]) -> bool:
     """
-    Ask whether to abandon an active edit (Esc / Cancel) without navigating.
+    Ask whether to abandon an active edit (Esc / Cancel) without saving.
 
     Returns True if there is nothing to guard, or the user chooses Discard.
+    Caller decides whether Discard also closes the viewer (Esc) or only
+    leaves crop mode (Cancel / X).
     """
     labels = [p for p in (processes or []) if p]
     if not labels:

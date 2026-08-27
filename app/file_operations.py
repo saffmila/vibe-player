@@ -1442,6 +1442,59 @@ def probe_first_video_stream(video_path: str) -> dict | None:
         return None
 
 
+def probe_video_display_rotation(video_path: str) -> int:
+    """
+    Return display rotation in degrees CCW (0–359) — same convention as FFmpeg autorotate.
+    """
+    try:
+        ffprobe = get_ffprobe_path()
+    except FileNotFoundError:
+        return 0
+    cmd = [
+        ffprobe,
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream_side_data=rotation",
+        "-show_entries",
+        "stream_tags=rotate",
+        "-of",
+        "json",
+        video_path,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            startupinfo=startupinfo,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return 0
+        data = json.loads(result.stdout)
+        streams = data.get("streams") or []
+        if not streams:
+            return 0
+        stream = streams[0]
+        for side in stream.get("side_data_list") or []:
+            rot = side.get("rotation")
+            if rot is not None:
+                return int(round(float(rot))) % 360
+        tag = (stream.get("tags") or {}).get("rotate")
+        if tag is not None and str(tag).strip() not in ("", "0"):
+            # Container tag is clockwise; convert to CCW.
+            cw = int(round(float(tag))) % 360
+            return (360 - cw) % 360
+    except Exception:
+        logging.debug(
+            "Could not probe display rotation for %s", video_path, exc_info=True
+        )
+    return 0
+
+
 def get_file_info(path):
     """Return formatted string with file name, dimensions, size, and modification time."""
     file_name = os.path.basename(path)

@@ -216,23 +216,28 @@ class StatusBar(ctk.CTkFrame):
         self.set_status(status_message)
     
     def count_folders_and_files(self, dir_path):
-        """Count folders, files, and total size under the given directory."""
+        """Count folders, files, and total size in the open directory (non-recursive)."""
         folder_count = 0
         file_count = 0
         total_size = 0
-        
-        for root, dirs, files in os.walk(dir_path):
-            folder_count += len(dirs)
-            file_count += len(files)
-            for name in files:
-                file_path = os.path.join(root, name)
-                try:
-                    total_size += os.path.getsize(file_path)
-                except FileNotFoundError:
-                    logging.debug("File not found (skip in size sum): %s", file_path)
-                except PermissionError:
-                    logging.info(f"Permission denied: {file_path}")
-        
+
+        if not dir_path or not os.path.isdir(dir_path):
+            return folder_count, file_count, 0.0
+
+        try:
+            with os.scandir(dir_path) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            folder_count += 1
+                        elif entry.is_file(follow_symlinks=False):
+                            file_count += 1
+                            total_size += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+        except OSError as exc:
+            logging.debug("count_folders_and_files failed for %s: %s", dir_path, exc)
+
         return folder_count, file_count, total_size / (1024 * 1024)
 
     def count_selected_files_and_size(self, selected_thumbnails):

@@ -451,6 +451,8 @@ class VideoThumbnailPlayer(
         self.ShowTWidget = False
         self.setup_styles()
         self.status_queue = queue.Queue()
+        self._panel_info_io_queue = queue.Queue(maxsize=8)
+        self._panel_info_io_worker_started = False
         self.status_bar = StatusBar(self)
         # Initialize thumbnail time as a float representing percentage (default: 10% of video duration)
         self.thumbnail_time = 0.1  # Default value: 10% of video duration
@@ -1325,22 +1327,37 @@ class VideoThumbnailPlayer(
                 if os.path.normcase(self.current_directory) == os.path.normcase(old_path):
                     self.current_directory = new_path
 
-                # 3. Halt pending background operations and clear stale queues
+                # 3. Halt preview; avoid full grid rebuild when virtual grid can patch in place.
                 self.stop_preview()
-                if hasattr(self, "thumb_queue") and not self.thumb_queue.empty():
-                    self.thumb_queue.queue.clear()
-                    self.thumb_queue_running = False
 
-                # 4. Clear the UI completely before queuing new items
-                self.clear_thumbnails()
+                surgical = False
+                if getattr(self, "_vg_active", False):
+                    try:
+                        same_parent = (
+                            os.path.normcase(os.path.dirname(old_path))
+                            == os.path.normcase(os.path.dirname(new_path))
+                        )
+                        if same_parent:
+                            surgical = bool(self._vg_rename_path(old_path, new_path))
+                    except Exception:
+                        logging.exception("[Rename] Surgical VGrid rename failed")
+                        surgical = False
 
-                # 5. Reload grid from DB/disk for current folder only. We intentionally do not
-                #    call scan_subtree(parent) here: that walked the entire parent tree with
-                #    force_refresh and could freeze on huge trees; paths are already updated
-                #    via update_folder_path. force_refresh=False avoids bypassing DB thumbnail cache.
-                self.display_thumbnails(
-                    self.current_directory, force_refresh=False, preserve_scroll=True
-                )
+                if not surgical:
+                    if hasattr(self, "thumb_queue") and not self.thumb_queue.empty():
+                        self.thumb_queue.queue.clear()
+                        self.thumb_queue_running = False
+                    # preserve_scroll captures yview before clear inside display_thumbnails.
+                    self.display_thumbnails(
+                        self.current_directory, force_refresh=False, preserve_scroll=True
+                    )
+                else:
+                    try:
+                        sel = getattr(self, "selected_file_path", None)
+                        if sel and os.path.normcase(sel) == os.path.normcase(new_path):
+                            self.update_panel_info(new_path)
+                    except Exception:
+                        pass
 
             except Exception as e:
                 logging.error("Rename failed: %s -> %s: %s", old_path, new_path, e)
@@ -1374,6 +1391,7 @@ class VideoThumbnailPlayer(
         modal=True,
         checkbox_text=None,
         checkbox_variable=None,
+        parent=None,
     ):
         """
         Create a universal dialog window for confirmation, error, or input.
@@ -1406,15 +1424,16 @@ class VideoThumbnailPlayer(
             except tk.TclError:
                 self._active_universal_dialog = None
 
-        dialog_window = ctk.CTkToplevel(self)
+        dialog_window = ctk.CTkToplevel(parent if parent is not None else self)
         self._active_universal_dialog = dialog_window
         dialog_window.title(title)
         _dw, _dh = (600, 220) if input_field else (440, 200)
         if checkbox_text:
             _dh = max(_dh, 240)
         dialog_window.resizable(False, False)
+        _dialog_parent = parent if parent is not None else self
         try:
-            dialog_window.transient(self)
+            dialog_window.transient(_dialog_parent.winfo_toplevel())
         except Exception:
             pass
 
@@ -1519,6 +1538,19 @@ class VideoThumbnailPlayer(
         try:
             if input_field:
                 self._center_toplevel_window(dialog_window, _dw, _dh)
+            elif parent is not None:
+                dialog_window.update_idletasks()
+                req_h = int(dialog_window.winfo_reqheight())
+                req_w = max(_dw, int(dialog_window.winfo_reqwidth()))
+                max_h = max(280, min(560, int(dialog_window.winfo_screenheight()) - 100))
+                h = max(_dh, min(req_h + 8, max_h))
+                w = req_w
+                try:
+                    px = parent.winfo_rootx() + max(0, (parent.winfo_width() - w) // 2)
+                    py = parent.winfo_rooty() + max(0, (parent.winfo_height() - h) // 2)
+                    dialog_window.geometry(f"{w}x{h}+{px}+{py}")
+                except Exception:
+                    self._center_toplevel_window(dialog_window, w, h)
             else:
                 dialog_window.update_idletasks()
                 req_h = int(dialog_window.winfo_reqheight())
@@ -1681,8 +1713,17 @@ class VideoThumbnailPlayer(
 
         gc.collect()
 
+        iv = getattr(self, "current_image_window", None)
+        if iv and getattr(iv, "image_path", None) and _n(iv.image_path) == target:
+            release = getattr(iv, "release_image_file_handles", None)
+            if callable(release):
+                try:
+                    release(file_path)
+                except Exception as e:
+                    logging.debug("[Delete] image viewer handle release: %s", e)
+
  
-    def confirm_delete_item(self, item_ids=None, paths=None):
+    def confirm_delete_item(self, item_ids=None, paths=None, from_image_viewer=None):
         """
         Confirm and delete files/folders; refresh grid, tree, DB, and folder watcher.
         """
@@ -1719,6 +1760,21 @@ class VideoThumbnailPlayer(
             paths = root_paths
 
         logging.info("[Delete] Paths to delete: %s", paths)
+
+        image_viewer = from_image_viewer
+        viewer_deleted_path = paths[0] if image_viewer is not None and len(paths) == 1 else None
+        dialog_parent = None
+        if image_viewer is not None:
+            get_parent = getattr(image_viewer, "get_delete_dialog_parent", None)
+            if callable(get_parent):
+                try:
+                    dialog_parent = get_parent()
+                except Exception:
+                    dialog_parent = None
+
+        def _clear_viewer_delete_pending():
+            if image_viewer is not None:
+                image_viewer._pending_after_delete = None
 
         def _norm_sel_path(p):
             try:
@@ -2147,10 +2203,22 @@ class VideoThumbnailPlayer(
                     "They were scheduled for removal at the next PC restart:\n\n" + names,
                 )
 
+            if image_viewer is not None and viewer_deleted_path:
+                deleted_norm = _norm_sel_path(viewer_deleted_path)
+                if any(_norm_sel_path(p) == deleted_norm for p in deleted_ok):
+                    apply = getattr(image_viewer, "apply_after_delete", None)
+                    if callable(apply):
+                        try:
+                            apply()
+                        except Exception:
+                            logging.exception("[Delete] apply_after_delete failed")
+
         self.universal_dialog(
             title="Confirm delete",
             message=message,
-            confirm_callback=delete_items
+            confirm_callback=delete_items,
+            cancel_callback=_clear_viewer_delete_pending if image_viewer is not None else None,
+            parent=dialog_parent,
         )
 
 
@@ -4701,7 +4769,7 @@ class VideoThumbnailPlayer(
 
             self.after(0, _apply)
 
-        threading.Thread(target=_extract_in_bg, daemon=True).start()
+        self._submit_panel_info_io(_extract_in_bg)
 
     def on_thumbnail_enter_key(self, event):
         logging.info("[DEBUG] ENTER pressed on thumbnail")
@@ -5049,6 +5117,12 @@ class VideoThumbnailPlayer(
                     self, "_preview_blocked", False
                 ):
                     return
+
+                if self.info_panel and hasattr(self.info_panel, "cancel_pending_preview"):
+                    try:
+                        self.info_panel.cancel_pending_preview()
+                    except Exception:
+                        pass
 
                 # Stale timer after folder change / deleted ComfyUI output
                 try:
@@ -5772,6 +5846,38 @@ class VideoThumbnailPlayer(
         return "break"
 
     
+        threading.Thread(target=_extract_in_bg, daemon=True).start()
+
+    def _ensure_panel_info_io_worker(self) -> None:
+        """Single background worker for panel metadata (avoid Thread.start storm on clicks)."""
+        if getattr(self, "_panel_info_io_worker_started", False):
+            return
+        self._panel_info_io_worker_started = True
+
+        def loop() -> None:
+            while True:
+                job = self._panel_info_io_queue.get()
+                if job is None:
+                    break
+                try:
+                    job()
+                except Exception:
+                    logging.debug("[PanelInfo] IO worker job failed", exc_info=True)
+
+        threading.Thread(target=loop, daemon=True, name="PanelInfoIO").start()
+
+    def _submit_panel_info_io(self, job) -> None:
+        self._ensure_panel_info_io_worker()
+        try:
+            while True:
+                self._panel_info_io_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            self._panel_info_io_queue.put_nowait(job)
+        except queue.Full:
+            pass
+
     def update_panel_info(self, path):
         """Update info panel asynchronously (non-blocking)."""
         if not self.preview_on:
@@ -5850,8 +5956,7 @@ class VideoThumbnailPlayer(
             except Exception as e:
                 logging.info(f"[ERROR] Failed to update panel info for {path}: {e}")
 
-        # Run off main thread so UI stays responsive
-        threading.Thread(target=worker, daemon=True).start()
+        self._submit_panel_info_io(worker)
             
     
     def _on_tree_left_click(self, event):

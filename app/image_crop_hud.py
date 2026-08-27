@@ -55,6 +55,7 @@ _HANDLE_SIZE = 7  # canvas pixels
 _EDGE_HIT = 12  # canvas px — full edge strip (not only handle centers)
 _MIN_CROP_PX = 8
 _CROP_TAG = "crop_overlay"
+_HUD_BOTTOM_MARGIN = 4  # canvas px — keep bottom handles above the toolbar
 _PREVIEW_THROTTLE_MS = 16  # aim for snappy interactive rotate
 _PREVIEW_MAX_SIDE = 1280  # downscale proxy for live rotate (Apply stays full-res)
 _TOOL_CROP = "crop"
@@ -588,7 +589,7 @@ class CropModeController:
         self.aspect_label = "Free"
         self.angle = 0.0
         self.tool_mode = _TOOL_CROP
-        # Default: 80% centered box.
+        # Default: 80% centered box (HUD clamp applied after toolbar is laid out).
         rw, rh = max(_MIN_CROP_PX, int(iw * 0.8)), max(_MIN_CROP_PX, int(ih * 0.8))
         x0 = (iw - rw) // 2
         y0 = (ih - rh) // 2
@@ -618,6 +619,12 @@ class CropModeController:
         self.hud.set_angle(0.0)
         self.hud.set_tool_mode(_TOOL_CROP)
         self.hud.lift()
+        try:
+            v.image_window.update_idletasks()
+        except tk.TclError:
+            pass
+        # Shift default box above the toolbar once geometry is real (don't shrink yet).
+        self.rect = self._clamp_rect(*self.rect)
 
         self.redraw()
         v._refresh_overlays()
@@ -702,29 +709,93 @@ class CropModeController:
         iy = (cy - y0) / bh * ih
         return ix, iy
 
+    def _hud_top_canvas_y(self) -> Optional[float]:
+        """Canvas Y of the crop HUD top edge (toolbar overlays the bottom of the canvas).
+
+        Returns None when the HUD is missing or its geometry is not ready yet
+        (``place()`` before ``update_idletasks`` often reports rooty=0).
+        """
+        hud = self.hud
+        if hud is None:
+            return None
+        try:
+            if not hud.winfo_exists():
+                return None
+            # Unrealized / zero-size frame → ignore (avoids squashing the crop).
+            if int(hud.winfo_height()) < 8:
+                return None
+            canvas = self.v.canvas
+            ch = max(1, int(canvas.winfo_height()))
+            rel_y = hud.winfo_rooty() - canvas.winfo_rooty()
+            # HUD must sit in the lower part of the canvas; anything else is bogus layout.
+            if rel_y < ch * 0.4 or rel_y > ch:
+                return None
+            return float(canvas.canvasy(rel_y))
+        except tk.TclError:
+            return None
+
+    def _hud_margin_img_y(self) -> float:
+        """Small image-space margin so bottom handles stay above the toolbar."""
+        bbox = self._image_canvas_bbox()
+        if not bbox:
+            return 0.0
+        _, y0, _, y1 = bbox
+        bh = y1 - y0
+        ih = self.v.original_image.size[1]
+        if bh <= 0 or ih <= 0:
+            return 0.0
+        margin_canvas = _HANDLE_SIZE / 2.0 + _HUD_BOTTOM_MARGIN
+        return margin_canvas / bh * ih
+
+    def _max_crop_bottom_img(self) -> float:
+        """Maximum allowed crop bottom (y1) in image pixels — above HUD when present."""
+        _, ih = self.v.original_image.size
+        limit = float(ih)
+        cy = self._hud_top_canvas_y()
+        bbox = self._image_canvas_bbox()
+        if cy is None or not bbox:
+            return limit
+        _, y0, _, y1 = bbox
+        bh = y1 - y0
+        if bh <= 0 or ih <= 0:
+            return limit
+        # HUD below the image → no extra limit. HUD above image top → bad geometry.
+        if cy >= y1:
+            return limit
+        if cy <= y0:
+            return limit
+        iy = (cy - y0) / bh * ih
+        candidate = iy - self._hud_margin_img_y()
+        # Never collapse usable crop area from a flaky measurement.
+        if candidate < ih * 0.25:
+            return limit
+        return max(float(_MIN_CROP_PX), min(limit, candidate))
+
     def _clamp_rect(self, x0, y0, x1, y1):
         """Clamp a box into the image, preserving size (may shift — for move/center)."""
         iw, ih = self.v.original_image.size
+        max_y1 = self._max_crop_bottom_img()
         x0, x1 = sorted((x0, x1))
         y0, y1 = sorted((y0, y1))
         # Keep size, shift into bounds when possible.
         w = max(_MIN_CROP_PX, x1 - x0)
         h = max(_MIN_CROP_PX, y1 - y0)
         w = min(w, iw)
-        h = min(h, ih)
+        h = min(h, ih, max_y1)
         x0 = max(0, min(x0, iw - w))
-        y0 = max(0, min(y0, ih - h))
+        y0 = max(0, min(y0, max_y1 - h))
         return (int(round(x0)), int(round(y0)), int(round(x0 + w)), int(round(y0 + h)))
 
     def _clamp_resize(self, x0, y0, x1, y1, mode: str):
         """Clamp a resize so the opposite edge/corner stays pinned when possible."""
         iw, ih = self.v.original_image.size
+        max_y1 = self._max_crop_bottom_img()
         if x1 < x0:
             x0, x1 = x1, x0
         if y1 < y0:
             y0, y1 = y1, y0
         w = max(_MIN_CROP_PX, min(x1 - x0, float(iw)))
-        h = max(_MIN_CROP_PX, min(y1 - y0, float(ih)))
+        h = max(_MIN_CROP_PX, min(y1 - y0, float(ih), max_y1))
 
         pin_left = mode in ("e", "ne", "se")
         pin_right = mode in ("w", "nw", "sw")
@@ -742,13 +813,13 @@ class CropModeController:
             x1 = x0 + w
 
         if pin_top:
-            y0 = max(0.0, min(y0, ih - h))
+            y0 = max(0.0, min(y0, max_y1 - h))
             y1 = y0 + h
         elif pin_bottom:
-            y1 = max(h, min(y1, float(ih)))
+            y1 = max(h, min(y1, max_y1))
             y0 = y1 - h
         else:
-            y0 = max(0.0, min(y0, ih - h))
+            y0 = max(0.0, min(y0, max_y1 - h))
             y1 = y0 + h
 
         return (int(round(x0)), int(round(y0)), int(round(x1)), int(round(y1)))
@@ -771,6 +842,7 @@ class CropModeController:
             return self._clamp_rect(x0, y0, x1, y1)
 
         iw, ih = self.v.original_image.size
+        max_y1 = self._max_crop_bottom_img()
         w = max(_MIN_CROP_PX, abs(x1 - x0))
         h = max(_MIN_CROP_PX, abs(y1 - y0))
         # Fit to ratio using the larger dimension that still fits.
@@ -779,10 +851,10 @@ class CropModeController:
         else:
             h = w / ratio
         w = min(w, iw)
-        h = min(h, ih)
+        h = min(h, ih, max_y1)
         # Re-fit if the other dim overflowed.
-        if w / ratio > ih:
-            h = ih
+        if w / ratio > max_y1:
+            h = max_y1
             w = h * ratio
         if h * ratio > iw:
             w = iw
@@ -1085,7 +1157,7 @@ class CropModeController:
 
         # Fit inside the image while preserving aspect and center when possible.
         max_w = float(iw)
-        max_h = float(ih)
+        max_h = self._max_crop_bottom_img()
         if w > max_w:
             w = max_w
             h = w / ratio
@@ -1150,14 +1222,15 @@ class CropModeController:
         if not self.active or self.rect is None:
             return
         iw, ih = self.v.original_image.size
+        max_y1 = self._max_crop_bottom_img()
         w = max(_MIN_CROP_PX, min(w, iw))
-        h = max(_MIN_CROP_PX, min(h, ih))
+        h = max(_MIN_CROP_PX, min(h, ih, int(max_y1)))
         ratio = self._aspect_ratio()
         if ratio is not None:
             # Prefer width; derive height from aspect, then clamp.
             h = max(_MIN_CROP_PX, int(round(w / ratio)))
-            if h > ih:
-                h = ih
+            if h > max_y1:
+                h = int(max_y1)
                 w = max(_MIN_CROP_PX, int(round(h * ratio)))
             if w > iw:
                 w = iw
