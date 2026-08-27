@@ -16,6 +16,55 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+def kill_process_tree(proc: subprocess.Popen | None, *, label: str = "SeedVR2") -> None:
+    """
+    Force-kill a subprocess and all children (needed on Windows so CUDA/VRAM
+    is released after Cancel — terminate() alone often leaves a hidden runner).
+    """
+    if proc is None:
+        return
+    pid = getattr(proc, "pid", None)
+    try:
+        if proc.poll() is not None:
+            return
+    except Exception:
+        pass
+
+    if os.name == "nt" and pid:
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                creationflags=creationflags,
+            )
+            logging.info("[%s] taskkill /T pid=%s", label, pid)
+        except Exception as exc:
+            logging.warning("[%s] taskkill failed: %s", label, exc)
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    else:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=3)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        pass
+
+
 class SeedVR2WorkerHost:
     """Singleton-style host for the persistent SeedVR2 worker process."""
 
@@ -216,13 +265,15 @@ class SeedVR2WorkerHost:
 
             while True:
                 if should_stop and should_stop():
+                    logging.info("[SeedVR2] Cancel requested — killing persistent worker (VRAM).")
                     self._shutdown_unlocked()
                     return {
                         "ok": False,
                         "error": "aborted",
                         "message": "Upscale aborted.",
                     }
-                evt = self._read_event(timeout_s=3600.0)
+                # Short reads so Cancel is noticed while the model is computing.
+                evt = self._read_event(timeout_s=0.75 if should_stop else 3600.0)
                 if not evt:
                     self._shutdown_unlocked()
                     return {
@@ -231,6 +282,16 @@ class SeedVR2WorkerHost:
                         "message": "Worker stopped responding.",
                     }
                 kind = evt.get("event")
+                if kind == "timeout":
+                    # Soft timeout while polling Cancel — keep waiting for progress/result.
+                    if not self.alive:
+                        self._shutdown_unlocked()
+                        return {
+                            "ok": False,
+                            "error": "worker_dead",
+                            "message": "Worker stopped responding.",
+                        }
+                    continue
                 if kind == "progress":
                     if progress_cb:
                         phase = evt.get("phase") or "upscale"
@@ -272,7 +333,7 @@ class SeedVR2WorkerHost:
                         "error": evt.get("error") or "runner_failed",
                         "message": evt.get("message") or "Upscale failed",
                     }
-                if kind in ("eof", "timeout", "fatal", "error"):
+                if kind in ("eof", "fatal", "error"):
                     noise = "\n".join(self._recent_noise[-15:])
                     self._shutdown_unlocked()
                     msg = evt.get("message") or "Worker error"
@@ -328,20 +389,11 @@ class SeedVR2WorkerHost:
             if proc.poll() is None and proc.stdin:
                 proc.stdin.write(json.dumps({"cmd": "shutdown"}) + "\n")
                 proc.stdin.flush()
-                proc.wait(timeout=8)
+                proc.wait(timeout=3)
         except Exception:
             pass
-        try:
-            if proc.poll() is None:
-                proc.terminate()
-                proc.wait(timeout=5)
-        except Exception:
-            pass
-        try:
-            if proc.poll() is None:
-                proc.kill()
-        except Exception:
-            pass
+        # Always force-kill the tree — polite shutdown often leaves CUDA VRAM allocated.
+        kill_process_tree(proc, label="SeedVR2")
         logging.info("[SeedVR2] Persistent worker stopped (VRAM released).")
 
 

@@ -9,6 +9,7 @@ import time
 from tkinter import messagebox
 
 from gui_elements import get_conflict_rename_path, open_conflict_dialog, open_file_op_progress_dialog
+from rife_dialog import RifeOptionsDialog
 from upscale_dialog import UpscaleOptionsDialog
 from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS
 
@@ -44,6 +45,8 @@ class VtpUpscaleMixin:
             title = "SeedVR 2 weights"
         elif error_code == "runner_missing":
             title = "SeedVR 2 runner"
+        elif error_code in ("rife_pack_missing", "rife_model_missing"):
+            title = "RIFE pack"
         self.after(0, lambda: messagebox.showwarning(title, text))
 
     def selected_paths_for_upscale(self, clicked_path: str | None = None) -> list[str]:
@@ -88,10 +91,14 @@ class VtpUpscaleMixin:
             return
 
         backends = self.list_available_upscale_backends()
+        # RIFE is frame interpolation — it has its own dialog ("RIFE Interpolate…").
+        # The Upscale dialog is SeedVR/DAT-oriented and must not list RIFE.
+        backends = [b for b in backends if getattr(b, "id", "") != "rife"]
         if not backends:
             messagebox.showerror(
                 "Upscale",
-                "No upscale plugins loaded. Check app.log for plugin import errors.",
+                "No upscale plugins loaded. Check app.log for plugin import errors.\n\n"
+                "For frame interpolation use right-click → RIFE Interpolate…",
             )
             return
 
@@ -125,6 +132,164 @@ class VtpUpscaleMixin:
             on_confirm=self.start_upscale_batch,
             controller=self,
         )
+
+    def open_rife_dialog(self, clicked_path: str | None = None):
+        """Open RIFE interpolate options for selected videos."""
+        paths = self.selected_paths_for_upscale(clicked_path)
+        videos = [
+            p
+            for p in paths
+            if os.path.splitext(p)[1].lower() in VIDEO_FORMATS
+        ]
+        if not videos:
+            messagebox.showinfo("RIFE", "No videos selected.")
+            return
+        RifeOptionsDialog(
+            self,
+            paths=videos,
+            on_confirm=self.start_rife_batch,
+            controller=self,
+        )
+
+    def start_rife_batch(self, paths: list[str], options: dict):
+        """Run RIFE interpolation on a background thread."""
+        if getattr(self, "_rife_batch_running", False):
+            messagebox.showinfo("RIFE", "A RIFE job is already running.")
+            return
+        paths = [p for p in (paths or []) if p and os.path.isfile(p)]
+        if not paths:
+            messagebox.showinfo("RIFE", "No valid videos to interpolate.")
+            return
+
+        pm = getattr(self, "plugin_manager", None)
+        plugin = pm.get_upscale_plugin("rife") if pm else None
+        if not plugin:
+            messagebox.showerror("RIFE", "RIFE plugin not loaded. Check app.log.")
+            return
+
+        status = plugin.runtime_status() if hasattr(plugin, "runtime_status") else {}
+        if not status.get("ready"):
+            self._notify_upscale_issue_once(
+                status.get("error") or "rife_pack_missing",
+                status.get("message") or "RIFE optional pack is not installed.",
+            )
+            return
+
+        out_dir = (options or {}).get("output_dir") or os.path.dirname(paths[0])
+        total = len(paths)
+        progress = open_file_op_progress_dialog(
+            self,
+            title="RIFE Interpolate",
+            total=total,
+            action_label="Interpolating",
+            topmost=False,
+            show_preview=False,
+        )
+        self._rife_progress_dialog = progress
+        self._rife_batch_running = True
+        self.stop_requested = False
+        try:
+            self.status_bar.set_stop_callback(lambda: setattr(self, "stop_requested", True))
+        except Exception:
+            pass
+
+        def _should_stop() -> bool:
+            if getattr(self, "stop_requested", False):
+                return True
+            dlg = getattr(self, "_rife_progress_dialog", None)
+            try:
+                if dlg is not None and getattr(dlg, "cancelled", False):
+                    self.stop_requested = True
+                    return True
+            except Exception:
+                pass
+            return False
+
+        def worker():
+            self.after(0, self.status_bar.enable_stop)
+            self.after(
+                0,
+                lambda: self.status_bar.set_action_message("RIFE interpolating…"),
+            )
+            done = 0
+            failed = 0
+            last_out = None
+            try:
+                for idx, file_path in enumerate(paths, start=1):
+                    if _should_stop():
+                        break
+                    base = os.path.basename(file_path)
+                    self._upscale_progress_update(
+                        progress, idx - 1, total, detail=base, phase="upscale"
+                    )
+
+                    def _cb(pct, msg, _base=base, _idx=idx):
+                        self._upscale_progress_update(
+                            progress,
+                            _idx - 1,
+                            total,
+                            detail=f"{_base} — {msg} ({pct:.0f}%)",
+                            phase="upscale",
+                        )
+
+                    root, ext = os.path.splitext(base)
+                    mult = int((options or {}).get("multiplier") or 2)
+                    mode = (options or {}).get("mode") or "fps"
+                    tag = f"_rife{mult}x" if mode == "fps" else f"_rife_slowmo{mult}x"
+                    out_path = os.path.join(out_dir, f"{root}{tag}{ext or '.mp4'}")
+                    file_opts = {
+                        **(options or {}),
+                        "output_path": out_path,
+                    }
+                    t0 = time.perf_counter()
+                    result = plugin.process(
+                        file_path,
+                        options=file_opts,
+                        progress_cb=_cb,
+                        should_stop=_should_stop,
+                    )
+                    elapsed = time.perf_counter() - t0
+                    if result.get("ok"):
+                        done += 1
+                        last_out = result.get("output_path") or out_path
+                        logging.info(
+                            "[RIFE] OK %s → %s (%.1fs)",
+                            file_path,
+                            last_out,
+                            elapsed,
+                        )
+                    else:
+                        failed += 1
+                        err = result.get("error")
+                        msg = result.get("message") or "RIFE failed."
+                        if err == "aborted":
+                            break
+                        self._notify_upscale_issue_once(err, msg)
+                    self._upscale_progress_update(
+                        progress, idx, total, detail=base, phase="upscale"
+                    )
+            finally:
+                self._rife_batch_running = False
+                try:
+                    self.after(0, self.status_bar.disable_stop)
+                except Exception:
+                    pass
+                summary = f"RIFE done: {done} ok"
+                if failed:
+                    summary += f", {failed} failed"
+                if last_out:
+                    summary += f"\nLast: {last_out}"
+                self.after(0, lambda s=summary: self.status_bar.set_action_message(s))
+                self.after(
+                    0,
+                    lambda s=summary: messagebox.showinfo("RIFE", s),
+                )
+                try:
+                    self.after(0, progress.destroy)
+                except Exception:
+                    pass
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _upscale_progress_update(
         self,
@@ -239,6 +404,14 @@ class VtpUpscaleMixin:
             return
 
         backend_id = job.get("backend_id") or "seedvr2"
+        if backend_id == "rife":
+            # SeedVR Upscale UI must not drive RIFE; keep a safe redirect.
+            messagebox.showinfo(
+                "RIFE",
+                "RIFE frame interpolation has its own dialog.\n\n"
+                "Use right-click → RIFE Interpolate… (or Export → RIFE checkbox).",
+            )
+            return
         paths = [p for p in (job.get("paths") or []) if p and os.path.isfile(p)]
         options = dict(job.get("options") or {})
         if not paths:
@@ -286,8 +459,20 @@ class VtpUpscaleMixin:
         self._upscale_preview_path = preview_path
         self._upscale_batch_running = True
         self.stop_requested = False
+
+        def _request_upscale_stop():
+            setattr(self, "stop_requested", True)
+            # Kill SeedVR runner immediately so Cancel frees VRAM without waiting
+            # for the next progress line.
+            try:
+                from seedvr2_worker_host import shutdown_seedvr2_worker_host
+
+                shutdown_seedvr2_worker_host()
+            except Exception:
+                logging.debug("[Upscale] Immediate SeedVR shutdown on Stop failed", exc_info=True)
+
         try:
-            self.status_bar.set_stop_callback(lambda: setattr(self, "stop_requested", True))
+            self.status_bar.set_stop_callback(_request_upscale_stop)
         except Exception:
             pass
 
@@ -333,10 +518,26 @@ class VtpUpscaleMixin:
 
                 base = os.path.basename(file_path)
                 file_opts = dict(options)
+                ext = os.path.splitext(file_path)[1].lower()
+                want_rife = bool(file_opts.get("rife_enabled")) and ext in VIDEO_FORMATS
+                rife_mult = int(file_opts.get("rife_multiplier") or 2)
+                rife_mode = str(file_opts.get("rife_mode") or "fps")
+                seedvr_suffix = str(file_opts.get("suffix") or "_seedvr2")
 
                 # Resolve destination + conflict before starting heavy work.
                 try:
-                    suggested = plugin.suggested_output_path(file_path, file_opts)
+                    if want_rife:
+                        from rife_pipeline import seedvr_rife_final_path
+
+                        suggested = seedvr_rife_final_path(
+                            file_path,
+                            output_dir=file_opts.get("output_dir"),
+                            seedvr_suffix=seedvr_suffix,
+                            multiplier=rife_mult,
+                            mode=rife_mode,
+                        )
+                    else:
+                        suggested = plugin.suggested_output_path(file_path, file_opts)
                     resolved = self._resolve_upscale_output_conflict(
                         suggested, progress, conflict_policy
                     )
@@ -359,7 +560,15 @@ class VtpUpscaleMixin:
                     )
                     continue
 
-                file_opts["output_path"] = resolved
+                # SeedVR writes to a temp file when RIFE will produce the final.
+                chain_tmpdir = None
+                seedvr_out = resolved
+                if want_rife:
+                    import tempfile as _tempfile
+
+                    chain_tmpdir = _tempfile.mkdtemp(prefix="vibe_seedvr_rife_")
+                    seedvr_out = os.path.join(chain_tmpdir, "seedvr_tmp.mp4")
+                file_opts["output_path"] = seedvr_out
                 preview_path = getattr(self, "_upscale_preview_path", None)
                 if preview_path and progress is not None:
                     try:
@@ -394,12 +603,13 @@ class VtpUpscaleMixin:
                     f"{base}\nPreparing…",
                     phase="load",
                 )
+                pipe_label = "SeedVR 2 + RIFE" if want_rife else "SeedVR 2"
                 self.after(
                     0,
-                    lambda i=idx, t=total, p=base: self.status_bar.set_action_message(
-                        f"[SeedVR 2 Batch] Processing {i}/{t}: {p}"
+                    lambda i=idx, t=total, p=base, lab=pipe_label: self.status_bar.set_action_message(
+                        f"[{lab} Batch] Processing {i}/{t}: {p}"
                         if t > 1
-                        else f"[SeedVR 2] Processing: {p}"
+                        else f"[{lab}] Processing: {p}"
                     ),
                 )
 
@@ -440,11 +650,19 @@ class VtpUpscaleMixin:
                     self._upscale_progress_update(
                         progress, idx, total, f"{base}\nError: {exc}"
                     )
+                    if chain_tmpdir:
+                        import shutil as _shutil
+
+                        _shutil.rmtree(chain_tmpdir, ignore_errors=True)
                     continue
                 elapsed = time.perf_counter() - t0
 
                 if not result:
                     failed += 1
+                    if chain_tmpdir:
+                        import shutil as _shutil
+
+                        _shutil.rmtree(chain_tmpdir, ignore_errors=True)
                     continue
 
                 error = result.get("error")
@@ -457,6 +675,9 @@ class VtpUpscaleMixin:
                     "runner_missing",
                     "not_implemented",
                     "oom",
+                    "rife_pack_missing",
+                    "rife_model_missing",
+                    "ffmpeg_missing",
                 )
                 if error in blocking:
                     self._notify_upscale_issue_once(error, result.get("message") or error)
@@ -467,12 +688,88 @@ class VtpUpscaleMixin:
                         total,
                         result.get("message") or error or "Blocked",
                     )
+                    if chain_tmpdir:
+                        import shutil as _shutil
+
+                        _shutil.rmtree(chain_tmpdir, ignore_errors=True)
                     break
 
                 if error == "aborted" or _should_stop():
                     aborted = True
                     failed += 1
+                    if chain_tmpdir:
+                        import shutil as _shutil
+
+                        _shutil.rmtree(chain_tmpdir, ignore_errors=True)
                     break
+
+                if result.get("ok") and result.get("output_path") and want_rife:
+                    # SeedVR → FFV1 → RIFE → final encode (resolved path).
+                    try:
+                        from rife_pipeline import interpolate_video, remux_near_lossless
+
+                        seedvr_path = result["output_path"]
+                        ffv1_path = os.path.join(chain_tmpdir, "seedvr_ffv1.mkv")
+
+                        def _rife_progress(pct: float, msg: str, i=idx, t=total, name=base):
+                            detail = f"{name}\nRIFE: {msg}"
+                            self._upscale_progress_update(
+                                progress, i - 1, t, detail, phase="upscale"
+                            )
+                            self.after(
+                                0,
+                                lambda m=msg: self.status_bar.set_action_message(
+                                    f"RIFE: {m}"[:120]
+                                ),
+                            )
+
+                        progress_cb(0.92, "Near-lossless intermediate (FFV1)…", phase="upscale")
+                        mid = remux_near_lossless(
+                            seedvr_path,
+                            ffv1_path,
+                            progress_cb=lambda _f, m: _rife_progress(0, m),
+                            should_stop=_should_stop,
+                        )
+                        if not mid.get("ok"):
+                            result = mid
+                        else:
+                            progress_cb(0.94, "RIFE interpolating…", phase="upscale")
+                            rife_res = interpolate_video(
+                                mid["output_path"],
+                                resolved,
+                                multiplier=rife_mult,
+                                mode=rife_mode,
+                                include_audio=True,
+                                encode_settings={
+                                    "ext": os.path.splitext(resolved)[1] or ".mp4",
+                                    "video_quality": "High",
+                                    "audio_bitrate": "192k",
+                                    "keep_size": True,
+                                },
+                                progress_cb=lambda pct, msg: _rife_progress(pct, msg),
+                                should_stop=_should_stop,
+                            )
+                            result = rife_res
+                            if rife_res.get("ok"):
+                                result["output_path"] = resolved
+                    except Exception as exc:
+                        logging.exception("[Upscale+RIFE] Chain failed on %s", file_path)
+                        result = {
+                            "ok": False,
+                            "output_path": None,
+                            "error": "runtime_error",
+                            "message": str(exc),
+                        }
+                    finally:
+                        if chain_tmpdir:
+                            import shutil as _shutil
+
+                            _shutil.rmtree(chain_tmpdir, ignore_errors=True)
+                    elapsed = time.perf_counter() - t0
+                elif chain_tmpdir:
+                    import shutil as _shutil
+
+                    _shutil.rmtree(chain_tmpdir, ignore_errors=True)
 
                 if result.get("ok") and result.get("output_path"):
                     done += 1
@@ -511,12 +808,12 @@ class VtpUpscaleMixin:
                     msg = result.get("message")
                     if msg:
                         logging.warning("[Upscale] %s: %s", file_path, msg)
-                        self._notify_upscale_issue_once(error or "failed", msg)
+                        self._notify_upscale_issue_once(error or result.get("error") or "failed", msg)
                     self._upscale_progress_update(
                         progress,
                         idx,
                         total,
-                        f"{base}\nFailed: {(msg or error or 'error')[:160]}",
+                        f"{base}\nFailed: {msg or error or 'unknown'}",
                     )
 
             batch_elapsed = time.perf_counter() - batch_t0
@@ -576,5 +873,16 @@ class VtpUpscaleMixin:
             self.after(12000, self.status_bar.clear_action_message)
             self.after(0, lambda: self.status_bar.set_progress(0))
             self.after(0, self.status_bar.disable_stop)
+            # Always drop SeedVR VRAM after cancel; also after success unless Keep VRAM.
+            try:
+                keep = bool(options.get("keep_vram"))
+                if aborted or not keep:
+                    from seedvr2_worker_host import shutdown_seedvr2_worker_host
+
+                    shutdown_seedvr2_worker_host()
+                    if aborted:
+                        logging.info("[Upscale] SeedVR worker shut down after cancel (VRAM).")
+            except Exception:
+                logging.debug("[Upscale] SeedVR shutdown after batch failed", exc_info=True)
 
         threading.Thread(target=worker, daemon=True).start()

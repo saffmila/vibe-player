@@ -582,6 +582,59 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         self._layout_save_as_row()
 
         _path_row(basic, 4, "Output folder", self.output_dir_var, self._browse_output)
+
+        # Optional SeedVR → FFV1 → RIFE → one final encode (videos only).
+        self.rife_enabled_var = ctk.BooleanVar(value=False)
+        self.rife_mult_var = ctk.StringVar(value="2×")
+        self.rife_mode_var = ctk.StringVar(value="Higher FPS (keep duration)")
+        self._rife_wrap = ctk.CTkFrame(basic, fg_color="transparent")
+        if self._has_video:
+            self._rife_wrap.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 2))
+            self._rife_check = ctk.CTkCheckBox(
+                self._rife_wrap,
+                text="Also RIFE interpolate after Upscale",
+                variable=self.rife_enabled_var,
+                font=ctk.CTkFont(size=_UI_LABEL),
+                command=self._refresh_rife_controls,
+            )
+            self._rife_check.pack(anchor="w")
+            rife_row = ctk.CTkFrame(self._rife_wrap, fg_color="transparent")
+            rife_row.pack(fill="x", pady=(4, 0))
+            ctk.CTkLabel(
+                rife_row, text="RIFE", font=ctk.CTkFont(size=_UI_LABEL), width=48
+            ).pack(side="left")
+            self._rife_mult_menu = ctk.CTkOptionMenu(
+                rife_row,
+                variable=self.rife_mult_var,
+                values=["2×", "4×"],
+                width=72,
+                height=_UI_CTRL_H,
+                font=ctk.CTkFont(size=_UI_LABEL),
+            )
+            self._rife_mult_menu.pack(side="left", padx=(4, 6))
+            self._rife_mode_menu = ctk.CTkOptionMenu(
+                rife_row,
+                variable=self.rife_mode_var,
+                values=["Higher FPS (keep duration)", "Slow motion (keep FPS)"],
+                width=220,
+                height=_UI_CTRL_H,
+                font=ctk.CTkFont(size=_UI_LABEL),
+            )
+            self._rife_mode_menu.pack(side="left", fill="x", expand=True)
+            ctk.CTkLabel(
+                self._rife_wrap,
+                text=(
+                    "Pipeline: SeedVR → near-lossless FFV1 → RIFE → one final encode. "
+                    "Needs optional RIFE pack (tools/rife)."
+                ),
+                text_color="#777777",
+                font=ctk.CTkFont(size=_UI_SUB),
+                wraplength=420,
+                justify="left",
+                anchor="w",
+            ).pack(fill="x", pady=(4, 0))
+            self._refresh_rife_controls()
+
         self._on_prescale_mode_changed()
 
         # Advanced cards share the same scroll as Output (packed when Advanced opens).
@@ -1460,6 +1513,36 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         if chosen:
             self.output_dir_var.set(chosen)
 
+    def _refresh_rife_controls(self):
+        if not getattr(self, "_has_video", False):
+            return
+        on = bool(self.rife_enabled_var.get())
+        state = "normal" if on else "disabled"
+        for w in (
+            getattr(self, "_rife_mult_menu", None),
+            getattr(self, "_rife_mode_menu", None),
+        ):
+            if w is not None:
+                try:
+                    w.configure(state=state)
+                except Exception:
+                    pass
+
+    def _rife_options_from_ui(self) -> dict:
+        if not getattr(self, "_has_video", False) or not bool(
+            getattr(self, "rife_enabled_var", ctk.BooleanVar(value=False)).get()
+        ):
+            return {"rife_enabled": False}
+        mult_raw = (self.rife_mult_var.get() or "2×").strip()
+        mult = 4 if mult_raw.startswith("4") else 2
+        mode_label = self.rife_mode_var.get() or ""
+        mode = "slowmo" if "slow" in mode_label.lower() else "fps"
+        return {
+            "rife_enabled": True,
+            "rife_multiplier": mult,
+            "rife_mode": mode,
+        }
+
     def _browse_weights(self):
         initial = self.weights_dir_var.get() or default_weights_dir()
         chosen = filedialog.askdirectory(
@@ -1768,6 +1851,20 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             )
             return
 
+        rife_opts = self._rife_options_from_ui()
+        if rife_opts.get("rife_enabled"):
+            from rife_config import runtime_status as rife_runtime_status
+
+            rife_st = rife_runtime_status()
+            if not rife_st.get("ready"):
+                messagebox.showwarning(
+                    "RIFE pack missing",
+                    rife_st.get("message")
+                    or "Install the optional RIFE pack (tools/rife) to use Also RIFE.",
+                    parent=self,
+                )
+                return
+
         try:
             scale = int(self.scale_var.get())
         except ValueError:
@@ -1803,6 +1900,7 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             "prescale_long_edge": long_edge,
             "vae_encode_tile_size": self._selected_encode_tile(),
             "vae_decode_tile_size": self._selected_decode_tile(),
+            **rife_opts,
         }
         if self._has_video:
             batch_size = self._selected_batch_size()

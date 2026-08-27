@@ -1,13 +1,14 @@
-"""Split a full PyInstaller onedir release into base + optional GPU autotag pack.
+"""Split a full PyInstaller onedir release into base + optional packs.
 
 Build strategy:
 - Build once (full app with all dependencies) into dist/VibePlayer
 - Split files into:
   1) VibePlayer-base.zip (all non-heavy files)
   2) VibePlayer-autotag-gpu-pack.zip.001/.002/... (7-Zip multi-volume archive)
+  3) VibePlayer-rife-pack.zip (optional tools/rife — only if present in dist)
 
 All archived files are stored under a common VibePlayer/ root directory inside ZIPs
-so base + GPU packs can be extracted into the same target folder safely.
+so base + optional packs can be extracted into the same target folder safely.
 """
 
 from __future__ import annotations
@@ -70,6 +71,12 @@ def is_heavy(rel_posix: str) -> bool:
         return True
     filename = Path(lower).name
     return any(part in filename for part in HEAVY_NAME_PARTS)
+
+
+def is_rife_pack(rel_posix: str) -> bool:
+    """Optional rife-ncnn-vulkan tools — never ship in the base ZIP."""
+    lower = rel_posix.lower().replace("\\", "/")
+    return lower.startswith("tools/rife/") or "/tools/rife/" in f"/{lower}"
 
 
 def iter_files(root: Path) -> list[Path]:
@@ -186,18 +193,31 @@ def main() -> int:
 
     base_files: list[Path] = []
     gpu_pack_files: list[Path] = []
+    rife_pack_files: list[Path] = []
 
     for file_path in all_files:
         rel_posix = file_path.relative_to(dist_root).as_posix()
         if is_junk(rel_posix):
             continue
-        if is_heavy(rel_posix):
+        if is_rife_pack(rel_posix):
+            rife_pack_files.append(file_path)
+        elif is_heavy(rel_posix):
             gpu_pack_files.append(file_path)
         else:
             base_files.append(file_path)
 
     base_zip = out_dir / "VibePlayer-base.zip"
     base_uncompressed = zip_files(dist_root, base_files, base_zip)
+
+    rife_zip = out_dir / "VibePlayer-rife-pack.zip"
+    rife_uncompressed = 0
+    if rife_pack_files:
+        if rife_zip.exists():
+            rife_zip.unlink()
+        rife_uncompressed = zip_files(dist_root, rife_pack_files, rife_zip)
+    elif rife_zip.exists():
+        rife_zip.unlink()
+
     staging_root = out_dir / "_gpu_pack_staging"
     gpu_uncompressed = stage_gpu_pack_files(dist_root, gpu_pack_files, staging_root)
     gpu_part_paths: list[Path] = []
@@ -222,8 +242,14 @@ def main() -> int:
     print(f"[split] Total files scanned: {len(all_files)}")
     print(f"[split] Base files: {len(base_files)}")
     print(f"[split] GPU pack files: {len(gpu_pack_files)}")
+    print(f"[split] RIFE pack files: {len(rife_pack_files)}")
     print(f"[split] ZIP root prefix: {ZIP_ROOT_PREFIX}")
     print(f"[split] Base ZIP: {base_zip}")
+    if rife_pack_files:
+        print(f"[split] RIFE ZIP: {rife_zip}")
+        print(f"[split] RIFE uncompressed size: {rife_uncompressed / (1024 * 1024):.2f} MB")
+    else:
+        print("[split] RIFE pack skipped (tools/rife not in dist — optional).")
     if gpu_part_paths:
         print("[split] GPU 7-Zip multi-volume parts:")
         for path in gpu_part_paths:

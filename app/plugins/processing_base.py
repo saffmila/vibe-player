@@ -59,6 +59,19 @@ class UpscaleBackend:
         """Default process options (scale, output naming, etc.)."""
         return {"scale": 2, "suffix": f"_{self.id}"}
 
+    def suggested_output_path(self, input_path: str, options: dict[str, Any] | None = None) -> str:
+        """Default destination path for conflict checks / batch jobs."""
+        import os
+
+        opts = {**(self.default_options() or {}), **(options or {})}
+        explicit = opts.get("output_path")
+        if isinstance(explicit, str) and explicit.strip():
+            return os.path.abspath(explicit.strip())
+        suffix = str(opts.get("suffix") or f"_{self.id}")
+        out_dir = opts.get("output_dir") or os.path.dirname(input_path)
+        stem, ext = os.path.splitext(os.path.basename(input_path))
+        return os.path.join(out_dir, f"{stem}{suffix}{ext}")
+
     def process(
         self,
         input_path: str,

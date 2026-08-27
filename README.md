@@ -45,6 +45,18 @@ Notes:
 * FFmpeg is installed with the app (`install.bat` / Pinokio) and preferred for video I/O.
 * Lower VRAM cards: keep the FP8 3B model, enable **Low VRAM (tiled VAE)**, prefer Scale 2×.
 
+### RIFE frame interpolation (optional pack)
+
+Offline 2× / 4× frame interpolation via [rife-ncnn-vulkan](https://github.com/nihui/rife-ncnn-vulkan) (Vulkan — Nvidia / AMD / Intel). **Not included in the base install.**
+
+1. Download **`VibePlayer-rife-pack.zip`** from Releases and extract it over your `VibePlayer/` folder  
+   (so `tools/rife/rife-ncnn-vulkan.exe` exists), **or** in a dev checkout run:
+   `python scripts/fetch_rife_ncnn.py`
+2. Timeline → **Export Video** → Custom → enable **Interpolate frames**, pick 2×/4× and Higher FPS or Slow motion.
+3. Or right-click a video → **RIFE Interpolate…**.
+
+Build helpers: `scripts/pack_rife_optional.py` (ZIP for releases); `scripts/split_release.py` keeps `tools/rife` out of the base ZIP when present in the dist tree.
+
 ###  Security & Privacy Audit
 We value your privacy. This project includes a dedicated audit tool, `check_build.py`, to ensure that every public release is:
 * **Clean**: No local development logs, private configurations, or personal database artifacts (`.db`, `.wal`, `.shm`) are ever included.

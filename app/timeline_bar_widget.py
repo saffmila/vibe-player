@@ -220,6 +220,7 @@ class VideoExportDialog(ctk.CTkToplevel):
             source_height=self._source_height,
             source_fps=self._source_fps,
             scroll_height=EXPORT_CUSTOM_SCROLL_HEIGHT,
+            enable_rife=True,
         )
         self._encode_panel.pack(fill="both", expand=True)
 
@@ -488,6 +489,18 @@ class VideoExportDialog(ctk.CTkToplevel):
                 settings = {"mode": "original", "ext": out_ext, **scope}
             else:
                 settings = {**self._encode_panel.get_custom_settings(), **scope}
+                if settings.get("rife_enabled"):
+                    from rife_config import runtime_status
+
+                    st = runtime_status()
+                    if not st.get("ready"):
+                        messagebox.showwarning(
+                            "RIFE pack missing",
+                            st.get("message")
+                            or "Install the optional RIFE pack (tools/rife) first.",
+                            parent=self,
+                        )
+                        return
 
             # Keep the dialog open after kicking off the export so the user can
             # tweak settings and re-export without re-opening the menu.
@@ -1994,7 +2007,75 @@ class TimelineBarWidget(ctk.CTkFrame):
                 else:
                     raise ValueError(f"Unknown export mode: {export_mode}")
             else:
-                if export_mode == "active":
+                if settings.get("rife_enabled"):
+                    if export_mode == "active":
+                        self._convert_worker_rife(
+                            input_path,
+                            save_path,
+                            settings,
+                            video_name,
+                            set_status,
+                            start=settings.get("start_time"),
+                            end=settings.get("end_time"),
+                        )
+                        self.after(0, lambda p=save_path: messagebox.showinfo("Done", f"Video saved to:\n{p}"))
+                    elif export_mode == "all_separate":
+                        paths = save_path if isinstance(save_path, list) else []
+                        for i, (seg, out_path) in enumerate(zip(segments, paths), start=1):
+                            set_status(f"RIFE export {i}/{len(segments)}…")
+                            self._convert_worker_rife(
+                                input_path,
+                                out_path,
+                                settings,
+                                video_name,
+                                set_status,
+                                start=float(seg["start"]),
+                                end=float(seg["end"]),
+                            )
+                        self.after(
+                            0,
+                            lambda d=os.path.dirname(paths[0]) if paths else "": messagebox.showinfo(
+                                "Done",
+                                f"All cuts exported with RIFE.\nFolder:\n{d}",
+                            ),
+                        )
+                    elif export_mode == "all_merged":
+                        # Merge first (no RIFE), then interpolate the merged file once.
+                        tmp_fd, tmp_path = tempfile.mkstemp(
+                            prefix="vibe_rife_merge_",
+                            suffix=settings.get("ext") or ".mp4",
+                        )
+                        os.close(tmp_fd)
+                        try:
+                            merge_settings = dict(settings)
+                            merge_settings.pop("rife_enabled", None)
+                            self._convert_worker_custom_segments(
+                                input_path,
+                                tmp_path,
+                                merge_settings,
+                                video_name,
+                                set_status,
+                                segments,
+                            )
+                            set_status("RIFE interpolating merged cuts…")
+                            self._convert_worker_rife(
+                                tmp_path,
+                                save_path,
+                                settings,
+                                video_name,
+                                set_status,
+                                start=None,
+                                end=None,
+                            )
+                        finally:
+                            try:
+                                os.remove(tmp_path)
+                            except OSError:
+                                pass
+                        self.after(0, lambda p=save_path: messagebox.showinfo("Done", f"Video saved to:\n{p}"))
+                    else:
+                        raise ValueError(f"Unknown export mode: {export_mode}")
+                elif export_mode == "active":
                     self._convert_worker_custom_segments(
                         input_path,
                         save_path,
@@ -2045,17 +2126,74 @@ class TimelineBarWidget(ctk.CTkFrame):
             set_status(f"Export failed: {e}")
             self.after(0, lambda err=str(e): messagebox.showerror("Export Error", err))
 
+    def _convert_worker_rife(
+        self,
+        input_path,
+        save_path,
+        settings,
+        video_name,
+        set_status,
+        *,
+        start=None,
+        end=None,
+    ):
+        """Offline RIFE interpolate for one clip/segment (optional pack)."""
+        from rife_config import runtime_status
+        from rife_pipeline import interpolate_video
+
+        status = runtime_status()
+        if not status.get("ready"):
+            raise RuntimeError(status.get("message") or "RIFE optional pack is not installed.")
+
+        def _progress(_pct, msg):
+            set_status(f"RIFE: {msg}")
+
+        encode_settings = {
+            "ext": settings.get("ext") or os.path.splitext(save_path)[1] or ".mp4",
+            "video_quality": settings.get("video_quality") or "High",
+            "audio_bitrate": settings.get("audio_bitrate") or "192k",
+            "keep_size": bool(settings.get("keep_size", True)),
+            "width": settings.get("width"),
+            "height": settings.get("height"),
+            "fps": settings.get("fps"),
+            "rotate_op": settings.get("rotate_op"),
+            "flip_h": settings.get("flip_h"),
+            "flip_v": settings.get("flip_v"),
+        }
+        result = interpolate_video(
+            input_path,
+            save_path,
+            multiplier=int(settings.get("rife_multiplier") or 2),
+            mode=str(settings.get("rife_mode") or "fps"),
+            start=float(start) if start is not None else None,
+            end=float(end) if end is not None else None,
+            include_audio=bool(settings.get("include_audio", True)),
+            encode_settings=encode_settings,
+            progress_cb=_progress,
+        )
+        if not result.get("ok"):
+            raise RuntimeError(result.get("message") or "RIFE export failed.")
+        logging.info(
+            "[Export][RIFE] %s → %s (fps %.3f → %.3f)",
+            video_name,
+            save_path,
+            float(result.get("src_fps") or 0),
+            float(result.get("out_fps") or 0),
+        )
+
     def _convert_worker_custom_segments(self, input_path, save_path, settings, video_name, set_status, segments):
         try:
             ffmpeg_bin = get_ffmpeg_path()
         except FileNotFoundError as fnf:
             raise RuntimeError(str(fnf)) from fnf
 
-        width = int(settings["width"])
-        height = int(settings["height"])
-        fps = float(settings["fps"])
-        if width <= 0 or height <= 0 or fps <= 0:
-            raise RuntimeError("Width, height, and FPS must be positive values.")
+        # keep_size presets omit width/height/fps — only validate when present.
+        if not settings.get("keep_size"):
+            width = int(settings["width"])
+            height = int(settings["height"])
+            fps = float(settings["fps"])
+            if width <= 0 or height <= 0 or fps <= 0:
+                raise RuntimeError("Width, height, and FPS must be positive values.")
 
         try:
             full_duration = float(get_video_duration_mediainfo(input_path) or 0.0)

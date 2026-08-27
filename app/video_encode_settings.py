@@ -146,6 +146,10 @@ def set_info_text(box, text: str):
         label.configure(text=text)
 
 
+RIFE_MULT_LABELS = ("2×", "4×")
+RIFE_MODE_LABELS = ("Higher FPS (keep duration)", "Slow motion (keep FPS)")
+
+
 class VideoEncodeSettingsPanel(ctk.CTkFrame):
     """
     Scrollable Preset / Video / Video operations / Audio cards shared by Convert + Export.
@@ -160,11 +164,13 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
         source_fps: float | None = None,
         scroll_height: int = CUSTOM_SCROLL_HEIGHT,
         default_preset: str = "MP4 · original size",
+        enable_rife: bool = False,
     ):
         super().__init__(parent, fg_color="transparent")
         self._source_width = source_width
         self._source_height = source_height
         self._source_fps = source_fps
+        self._enable_rife = bool(enable_rife)
 
         self.presets = dict(ENCODE_PRESETS)
         self._preset_values = list(self.presets.keys()) + [PRESET_CUSTOM]
@@ -182,6 +188,9 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
         self.rotate_var = ctk.StringVar(value="None")
         self.mirror_var = ctk.BooleanVar(value=False)
         self.flip_v_var = ctk.BooleanVar(value=False)
+        self.rife_enabled_var = ctk.BooleanVar(value=False)
+        self.rife_mult_var = ctk.StringVar(value="2×")
+        self.rife_mode_var = ctk.StringVar(value=RIFE_MODE_LABELS[0])
         self._dim_entries: list[ctk.CTkEntry] = []
 
         self._scroll = ctk.CTkScrollableFrame(
@@ -261,6 +270,44 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
             flip_row, text="Flip vertical", variable=self.flip_v_var
         )
         self._flip_v_check.pack(side="left")
+
+        if self._enable_rife:
+            rife_card, rife_body = make_section(self._scroll, "RIFE interpolate (optional)")
+            rife_card.pack(fill="x", pady=(0, 8))
+            self._rife_check = ctk.CTkCheckBox(
+                rife_body,
+                text="Interpolate frames (rife-ncnn-vulkan)",
+                variable=self.rife_enabled_var,
+                command=self._refresh_rife_controls,
+            )
+            self._rife_check.pack(anchor="w", pady=(0, 6))
+            mult_row = ctk.CTkFrame(rife_body, fg_color="transparent")
+            mult_row.pack(fill="x", pady=(0, 4))
+            ctk.CTkLabel(mult_row, text="Multiplier:", width=100, anchor="w").pack(
+                side="left"
+            )
+            self._rife_mult_menu = ctk.CTkOptionMenu(
+                mult_row,
+                variable=self.rife_mult_var,
+                values=list(RIFE_MULT_LABELS),
+                height=28,
+                command=lambda _v: self._refresh_rife_info(),
+            )
+            self._rife_mult_menu.pack(side="left", fill="x", expand=True)
+            mode_row = ctk.CTkFrame(rife_body, fg_color="transparent")
+            mode_row.pack(fill="x", pady=(0, 4))
+            ctk.CTkLabel(mode_row, text="Mode:", width=100, anchor="w").pack(side="left")
+            self._rife_mode_menu = ctk.CTkOptionMenu(
+                mode_row,
+                variable=self.rife_mode_var,
+                values=list(RIFE_MODE_LABELS),
+                height=28,
+                command=lambda _v: self._refresh_rife_info(),
+            )
+            self._rife_mode_menu.pack(side="left", fill="x", expand=True)
+            self._rife_info = make_info_box(rife_body, icon="✨")
+            self._rife_info.pack(fill="x", pady=(2, 2))
+            self._refresh_rife_controls()
 
         audio_card, audio_body = make_section(self._scroll, "Audio")
         audio_card.pack(fill="x", pady=(0, 4))
@@ -356,6 +403,51 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
             self._audio_info, AUDIO_INFO.get(br, AUDIO_INFO[DEFAULT_AUDIO_BITRATE])
         )
 
+    def _rife_multiplier_value(self) -> int:
+        raw = (self.rife_mult_var.get() or "2×").strip()
+        return 4 if raw.startswith("4") else 2
+
+    def _rife_mode_value(self) -> str:
+        label = self.rife_mode_var.get() or RIFE_MODE_LABELS[0]
+        return "slowmo" if "slow" in label.lower() else "fps"
+
+    def _refresh_rife_info(self):
+        if not self._enable_rife or not hasattr(self, "_rife_info"):
+            return
+        mult = self._rife_multiplier_value()
+        mode = self._rife_mode_value()
+        src = self._source_fps
+        if mode == "slowmo":
+            text = (
+                f"RIFE {mult}× slow motion — keeps ~{src:g} fps, "
+                f"duration ×{mult}"
+                if src
+                else f"RIFE {mult}× slow motion — keeps source FPS, longer clip"
+            )
+        else:
+            if src:
+                text = (
+                    f"RIFE {mult}× — raises FPS {src:g} → {src * mult:g}, "
+                    "same duration"
+                )
+            else:
+                text = f"RIFE {mult}× — higher FPS, same duration"
+        text += "\nOptional pack: tools/rife/ (not in base install)"
+        set_info_text(self._rife_info, text)
+
+    def _refresh_rife_controls(self):
+        if not self._enable_rife:
+            return
+        on = bool(self.rife_enabled_var.get())
+        state = "normal" if on else "disabled"
+        for w in (getattr(self, "_rife_mult_menu", None), getattr(self, "_rife_mode_menu", None)):
+            if w is not None:
+                try:
+                    w.configure(state=state)
+                except Exception:
+                    pass
+        self._refresh_rife_info()
+
     def apply_preset(self, preset_name: str | None = None):
         """Named presets lock size/format/quality; only Manual… edits them."""
         name = preset_name or self.preset_var.get()
@@ -415,6 +507,14 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
             "flip_h": bool(self.mirror_var.get()),
             "flip_v": bool(self.flip_v_var.get()),
         }
+        rife_opts = {}
+        if self._enable_rife and bool(self.rife_enabled_var.get()):
+            rife_opts = {
+                "rife_enabled": True,
+                "rife_multiplier": self._rife_multiplier_value(),
+                "rife_mode": self._rife_mode_value(),
+            }
+
         if keep_size:
             if not self._source_width or not self._source_height:
                 raise ValueError(
@@ -427,6 +527,7 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
                 "include_audio": bool(self.sound_var.get()),
                 **quality,
                 **transform,
+                **rife_opts,
             }
 
         settings = {
@@ -438,6 +539,7 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
             "include_audio": bool(self.sound_var.get()),
             **quality,
             **transform,
+            **rife_opts,
         }
         if settings["width"] <= 0 or settings["height"] <= 0 or settings["fps"] <= 0:
             raise ValueError("Width, height, and FPS must be positive.")

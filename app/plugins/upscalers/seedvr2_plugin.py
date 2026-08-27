@@ -1225,25 +1225,33 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
         log_lines: list[str] = []
         progress_state = SeedVR2ProgressState()
         assert proc.stdout is not None
-        for line in proc.stdout:
-            if should_stop and should_stop():
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-                return {
-                    "ok": False,
-                    "output_path": None,
-                    "error": "aborted",
-                    "message": "Upscale aborted.",
-                }
-            text = line.rstrip()
-            if text:
-                log_lines.append(text)
-                logging.info("[SeedVR2] %s", text)
-                if progress_cb:
-                    frac, msg, phase = progress_state.update(text)
-                    progress_cb(frac, msg, phase)
+        aborted = False
+        try:
+            for line in proc.stdout:
+                if should_stop and should_stop():
+                    aborted = True
+                    logging.info("[SeedVR2] Cancel requested — killing one-shot runner (VRAM).")
+                    break
+                text = line.rstrip()
+                if text:
+                    log_lines.append(text)
+                    logging.info("[SeedVR2] %s", text)
+                    if progress_cb:
+                        frac, msg, phase = progress_state.update(text)
+                        progress_cb(frac, msg, phase)
+        finally:
+            if aborted or (should_stop and should_stop()):
+                from seedvr2_worker_host import kill_process_tree
+
+                kill_process_tree(proc, label="SeedVR2")
+
+        if aborted or (should_stop and should_stop()):
+            return {
+                "ok": False,
+                "output_path": None,
+                "error": "aborted",
+                "message": "Upscale aborted.",
+            }
 
         code = proc.wait()
         if code != 0:
