@@ -1506,6 +1506,15 @@ class BatchProcessDialog(ctk.CTkToplevel):
         self._adv_canvas_enabled = False
         self._adv_canvas_settings: Optional[dict[str, Any]] = None
         self._adv_window: Optional[BatchAdvancedOptionsDialog] = None
+        self._birefnet_settings_window = None
+        try:
+            from birefnet_config import birefnet_options_from_controller
+
+            self._birefnet_options: dict[str, Any] = birefnet_options_from_controller(
+                parent
+            )
+        except Exception:
+            self._birefnet_options = {}
 
         try:
             self.transient(parent.winfo_toplevel())
@@ -1644,13 +1653,34 @@ class BatchProcessDialog(ctk.CTkToplevel):
         ).pack(fill="x", padx=16, pady=(0, 4))
 
         # --- Options (FastStone-style) ---
+        bg_row = ctk.CTkFrame(self, fg_color="transparent")
+        bg_row.pack(fill="x", padx=16, pady=(4, 2))
         self._remove_bg_var = tk.BooleanVar(value=False)
         ctk.CTkCheckBox(
-            self,
+            bg_row,
             text="Remove background (BiRefNet → PNG with alpha)",
             variable=self._remove_bg_var,
             command=self._on_remove_bg_toggle,
-        ).pack(anchor="w", padx=16, pady=(4, 2))
+        ).pack(side="left")
+        self._remove_bg_settings_btn = ctk.CTkButton(
+            bg_row,
+            text="…",
+            width=36,
+            height=28,
+            command=self._open_birefnet_settings,
+        )
+        self._remove_bg_settings_btn.pack(side="left", padx=(8, 0))
+
+        self._remove_bg_summary = ctk.CTkLabel(
+            self,
+            text="",
+            font=ctk.CTkFont(size=11),
+            text_color=("gray40", "gray65"),
+            anchor="w",
+            wraplength=420,
+            justify="left",
+        )
+        self._remove_bg_summary.pack(fill="x", padx=16, pady=(0, 2))
 
         self._ask_overwrite_var = tk.BooleanVar(value=True)
         ctk.CTkCheckBox(
@@ -1827,6 +1857,62 @@ class BatchProcessDialog(ctk.CTkToplevel):
             self._format_var.set("PNG")
             self._on_format_change("PNG")
         self._update_rename_preview()
+        self._update_remove_bg_summary()
+
+    def _update_remove_bg_summary(self):
+        if not self._remove_bg_var.get():
+            self._remove_bg_summary.configure(text="")
+            return
+        try:
+            from birefnet_config import format_birefnet_summary
+
+            text = format_birefnet_summary(self._birefnet_options)
+        except Exception:
+            text = ""
+        self._remove_bg_summary.configure(text=text)
+
+    def _open_birefnet_settings(self):
+        if self._birefnet_settings_window is not None:
+            try:
+                if self._birefnet_settings_window.winfo_exists():
+                    self._birefnet_settings_window.lift()
+                    self._birefnet_settings_window.focus_force()
+                    return
+            except Exception:
+                pass
+
+        def _apply(_paths, options: dict):
+            self._birefnet_settings_window = None
+            if options:
+                self._birefnet_options = dict(options)
+            self._remove_bg_var.set(True)
+            self._on_remove_bg_toggle()
+            self.after(20, self._restore_grab)
+
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+
+        from birefnet_dialog import BirefnetOptionsDialog
+
+        self._birefnet_settings_window = BirefnetOptionsDialog(
+            self,
+            paths=self._paths,
+            on_confirm=_apply,
+            controller=self._parent,
+            mode="settings",
+        )
+
+        def _on_gone(event):
+            if event.widget is self._birefnet_settings_window:
+                self._birefnet_settings_window = None
+                self.after(20, self._restore_grab)
+
+        try:
+            self._birefnet_settings_window.bind("<Destroy>", _on_gone)
+        except Exception:
+            self.after(200, self._restore_grab)
 
     def _on_use_advanced_toggle(self):
         enabled = self._use_advanced.get()
@@ -1948,6 +2034,14 @@ class BatchProcessDialog(ctk.CTkToplevel):
         except Exception:
             pass
         try:
+            if (
+                self._birefnet_settings_window is not None
+                and self._birefnet_settings_window.winfo_exists()
+            ):
+                self._birefnet_settings_window.destroy()
+        except Exception:
+            pass
+        try:
             self.grab_release()
         except Exception:
             pass
@@ -2050,6 +2144,11 @@ class BatchProcessDialog(ctk.CTkToplevel):
             "png_compress": int(png_compress),
             "ask_before_overwrite": bool(self._ask_overwrite_var.get()),
             "remove_background": bool(self._remove_bg_var.get()),
+            "birefnet_options": (
+                dict(self._birefnet_options)
+                if self._remove_bg_var.get()
+                else None
+            ),
         }
 
         try:

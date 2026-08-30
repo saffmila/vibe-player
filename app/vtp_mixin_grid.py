@@ -3472,6 +3472,14 @@ class VtpGridMixin:
         png_compress = int(job.get("png_compress") if job.get("png_compress") is not None else 6)
         ask_before_overwrite = bool(job.get("ask_before_overwrite", True))
         remove_background = bool(job.get("remove_background"))
+        birefnet_options = dict(job.get("birefnet_options") or {})
+        if remove_background and not birefnet_options:
+            try:
+                from birefnet_config import birefnet_options_from_controller
+
+                birefnet_options = birefnet_options_from_controller(self)
+            except Exception:
+                birefnet_options = {}
 
         if remove_background:
             from birefnet_config import runtime_status
@@ -3568,6 +3576,27 @@ class VtpGridMixin:
                             def _should_stop_bg() -> bool:
                                 return bool(progress.cancelled)
 
+                            bg_kwargs = {
+                                "bg_mode": str(
+                                    birefnet_options.get("bg_mode") or "transparent"
+                                ),
+                                "bg_color": birefnet_options.get("bg_color"),
+                                "cuda_device": birefnet_options.get("cuda_device"),
+                                "model_variant": birefnet_options.get(
+                                    "model_variant"
+                                ),
+                                "mask_threshold": int(
+                                    birefnet_options.get("mask_threshold") or 0
+                                ),
+                                "mask_feather": int(
+                                    birefnet_options.get("mask_feather") or 0
+                                ),
+                                "mask_morph": int(
+                                    birefnet_options.get("mask_morph") or 0
+                                ),
+                                "should_stop": _should_stop_bg,
+                            }
+
                             if has_ops:
                                 import tempfile
 
@@ -3591,7 +3620,7 @@ class VtpGridMixin:
                                     result = remove_background_from_file(
                                         tmp_path,
                                         dest,
-                                        should_stop=_should_stop_bg,
+                                        **bg_kwargs,
                                     )
                                 finally:
                                     try:
@@ -3602,7 +3631,7 @@ class VtpGridMixin:
                                 result = remove_background_from_file(
                                     src,
                                     dest,
-                                    should_stop=_should_stop_bg,
+                                    **bg_kwargs,
                                 )
 
                             if progress.cancelled:

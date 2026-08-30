@@ -65,11 +65,29 @@ def _section_card(parent, title: str) -> tuple[ctk.CTkFrame, ctk.CTkFrame]:
 
 
 class BirefnetOptionsDialog(ctk.CTkToplevel):
-    """Output folder + inline weight install status; calls on_confirm(paths, options)."""
+    """Output folder + inline weight install status; calls on_confirm(paths, options).
 
-    def __init__(self, parent, paths: list[str], on_confirm, controller=None):
+    ``mode="run"`` — standalone Remove Background (Start runs the job).
+    ``mode="settings"`` — prefs only (Save); used by Batch Convert. Hides
+    output folder / suffix because the batch dialog already owns those.
+    """
+
+    def __init__(
+        self,
+        parent,
+        paths: list[str],
+        on_confirm,
+        controller=None,
+        *,
+        mode: str = "run",
+    ):
         super().__init__(parent)
-        self.title("Remove Background")
+        self.mode = "settings" if mode == "settings" else "run"
+        self.title(
+            "Remove Background Settings"
+            if self.mode == "settings"
+            else "Remove Background"
+        )
         self.paths = list(paths or [])
         self.on_confirm = on_confirm
         self.controller = controller
@@ -106,9 +124,13 @@ class BirefnetOptionsDialog(ctk.CTkToplevel):
             font=ctk.CTkFont(size=14, weight="bold"),
             anchor="w",
         ).pack(fill="x", pady=(0, 4))
+        if self.mode == "settings":
+            subtitle = "Used by Batch Convert · FP16 @ 1024 → PNG"
+        else:
+            subtitle = f"{len(self.paths)} image(s) selected · FP16 @ 1024 → PNG"
         ctk.CTkLabel(
             header,
-            text=f"{len(self.paths)} image(s) selected · FP16 @ 1024 → PNG",
+            text=subtitle,
             font=ctk.CTkFont(size=11),
             text_color=("gray40", "gray65"),
             anchor="w",
@@ -119,7 +141,11 @@ class BirefnetOptionsDialog(ctk.CTkToplevel):
         btn.pack(side="bottom", fill="x", padx=16, pady=(8, 14))
         self.cancel_btn = ctk.CTkButton(btn, text="Cancel", width=100, command=self._on_cancel)
         self.cancel_btn.pack(side="left")
-        self.start_btn = ctk.CTkButton(btn, text="Start", command=self._start)
+        self.start_btn = ctk.CTkButton(
+            btn,
+            text="Save" if self.mode == "settings" else "Start",
+            command=self._start,
+        )
         self.start_btn.pack(side="right", fill="x", expand=True, padx=(10, 0))
 
         # --- Status (fixed section, always visible) ---
@@ -180,7 +206,9 @@ class BirefnetOptionsDialog(ctk.CTkToplevel):
         )
         self.gpu_var = ctk.StringVar(value=initial_gpu)
 
-        _options_card, options = _section_card(body, "Output")
+        _options_card, options = _section_card(
+            body, "Processing" if self.mode == "settings" else "Output"
+        )
 
         gpu_row = ctk.CTkFrame(options, fg_color="transparent")
         gpu_row.pack(fill="x", pady=(0, _ROW_PY))
@@ -194,12 +222,13 @@ class BirefnetOptionsDialog(ctk.CTkToplevel):
         self.gpu_menu.pack(side="left", fill="x", expand=True)
 
         suf_row = ctk.CTkFrame(options, fg_color="transparent")
-        suf_row.pack(fill="x", pady=(0, _ROW_PY))
         ctk.CTkLabel(suf_row, text="Filename suffix:", width=110, anchor="w").pack(side="left")
         self._suffix_entry = ctk.CTkEntry(
             suf_row, textvariable=self.suffix_var, height=28
         )
         self._suffix_entry.pack(side="left", fill="x", expand=True)
+        if self.mode != "settings":
+            suf_row.pack(fill="x", pady=(0, _ROW_PY))
 
         # --- Background: transparent vs solid color ---
         bg_section = ctk.CTkFrame(options, fg_color="transparent")
@@ -273,7 +302,6 @@ class BirefnetOptionsDialog(ctk.CTkToplevel):
         self._bg_hex_entry.bind("<KeyRelease>", lambda _e: self._sync_bg_swatch())
 
         out_row = ctk.CTkFrame(options, fg_color="transparent")
-        out_row.pack(fill="x", pady=(0, _ROW_PY))
         ctk.CTkLabel(out_row, text="Output folder:", width=110, anchor="w").pack(side="left")
         self._out_entry = ctk.CTkEntry(
             out_row, textvariable=self.out_dir_var, height=28
@@ -283,6 +311,8 @@ class BirefnetOptionsDialog(ctk.CTkToplevel):
             out_row, text="…", width=36, height=28, command=self._browse
         )
         self._browse_btn.pack(side="left")
+        if self.mode != "settings":
+            out_row.pack(fill="x", pady=(0, _ROW_PY))
 
         tools_row = ctk.CTkFrame(options, fg_color="transparent")
         tools_row.pack(fill="x", pady=(4, 0))
@@ -500,7 +530,10 @@ class BirefnetOptionsDialog(ctk.CTkToplevel):
                     w.configure(state="disabled")
                 except Exception:
                     pass
-        if enabled and self._runtime_ready:
+        if self.mode == "settings":
+            if enabled:
+                self.start_btn.configure(state="normal")
+        elif enabled and self._runtime_ready:
             self.start_btn.configure(state="normal")
         elif not self._runtime_ready:
             self.start_btn.configure(state="disabled")
@@ -676,9 +709,12 @@ class BirefnetOptionsDialog(ctk.CTkToplevel):
 
             if not self._install_running:
                 self._install_btn.configure(state="normal")
-                self.start_btn.configure(
-                    state="normal" if self._runtime_ready else "disabled"
-                )
+                if self.mode == "settings":
+                    self.start_btn.configure(state="normal")
+                else:
+                    self.start_btn.configure(
+                        state="normal" if self._runtime_ready else "disabled"
+                    )
         except Exception as exc:
             self._runtime_ready = False
             self._weights_ready = False
@@ -686,7 +722,10 @@ class BirefnetOptionsDialog(ctk.CTkToplevel):
             self.status_var.set(f"Status check failed:\n{exc}")
             if not self._install_running:
                 self._install_btn.configure(state="normal")
-                self.start_btn.configure(state="disabled")
+                if self.mode == "settings":
+                    self.start_btn.configure(state="normal")
+                else:
+                    self.start_btn.configure(state="disabled")
 
     def _browse(self) -> None:
         if self._install_running:
@@ -829,21 +868,24 @@ class BirefnetOptionsDialog(ctk.CTkToplevel):
                 parent=self,
             )
             return
-        if not self._runtime_ready:
-            detail = (self._runtime_error or self.status_var.get() or "").strip()
-            if not detail or detail == "Checking…":
-                self._refresh_status(deep=True)
+        if self.mode != "settings":
             if not self._runtime_ready:
-                messagebox.showwarning(
-                    "Remove Background",
-                    (self._runtime_error or self.status_var.get() or GPU_PACK_MISSING_MESSAGE).strip(),
-                    parent=self,
-                )
+                detail = (self._runtime_error or self.status_var.get() or "").strip()
+                if not detail or detail == "Checking…":
+                    self._refresh_status(deep=True)
+                if not self._runtime_ready:
+                    messagebox.showwarning(
+                        "Remove Background",
+                        (self._runtime_error or self.status_var.get() or GPU_PACK_MISSING_MESSAGE).strip(),
+                        parent=self,
+                    )
+                    return
+            out_dir = (self.out_dir_var.get() or "").strip()
+            if not out_dir or not os.path.isdir(out_dir):
+                messagebox.showerror("Output folder", "Choose a valid output folder.", parent=self)
                 return
-        out_dir = (self.out_dir_var.get() or "").strip()
-        if not out_dir or not os.path.isdir(out_dir):
-            messagebox.showerror("Output folder", "Choose a valid output folder.", parent=self)
-            return
+        else:
+            out_dir = (self.out_dir_var.get() or "").strip()
         suffix = (self.suffix_var.get() or "_nobg").strip() or "_nobg"
         bg_mode = self._bg_mode_var.get() or "transparent"
         bg_color = normalize_hex_color(self._bg_color_var.get()) or "#FFFFFF"

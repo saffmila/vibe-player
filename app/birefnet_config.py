@@ -251,6 +251,53 @@ def weights_status(*, model_variant: str | None = None) -> dict[str, Any]:
     }
 
 
+def birefnet_options_from_controller(controller: Any | None) -> dict[str, Any]:
+    """Snapshot of BiRefNet prefs stored on the main window (or defaults)."""
+
+    def _get(name: str, default: Any) -> Any:
+        if controller is None:
+            return default
+        return getattr(controller, name, default)
+
+    try:
+        feather = max(0, min(5, int(_get("birefnet_mask_feather", 0) or 0)))
+    except (TypeError, ValueError):
+        feather = 0
+    try:
+        threshold = max(0, min(100, int(_get("birefnet_mask_threshold", 0) or 0)))
+    except (TypeError, ValueError):
+        threshold = 0
+    try:
+        morph = max(-1, min(1, int(_get("birefnet_mask_morph", 0) or 0)))
+    except (TypeError, ValueError):
+        morph = 0
+    mode = str(_get("birefnet_bg_mode", "transparent") or "transparent").strip().lower()
+    return {
+        "cuda_device": str(_get("birefnet_cuda_device", "0") or "0").strip() or "0",
+        "model_variant": resolve_model_variant(_get("birefnet_model_variant", DEFAULT_MODEL_VARIANT)),
+        "mask_feather": feather,
+        "mask_threshold": threshold,
+        "mask_morph": morph,
+        "suffix": str(_get("birefnet_suffix", "_nobg") or "_nobg").strip() or "_nobg",
+        "bg_mode": "color" if mode == "color" else "transparent",
+        "bg_color": normalize_hex_color(_get("birefnet_bg_color", None)) or "#FFFFFF",
+    }
+
+
+def format_birefnet_summary(options: dict[str, Any] | None) -> str:
+    """One-line summary for Batch Convert (model · background · GPU)."""
+    opts = options or {}
+    variant = resolve_model_variant(opts.get("model_variant"))
+    label = BIREFNET_MODEL_VARIANTS[variant]["label"]
+    mode = str(opts.get("bg_mode") or "transparent").strip().lower()
+    if mode == "color":
+        bg = normalize_hex_color(opts.get("bg_color")) or "#FFFFFF"
+    else:
+        bg = "transparent"
+    gpu = str(opts.get("cuda_device") or "0").strip() or "0"
+    return f"{label} · {bg} · GPU {gpu}"
+
+
 def supports_image(file_path: str) -> bool:
     if not file_path or not Path(file_path).is_file():
         return False
