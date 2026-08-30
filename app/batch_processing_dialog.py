@@ -843,7 +843,7 @@ class BatchAdvancedOptionsDialog(ctk.CTkToplevel):
         canvas_size.pack(fill="x", pady=4)
         ctk.CTkLabel(canvas_size, text="Width:", width=55, anchor="w").pack(side="left")
         self._canvas_w_var = tk.StringVar(
-            value=str(int(init_canvas.get("width") or max(self._ref_w, 1920)))
+            value=str(int(init_canvas.get("width") or self._ref_w))
         )
         self._canvas_w_entry = ctk.CTkEntry(
             canvas_size,
@@ -855,7 +855,7 @@ class BatchAdvancedOptionsDialog(ctk.CTkToplevel):
         self._canvas_w_entry.pack(side="left", padx=(4, 12))
         ctk.CTkLabel(canvas_size, text="Height:", width=55, anchor="w").pack(side="left")
         self._canvas_h_var = tk.StringVar(
-            value=str(int(init_canvas.get("height") or max(self._ref_h, 1080)))
+            value=str(int(init_canvas.get("height") or self._ref_h))
         )
         self._canvas_h_entry = ctk.CTkEntry(
             canvas_size,
@@ -1644,6 +1644,14 @@ class BatchProcessDialog(ctk.CTkToplevel):
         ).pack(fill="x", padx=16, pady=(0, 4))
 
         # --- Options (FastStone-style) ---
+        self._remove_bg_var = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            self,
+            text="Remove background (BiRefNet → PNG with alpha)",
+            variable=self._remove_bg_var,
+            command=self._on_remove_bg_toggle,
+        ).pack(anchor="w", padx=16, pady=(4, 2))
+
         self._ask_overwrite_var = tk.BooleanVar(value=True)
         ctk.CTkCheckBox(
             self,
@@ -1813,6 +1821,12 @@ class BatchProcessDialog(ctk.CTkToplevel):
         if extra > 0:
             text += f" +{extra} more"
         self._preview_label.configure(text=text)
+
+    def _on_remove_bg_toggle(self):
+        if self._remove_bg_var.get():
+            self._format_var.set("PNG")
+            self._on_format_change("PNG")
+        self._update_rename_preview()
 
     def _on_use_advanced_toggle(self):
         enabled = self._use_advanced.get()
@@ -2004,6 +2018,10 @@ class BatchProcessDialog(ctk.CTkToplevel):
                 return
             canvas_settings = dict(self._adv_canvas_settings)
 
+        if self._remove_bg_var.get():
+            fmt = "PNG"
+            out_ext = ".png"
+
         # Persist current slider into the format-specific slot.
         self._on_compress_slide()
 
@@ -2031,6 +2049,7 @@ class BatchProcessDialog(ctk.CTkToplevel):
             "quality": int(quality),
             "png_compress": int(png_compress),
             "ask_before_overwrite": bool(self._ask_overwrite_var.get()),
+            "remove_background": bool(self._remove_bg_var.get()),
         }
 
         try:

@@ -527,10 +527,12 @@ class FileOpProgressDialog(ctk.CTkToplevel):
         *,
         topmost: bool = True,
         show_preview: bool = False,
+        preview_fit: bool = False,
     ):
         super().__init__(parent)
         self.title(title)
         self._show_preview = bool(show_preview)
+        self._preview_fit = bool(preview_fit)
         self.geometry("520x520" if self._show_preview else "460x210")
         self.resizable(False, False)
         # topmost=True keeps short DnD ops visible; False lets long jobs (Upscale)
@@ -621,7 +623,11 @@ class FileOpProgressDialog(ctk.CTkToplevel):
             self.preview_label.pack(fill="both", expand=True, padx=8, pady=(8, 4))
             self.preview_caption = ctk.CTkLabel(
                 preview_frame,
-                text="Shows the current input (1:1 center crop)",
+                text=(
+                    "1st: before · then last result while batch runs"
+                    if self._preview_fit
+                    else "Shows the current input (1:1 center crop)"
+                ),
                 text_color="#888888",
                 font=ctk.CTkFont(size=11),
                 anchor="w",
@@ -790,10 +796,11 @@ class FileOpProgressDialog(ctk.CTkToplevel):
 
     def _load_preview_image(self, path: str):
         """
-        Display the preview JPEG at native pixel size (1:1).
+        Display the preview JPEG in the preview pane.
 
-        The runner already writes a center crop matching the preview pane;
-        do not thumbnail/downscale here — that would destroy AI detail.
+        SeedVR previews are a 1:1 center crop at pane size. BiRefNet previews are
+        letterboxed to the pane; if the file is larger, fit-to-frame is used when
+        ``preview_fit`` is enabled.
         """
         if self.preview_label is None:
             return
@@ -804,12 +811,15 @@ class FileOpProgressDialog(ctk.CTkToplevel):
                 with Image.open(f) as img:
                     img_copy = img.convert("RGB").copy()
 
-            # Pane target (same as seedvr2_preview_hook.PREVIEW_CROP_*).
             pane_w, pane_h = 480, 270
             w, h = img_copy.size
 
-            # If somehow larger than the pane, take a 1:1 center crop (no scale).
-            if w > pane_w or h > pane_h:
+            if self._preview_fit and (w != pane_w or h != pane_h):
+                from birefnet_preview_hook import fit_image_to_preview
+
+                img_copy = fit_image_to_preview(img_copy, pane_w=pane_w, pane_h=pane_h)
+                w, h = img_copy.size
+            elif not self._preview_fit and (w > pane_w or h > pane_h):
                 x0 = max(0, (w - pane_w) // 2)
                 y0 = max(0, (h - pane_h) // 2)
                 img_copy = img_copy.crop(
@@ -817,7 +827,6 @@ class FileOpProgressDialog(ctk.CTkToplevel):
                 )
                 w, h = img_copy.size
 
-            # Smaller than pane: show as-is (centered by the label), never stretch.
             photo = ctk.CTkImage(
                 light_image=img_copy,
                 dark_image=img_copy,
@@ -854,6 +863,7 @@ def open_file_op_progress_dialog(
     *,
     topmost: bool = True,
     show_preview: bool = False,
+    preview_fit: bool = False,
 ) -> FileOpProgressDialog:
     """Create and show a modal file-operation progress dialog."""
     dialog = FileOpProgressDialog(
@@ -863,6 +873,7 @@ def open_file_op_progress_dialog(
         action_label=action_label,
         topmost=topmost,
         show_preview=show_preview,
+        preview_fit=preview_fit,
     )
     dialog.show()
     return dialog
@@ -2972,7 +2983,7 @@ def create_preferences_window(app):
     )
     ctk.CTkCheckBox(
         adv_body,
-        text="Include caption (.txt) when copying/moving images",
+        text="Include caption (.txt) when copying/moving images and videos",
         variable=copy_move_captions_var,
     ).pack(anchor="w", padx=12, pady=4)
     ctk.CTkLabel(
@@ -2980,7 +2991,7 @@ def create_preferences_window(app):
         text=(
             "Internal (thumbnails / folder tree): no modifier = Move, Ctrl = Copy.\n"
             "From Windows Explorer: no modifier = Copy, Shift = Move.\n"
-            "Caption sidecars use the same stem as the image (photo.png → photo.txt)."
+            "Caption sidecars use the same stem (photo.png → photo.txt, clip.mp4 → clip.txt)."
         ),
         font=("Helvetica", 12),
         text_color=("gray30", "gray70"),
@@ -3252,6 +3263,22 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
         "seedvr2_runner_dir": getattr(app, "seedvr2_runner_dir", "") or "",
         "seedvr2_python": getattr(app, "seedvr2_python", "") or "",
         "seedvr2_cuda_device": str(getattr(app, "seedvr2_cuda_device", "0") or "0"),
+        "birefnet_cuda_device": str(getattr(app, "birefnet_cuda_device", "0") or "0"),
+        "birefnet_model_variant": str(
+            getattr(app, "birefnet_model_variant", "general") or "general"
+        ),
+        "birefnet_mask_feather": int(getattr(app, "birefnet_mask_feather", 0) or 0),
+        "birefnet_mask_threshold": int(getattr(app, "birefnet_mask_threshold", 0) or 0),
+        "birefnet_mask_morph": int(getattr(app, "birefnet_mask_morph", 0) or 0),
+        "birefnet_advanced_open": bool(getattr(app, "birefnet_advanced_open", False)),
+        "birefnet_suffix": str(getattr(app, "birefnet_suffix", "_nobg") or "_nobg"),
+        "birefnet_bg_mode": (
+            "color"
+            if str(getattr(app, "birefnet_bg_mode", "transparent") or "transparent").strip().lower()
+            == "color"
+            else "transparent"
+        ),
+        "birefnet_bg_color": str(getattr(app, "birefnet_bg_color", "#FFFFFF") or "#FFFFFF"),
         "seedvr2_dit_model": getattr(app, "seedvr2_dit_model", "") or DEFAULT_DIT_MODEL,
         "seedvr2_keep_vram": bool(getattr(app, "seedvr2_keep_vram", False)),
         "file_info_display": collect_file_info_display(app),

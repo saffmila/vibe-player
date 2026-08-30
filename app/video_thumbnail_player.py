@@ -149,6 +149,7 @@ from vtp_mixin_legacy_drag import VtpLegacyDragMixin
 from vtp_mixin_preferences import VtpPreferencesMixin
 from vtp_mixin_tagging import VtpTaggingMixin
 from vtp_mixin_upscale import VtpUpscaleMixin
+from vtp_mixin_birefnet import VtpBirefnetMixin
 from vtp_mixin_window_layout import VtpWindowLayoutMixin
 from vtp_virtual_grid import VtpVirtualGridMixin
 
@@ -238,6 +239,7 @@ class VideoThumbnailPlayer(
     VtpLegacyDragMixin,
     VtpTaggingMixin,
     VtpUpscaleMixin,
+    VtpBirefnetMixin,
     VtpPreferencesMixin,
     dnd.TkinterDnD.Tk,
 ):
@@ -318,7 +320,7 @@ class VideoThumbnailPlayer(
         self._thumb_double_click_consumed = False
         # Confirm dialogs before DnD copy/move (default off — Advanced in preferences)
         self.dnd_confirm_dialogs = False
-        # Include image caption sidecars (.txt) with copy/move (default on)
+        # Include image/video caption sidecars (.txt) with copy/move (default on)
         self.copy_move_with_captions = True
         self.folder_title_font_base_size = 12
         self.folder_title_font = ctk.CTkFont(size=self.folder_title_font_base_size, weight="bold") # Or choose size/weight you prefer 

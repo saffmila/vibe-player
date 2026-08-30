@@ -1,7 +1,7 @@
 """
-Simple sidecar caption editor for image dataset training.
+Simple sidecar caption editor for image / video dataset training.
 
-Loads / saves ``<image_stem>.txt`` next to the selected image.
+Loads / saves ``<media_stem>.txt`` next to the selected image or video.
 Unsaved edits autosave when switching to another file (dataset-tool style).
 """
 
@@ -15,24 +15,42 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import messagebox
 
-from vtp_constants import IMAGE_FORMATS
+from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS
+
+# Media that can have a sibling ``.txt`` caption sidecar
+CAPTIONABLE_FORMATS = IMAGE_FORMATS + VIDEO_FORMATS
+
+_SELECT_HINT = "Select an image or video to edit its caption (.txt)"
+
+
+def is_captionable_path(file_path: str | os.PathLike[str] | None) -> bool:
+    """True if path is a supported image or video (caption sidecar eligible)."""
+    try:
+        path = str(file_path) if file_path is not None else ""
+    except Exception:
+        return False
+    return bool(path) and path.lower().endswith(CAPTIONABLE_FORMATS)
 
 
 def caption_path_for_image(image_path: str | os.PathLike[str]) -> Path:
-    """Return sibling ``.txt`` path for an image (same stem, .txt extension)."""
+    """Return sibling ``.txt`` path for media (same stem, .txt extension)."""
     p = Path(image_path)
     return p.with_suffix(".txt")
 
 
-def existing_caption_sidecar(image_path: str | os.PathLike[str]) -> str | None:
-    """If ``image_path`` is an image with a sibling ``.txt``, return that path."""
+# Alias — same stem/.txt rule for images and videos
+caption_path_for_media = caption_path_for_image
+
+
+def existing_caption_sidecar(media_path: str | os.PathLike[str]) -> str | None:
+    """If ``media_path`` is image/video with a sibling ``.txt``, return that path."""
     try:
-        path = str(image_path)
+        path = str(media_path)
     except Exception:
         return None
-    if not path or not path.lower().endswith(IMAGE_FORMATS):
+    if not is_captionable_path(path):
         return None
-    cap = caption_path_for_image(path)
+    cap = caption_path_for_media(path)
     try:
         if cap.is_file():
             return str(cap)
@@ -42,7 +60,7 @@ def existing_caption_sidecar(image_path: str | os.PathLike[str]) -> str | None:
 
 
 def count_caption_sidecars(paths: list[str] | None) -> int:
-    """How many paths in ``paths`` are images that already have a ``.txt`` sidecar."""
+    """How many paths already have a ``.txt`` sidecar (images or videos)."""
     if not paths:
         return 0
     n = 0
@@ -56,8 +74,8 @@ def filter_covered_caption_txt_sources(
     sources: list[str], *, with_captions: bool
 ) -> list[str]:
     """
-    When transferring captions with images, drop standalone ``.txt`` entries that
-    are sidecars of selected images (those are handled with the image).
+    When transferring captions with media, drop standalone ``.txt`` entries that
+    are sidecars of selected images/videos (those are handled with the media file).
     """
     if not with_captions or not sources:
         return list(sources or [])
@@ -84,20 +102,20 @@ def filter_covered_caption_txt_sources(
     return out
 
 
-def transfer_caption_sidecar(src_image: str, dst_image: str, *, is_move: bool) -> bool:
+def transfer_caption_sidecar(src_media: str, dst_media: str, *, is_move: bool) -> bool:
     """
-    Copy or move ``src_image``'s sibling ``.txt`` next to ``dst_image``.
+    Copy or move ``src_media``'s sibling ``.txt`` next to ``dst_media``.
 
     Returns True if a sidecar was transferred.
     """
-    # Prefer caption beside the original image path. After an image *move*, the
-    # image is gone from src but the .txt usually still sits next to the old name.
+    # Prefer caption beside the original path. After a media *move*, the
+    # file is gone from src but the .txt usually still sits next to the old name.
     candidates: list[str] = []
-    found = existing_caption_sidecar(src_image)
+    found = existing_caption_sidecar(src_media)
     if found:
         candidates.append(found)
     try:
-        candidates.append(str(caption_path_for_image(src_image)))
+        candidates.append(str(caption_path_for_media(src_media)))
     except Exception:
         pass
 
@@ -122,7 +140,7 @@ def transfer_caption_sidecar(src_image: str, dst_image: str, *, is_move: bool) -
     if not src_cap:
         return False
 
-    dst_cap = str(caption_path_for_image(dst_image))
+    dst_cap = str(caption_path_for_media(dst_media))
     try:
         src_n = os.path.normcase(os.path.normpath(src_cap))
         dst_n = os.path.normcase(os.path.normpath(dst_cap))
@@ -166,7 +184,7 @@ def transfer_caption_sidecar(src_image: str, dst_image: str, *, is_move: bool) -
 
 
 class CaptionEditorWidget(ctk.CTkFrame):
-    """Bottom-panel text editor for per-image caption sidecars."""
+    """Bottom-panel text editor for per-file caption sidecars (images and videos)."""
 
     def __init__(self, parent, controller=None, **kwargs):
         super().__init__(parent, fg_color="transparent", **kwargs)
@@ -182,7 +200,7 @@ class CaptionEditorWidget(ctk.CTkFrame):
 
         self.status_label = ctk.CTkLabel(
             toolbar,
-            text="Select an image to edit its caption (.txt)",
+            text=_SELECT_HINT,
             font=ctk.CTkFont(size=11),
             anchor="w",
             text_color=("gray30", "gray70"),
@@ -279,7 +297,7 @@ class CaptionEditorWidget(ctk.CTkFrame):
         return False  # Cancel
 
     def load_for_path(self, file_path: str | None, *, commit_previous: bool = True) -> bool:
-        """Load caption for an image path, or clear if not an image.
+        """Load caption for an image/video path, or clear if not captionable.
 
         Returns False if leave was cancelled (user still editing previous caption).
         """
@@ -287,12 +305,12 @@ class CaptionEditorWidget(ctk.CTkFrame):
             if not self.commit_before_leave():
                 return False
 
-        if not file_path or not str(file_path).lower().endswith(IMAGE_FORMATS):
-            self.clear(message="Select an image to edit its caption (.txt)")
+        if not is_captionable_path(file_path):
+            self.clear(message=_SELECT_HINT)
             return True
 
         self._image_path = file_path
-        self._caption_path = caption_path_for_image(file_path)
+        self._caption_path = caption_path_for_media(file_path)
         self._loading = True
         try:
             self._set_enabled(True)
@@ -363,7 +381,7 @@ class CaptionEditorWidget(ctk.CTkFrame):
                     pass
             return False
 
-    def clear(self, message: str = "Select an image to edit its caption (.txt)") -> None:
+    def clear(self, message: str = _SELECT_HINT) -> None:
         self._image_path = None
         self._caption_path = None
         self._baseline_text = ""

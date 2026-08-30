@@ -33,6 +33,10 @@ from image_operations import create_image_viewer, image_file_exists, notify_miss
 from image_loader import load_pil_image, get_pil_image_size
 from image_compare_dialog import open_image_compare_dialog
 from video_compare_dialog import open_video_compare_dialog
+from image_canvas_size_dialog import (
+    canvas_size_image_file,
+    open_canvas_size_dialog,
+)
 from image_resize_dialog import (
     IMAGE_TRANSFORM_LABELS,
     image_reencode_is_lossy,
@@ -2991,6 +2995,123 @@ class VtpGridMixin:
             return
         self.open_batch_image_resize(paths)
 
+    def start_image_canvas_size_from_grid(self, primary_path: str):
+        """Canvas size from thumbnail RMB — batch when multiple images are selected."""
+        paths = self.selected_image_paths_for_edit(primary_path)
+        if not paths:
+            if primary_path and os.path.isfile(primary_path):
+                paths = [primary_path]
+            else:
+                return
+        self.open_batch_image_canvas_size(paths)
+
+    def open_batch_image_canvas_size(self, paths: list):
+        """Show canvas size dialog and overwrite selected image files."""
+        paths = [p for p in (paths or []) if p and os.path.isfile(p)]
+        if not paths:
+            return
+
+        def _on_apply(canvas_w, canvas_h, bg_color, anchor):
+            def _confirmed():
+                self._run_batch_image_canvas_size(
+                    paths,
+                    canvas_w=canvas_w,
+                    canvas_h=canvas_h,
+                    bg_color=bg_color,
+                    anchor=anchor,
+                )
+                return True
+
+            n = len(paths)
+            title = "Overwrite file?" if n <= 1 else "Overwrite files?"
+            message = (
+                f"Apply canvas size and overwrite this image file on disk?\n"
+                "This cannot be undone."
+                if n <= 1
+                else (
+                    f"Apply canvas size and overwrite {n} image files on disk?\n"
+                    "This cannot be undone."
+                )
+            )
+            self.universal_dialog(
+                title=title,
+                message=message,
+                confirm_callback=_confirmed,
+                confirm_text="Overwrite",
+                cancel_text="Cancel",
+                show_cancel=True,
+            )
+
+        open_canvas_size_dialog(self, paths, on_apply=_on_apply)
+
+    def _run_batch_image_canvas_size(
+        self,
+        paths,
+        *,
+        canvas_w,
+        canvas_h,
+        bg_color,
+        anchor,
+    ):
+        """Worker + progress UI for canvas size overwrite."""
+        label = "Canvas Size"
+        progress = open_file_op_progress_dialog(
+            self, label, len(paths), action_label=label
+        )
+        errors = []
+
+        def _worker():
+            ok = 0
+            for i, path in enumerate(paths, start=1):
+                if progress.cancelled:
+                    break
+                name = os.path.basename(path)
+                self.after(
+                    0,
+                    lambda i=i, name=name: progress.set_progress(i - 1, detail=name),
+                )
+                try:
+                    canvas_size_image_file(
+                        path,
+                        canvas_w=canvas_w,
+                        canvas_h=canvas_h,
+                        bg_color=bg_color,
+                        anchor=anchor,
+                    )
+                    ok += 1
+                    self.after(
+                        0,
+                        lambda p=path: self.refresh_single_thumbnail(p, overwrite=True),
+                    )
+                except Exception as e:
+                    logging.info("Canvas size failed for %s: %s", path, e)
+                    errors.append(f"{name}: {e}")
+                self.after(
+                    0,
+                    lambda i=i, name=name: progress.set_progress(i, detail=name),
+                )
+
+            def _done():
+                progress.close()
+                if errors:
+                    shown = "\n".join(errors[:8])
+                    more = f"\n…and {len(errors) - 8} more" if len(errors) > 8 else ""
+                    self.universal_dialog(
+                        title=f"{label} finished with errors",
+                        message=f"Updated {ok} / {len(paths)} files.\n\n{shown}{more}",
+                        confirm_callback=lambda: True,
+                        confirm_text="OK",
+                        show_cancel=False,
+                    )
+                elif ok:
+                    logging.info("Canvas size: %s files OK", ok)
+
+            self.after(0, _done)
+
+        threading.Thread(
+            target=_worker, daemon=True, name="batch-canvas-size"
+        ).start()
+
     def start_image_transform_from_grid(self, primary_path: str, op: str):
         """
         Rotate / flip from thumbnail RMB.
@@ -3350,6 +3471,19 @@ class VtpGridMixin:
         quality = int(job.get("quality") or 90)
         png_compress = int(job.get("png_compress") if job.get("png_compress") is not None else 6)
         ask_before_overwrite = bool(job.get("ask_before_overwrite", True))
+        remove_background = bool(job.get("remove_background"))
+
+        if remove_background:
+            from birefnet_config import runtime_status
+
+            rt = runtime_status(deep=True)
+            if not rt.get("ready"):
+                messagebox.showwarning(
+                    "Batch Convert",
+                    rt.get("message") or "Autotag GPU Pack is not installed.",
+                )
+                return
+            out_ext = ".png"
 
         self._batch_convert_running = True
         progress = open_file_op_progress_dialog(
@@ -3363,6 +3497,7 @@ class VtpGridMixin:
             ok = 0
             skipped = 0
             aborted = False
+            _unload_birefnet = remove_background
             try:
                 for i, src in enumerate(paths, start=1):
                     if progress.cancelled:
@@ -3416,18 +3551,82 @@ class VtpGridMixin:
                         continue
 
                     try:
-                        process_one_image(
-                            src,
-                            dest,
-                            rotate_op=rotate_op,
-                            flip_h=flip_h,
-                            flip_v=flip_v,
-                            crop_settings=crop_settings,
-                            resize_settings=resize_settings,
-                            canvas_settings=canvas_settings,
-                            quality=quality,
-                            png_compress=png_compress,
-                        )
+                        if remove_background:
+                            from birefnet_pipeline import remove_background_from_file
+
+                            has_ops = any(
+                                [
+                                    rotate_op,
+                                    flip_h,
+                                    flip_v,
+                                    crop_settings,
+                                    resize_settings,
+                                    canvas_settings,
+                                ]
+                            )
+
+                            def _should_stop_bg() -> bool:
+                                return bool(progress.cancelled)
+
+                            if has_ops:
+                                import tempfile
+
+                                fd, tmp_path = tempfile.mkstemp(
+                                    suffix=".png", dir=os.path.dirname(dest) or None
+                                )
+                                os.close(fd)
+                                try:
+                                    process_one_image(
+                                        src,
+                                        tmp_path,
+                                        rotate_op=rotate_op,
+                                        flip_h=flip_h,
+                                        flip_v=flip_v,
+                                        crop_settings=crop_settings,
+                                        resize_settings=resize_settings,
+                                        canvas_settings=canvas_settings,
+                                        quality=quality,
+                                        png_compress=png_compress,
+                                    )
+                                    result = remove_background_from_file(
+                                        tmp_path,
+                                        dest,
+                                        should_stop=_should_stop_bg,
+                                    )
+                                finally:
+                                    try:
+                                        os.remove(tmp_path)
+                                    except OSError:
+                                        pass
+                            else:
+                                result = remove_background_from_file(
+                                    src,
+                                    dest,
+                                    should_stop=_should_stop_bg,
+                                )
+
+                            if progress.cancelled:
+                                aborted = True
+                                break
+                            if not result.get("ok"):
+                                raise RuntimeError(
+                                    result.get("message") or "Background removal failed."
+                                )
+                            if result.get("output_path"):
+                                dest = result["output_path"]
+                        else:
+                            process_one_image(
+                                src,
+                                dest,
+                                rotate_op=rotate_op,
+                                flip_h=flip_h,
+                                flip_v=flip_v,
+                                crop_settings=crop_settings,
+                                resize_settings=resize_settings,
+                                canvas_settings=canvas_settings,
+                                quality=quality,
+                                png_compress=png_compress,
+                            )
                         ok += 1
                         written.append(dest)
                     except Exception as e:
@@ -3439,6 +3638,13 @@ class VtpGridMixin:
                         lambda i=i, name=name: progress.set_progress(i, detail=name),
                     )
             finally:
+                if _unload_birefnet:
+                    try:
+                        from birefnet_pipeline import unload_model
+
+                        unload_model()
+                    except Exception:
+                        pass
                 self.after(
                     0,
                     lambda: self._batch_convert_done(
@@ -4328,6 +4534,12 @@ class VtpGridMixin:
                 _rs_opts["accelerator"] = _rs_acc
             menu.add_command(**_rs_opts)
 
+            _cs_label = "Canvas Size…" if n_edit <= 1 else f"Canvas Size… ({n_edit})"
+            menu.add_command(
+                label=_cs_label,
+                command=lambda fp=file_path: self.start_image_canvas_size_from_grid(fp),
+            )
+
             # Rotate / flip — batch-safe (same transform on all selected images).
             def _xf_label(base: str) -> str:
                 return base if n_edit <= 1 else f"{base} ({n_edit})"
@@ -4396,6 +4608,16 @@ class VtpGridMixin:
                 label=_bc_label,
                 command=lambda fp=file_path: self.open_batch_convert_dialog(fp),
             )
+            if hasattr(self, "open_birefnet_dialog"):
+                _rb_label = (
+                    "Remove Background…"
+                    if n_edit <= 1
+                    else f"Remove Background… ({n_edit})"
+                )
+                menu.add_command(
+                    label=_rb_label,
+                    command=lambda fp=file_path: self.open_birefnet_dialog(fp),
+                )
 
         else:
             menu.add_command(label="Open", command=lambda: os.startfile(file_path))  # fallback

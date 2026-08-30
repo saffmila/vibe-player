@@ -504,6 +504,47 @@ class VtpPreferencesMixin:
                 self.seedvr2_runner_dir = str(settings.get("seedvr2_runner_dir") or "").strip()
                 self.seedvr2_python = str(settings.get("seedvr2_python") or "").strip()
                 self.seedvr2_cuda_device = str(settings.get("seedvr2_cuda_device") or "0").strip() or "0"
+                self.birefnet_cuda_device = (
+                    str(settings.get("birefnet_cuda_device") or "0").strip() or "0"
+                )
+                try:
+                    from birefnet_config import resolve_model_variant
+
+                    self.birefnet_model_variant = resolve_model_variant(
+                        settings.get("birefnet_model_variant")
+                    )
+                except Exception:
+                    self.birefnet_model_variant = "general"
+                self.birefnet_mask_feather = max(
+                    0, min(5, int(settings.get("birefnet_mask_feather") or 0))
+                )
+                self.birefnet_mask_threshold = max(
+                    0, min(100, int(settings.get("birefnet_mask_threshold") or 0))
+                )
+                self.birefnet_mask_morph = max(
+                    -1, min(1, int(settings.get("birefnet_mask_morph") or 0))
+                )
+                self.birefnet_advanced_open = bool(
+                    settings.get("birefnet_advanced_open", False)
+                )
+                self.birefnet_suffix = (
+                    str(settings.get("birefnet_suffix") or "_nobg").strip() or "_nobg"
+                )
+                _bg_mode = str(
+                    settings.get("birefnet_bg_mode") or "transparent"
+                ).strip().lower()
+                self.birefnet_bg_mode = (
+                    "color" if _bg_mode == "color" else "transparent"
+                )
+                try:
+                    from birefnet_config import normalize_hex_color
+
+                    self.birefnet_bg_color = (
+                        normalize_hex_color(settings.get("birefnet_bg_color"))
+                        or "#FFFFFF"
+                    )
+                except Exception:
+                    self.birefnet_bg_color = "#FFFFFF"
                 self.seedvr2_dit_model = str(settings.get("seedvr2_dit_model") or "").strip()
                 if not self.seedvr2_dit_model:
                     try:

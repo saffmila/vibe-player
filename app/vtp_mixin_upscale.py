@@ -93,7 +93,11 @@ class VtpUpscaleMixin:
         backends = self.list_available_upscale_backends()
         # RIFE is frame interpolation — it has its own dialog ("RIFE Interpolate…").
         # The Upscale dialog is SeedVR/DAT-oriented and must not list RIFE.
-        backends = [b for b in backends if getattr(b, "id", "") != "rife"]
+        backends = [
+            b
+            for b in backends
+            if getattr(b, "id", "") not in ("rife", "birefnet")
+        ]
         if not backends:
             messagebox.showerror(
                 "Upscale",

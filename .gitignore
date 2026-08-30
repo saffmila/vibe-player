@@ -44,6 +44,14 @@ app/models/**/*.engine
 app/models/**/*.safetensors
 app/models/**/*.ckpt
 
+# BiRefNet / HF weights cache (download via Remove Background dialog)
+models/
+
+# Local SeedVR runners and ComfyUI checkout (not part of the app repo)
+seedvr2_runner/
+seedvr2_runner_bitedance/
+ComfyUI-SeedVR2_VideoUpscaler/
+
 # --- Logs and debug outputs ---
 *.log
 *.log.*

@@ -24,7 +24,7 @@ from caption_editor_widget import (
     filter_covered_caption_txt_sources,
     transfer_caption_sidecar,
 )
-from vtp_constants import IMAGE_FORMATS
+from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS
 
 
 class VtpLegacyDragMixin:
@@ -657,11 +657,14 @@ class VtpLegacyDragMixin:
                         self.selected_thumbnails[i] = (new_path, label, index)
                 moved_items.append(source_path)
 
-            # Image caption sidecars (.txt) — follow the image when enabled
+            # Caption sidecars (.txt) — follow image/video when enabled
             if (
                 bool(getattr(self, "copy_move_with_captions", True))
                 and os.path.isfile(new_path)
-                and source_path.lower().endswith(IMAGE_FORMATS)
+                and (
+                    source_path.lower().endswith(IMAGE_FORMATS)
+                    or source_path.lower().endswith(VIDEO_FORMATS)
+                )
             ):
                 try:
                     transfer_caption_sidecar(

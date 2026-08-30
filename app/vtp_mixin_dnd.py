@@ -382,13 +382,23 @@ class VtpDndMixin:
                 return
             self.refresh_folder_icon(dest)
             if dropped_into_subfolder:
-                # Files landed in a sibling/child folder: stay in the open directory so
-                # the user sees the items leave, and rebuild the target folder's preview
-                # (it gained media) plus the source previews (handled in the move finish).
+                # Stay on the open folder. Copy leaves source thumbs alone; move
+                # surgically drops them (full reload only as fallback).
                 self._invalidate_folder_preview_caches(dest)
+                if not is_move:
+                    return
                 view = current_dir if (current_dir and os.path.isdir(current_dir)) else dest
-                self.display_thumbnails(view, force_refresh=True, preserve_scroll=True)
+                surgical = False
+                if view and getattr(self, "_vg_active", False):
+                    try:
+                        surgical = bool(self._vg_remove_paths(sources))
+                    except Exception:
+                        logging.exception("[DnD] surgical thumb remove after canvas move failed")
+                        surgical = False
+                if not surgical:
+                    self.display_thumbnails(view, force_refresh=True, preserve_scroll=True)
             else:
+                # Drop into the open directory — new items must appear.
                 self.display_thumbnails(dest, force_refresh=True, preserve_scroll=True)
 
         self._dnd_confirm_and_execute(
@@ -526,16 +536,39 @@ class VtpDndMixin:
                         for src_parent in src_parents:
                             if src_parent and os.path.isdir(src_parent):
                                 self.refresh_folder_icon(src_parent)
+                        self.refresh_folder_icon(dest_folder)
+                        if folder_sources:
+                            self.select_current_folder_in_tree()
+                        # Move: drop thumbs in-place (same path as delete) — avoids
+                        # the clear+reload flash of display_thumbnails.
+                        surgical = False
+                        if view and getattr(self, "_vg_active", False):
+                            try:
+                                surgical = bool(self._vg_remove_paths(sources))
+                            except Exception:
+                                logging.exception(
+                                    "[DnD] surgical thumb remove after tree move failed"
+                                )
+                                surgical = False
+                        if not surgical:
+                            self.display_thumbnails(
+                                view,
+                                force_refresh=True,
+                                preserve_scroll=True,
+                            )
                     else:
-                        self.refresh_tree_view(dest_folder)
-                    self.refresh_folder_icon(dest_folder)
-                    if folder_sources or not is_move:
-                        self.select_current_folder_in_tree()
-                    self.display_thumbnails(
-                        view,
-                        force_refresh=True,
-                        preserve_scroll=True,
-                    )
+                        # Copy: open folder content is unchanged — do not reload thumbs.
+                        # Folder copies need dest tree children; file copies only need
+                        # the dest folder icon/preview refreshed.
+                        if folder_sources:
+                            self.refresh_tree_view(dest_folder)
+                            self.select_current_folder_in_tree()
+                        self.refresh_folder_icon(dest_folder)
+                        if hasattr(self, "_invalidate_folder_preview_caches"):
+                            try:
+                                self._invalidate_folder_preview_caches(dest_folder)
+                            except Exception:
+                                pass
                 finally:
                     self.after_idle(
                         lambda: setattr(
@@ -1224,7 +1257,10 @@ class VtpDndMixin:
                 if last_err is not None:
                     raise last_err
 
-                if with_captions and (not is_dir) and src.lower().endswith(IMAGE_FORMATS):
+                if with_captions and (not is_dir) and (
+                    src.lower().endswith(IMAGE_FORMATS)
+                    or src.lower().endswith(VIDEO_FORMATS)
+                ):
                     if transfer_caption_sidecar(src, dst, is_move=is_move):
                         captions_done += 1
 
