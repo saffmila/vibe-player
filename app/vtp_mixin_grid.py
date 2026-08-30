@@ -4447,16 +4447,26 @@ class VtpGridMixin:
         # Measure with a real Font (tk scaling), but apply size as a plain tuple —
         # that is what used to update Treeview text live. Named/anonymous Font
         # objects were changing metrics (rowheight) without repainting glyphs.
-        measure_font = tkfont.Font(self, family="Helvetica", size=new_font_size)
-        linespace = int(measure_font.metrics("linespace"))
+        # Dispose on this (UI) thread: Font.__del__ calling tk from a worker
+        # during Thread.start deadlocks the mainloop (see UI-HANG dumps).
+        def _measure_linespace(px: int) -> int:
+            mf = tkfont.Font(self, family="Helvetica", size=px)
+            try:
+                return int(mf.metrics("linespace"))
+            finally:
+                try:
+                    mf.delete_font = False
+                    mf._call("font", "delete", mf.name)
+                except Exception:
+                    mf.delete_font = False
+
+        linespace = _measure_linespace(new_font_size)
 
         default_tree_font = 11
         font_ratio = max(7, int(self.base_font_size)) / float(default_tree_font)
         base_row = max(16, int(round(profile["tree_row_base"] * widget_scale)))
         default_font_px = max(7, int(round(default_tree_font * profile["tree_font_multiplier"])))
-        default_linespace = int(
-            tkfont.Font(self, family="Helvetica", size=default_font_px).metrics("linespace")
-        )
+        default_linespace = _measure_linespace(default_font_px)
         default_pad = max(2, base_row - default_linespace)
         pad = max(2, int(round(default_pad * font_ratio)))
         desired_row = max(16, linespace + pad)

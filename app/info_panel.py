@@ -225,6 +225,10 @@ class InfoPanelFrame(ctk.CTkFrame):
         self.label_compression_ratio = _row("Comp. Ratio: ?")
 
         self._build_catalog_tab()
+        # Start PreviewIO before first thumb click. Lazy Thread.start() on the UI
+        # path deadlocks when another thread hits tkinter.font.Font.__del__ during
+        # bootstrap (UI waits on _started; Font.__del__ waits on the Tk main thread).
+        self._ensure_preview_io_worker()
 
     # ------------------------------------------------------------------ #
     #  GLOBAL CATALOG TAB                                                 #
@@ -506,7 +510,6 @@ class InfoPanelFrame(ctk.CTkFrame):
         """Single background worker for preview I/O (avoid Thread.start storm on thumb browse)."""
         if self._preview_io_worker_started:
             return
-        self._preview_io_worker_started = True
 
         def loop() -> None:
             while True:
@@ -518,11 +521,22 @@ class InfoPanelFrame(ctk.CTkFrame):
                 except Exception:
                     logging.debug("[Preview] IO worker job failed", exc_info=True)
 
-        threading.Thread(target=loop, daemon=True, name="PreviewIO").start()
+        try:
+            threading.Thread(target=loop, daemon=True, name="PreviewIO").start()
+            self._preview_io_worker_started = True
+        except Exception:
+            logging.exception("[Preview] Failed to start PreviewIO worker")
 
     def _submit_preview_io(self, job) -> None:
         """Enqueue preview decode/exists work; drop stale queued jobs, keep the latest."""
         self._ensure_preview_io_worker()
+        if not self._preview_io_worker_started:
+            # Worker never came up — run sync so preview still works (rare).
+            try:
+                job()
+            except Exception:
+                logging.debug("[Preview] sync IO job failed", exc_info=True)
+            return
         try:
             while True:
                 self._preview_io_queue.get_nowait()

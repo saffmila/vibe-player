@@ -2208,7 +2208,17 @@ class ImageViewerLegacy:
         if rating_suffix:
             try:
                 import tkinter.font as tkfont
-                base_w = tkfont.Font(font=font).measure(text)
+                # delete_font=False: avoid Font.__del__ → tk.call from a worker thread
+                # (deadlocks UI when paired with Thread.start on the main thread).
+                _mf = tkfont.Font(font=font)
+                try:
+                    base_w = _mf.measure(text)
+                finally:
+                    try:
+                        _mf.delete_font = False
+                        _mf._call("font", "delete", _mf.name)
+                    except Exception:
+                        _mf.delete_font = False
             except Exception:
                 base_w = len(text) * 6
             rx = cx + base_w

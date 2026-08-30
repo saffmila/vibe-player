@@ -5186,11 +5186,11 @@ class VideoThumbnailPlayer(
                             if thumb_path and os.path.exists(thumb_path):
                                 self.info_panel.show_image_preview(thumb_path)
                             else:
-                                # Thumbnail not in cache yet — extract in background thread
-                                import threading
+                                # Extract via PreviewIO — never Thread.start on the click path
+                                # (Tk Font.__del__ + Thread.start deadlocks the UI).
                                 from file_operations import create_video_thumbnail
                                 def _extract_and_show():
-                                    t = create_video_thumbnail(
+                                    create_video_thumbnail(
                                         file_path,
                                         self.thumbnail_size,
                                         self.thumbnail_format,
@@ -5204,7 +5204,7 @@ class VideoThumbnailPlayer(
                                     p = self._get_cached_thumb_path(file_path)
                                     if p and os.path.exists(p):
                                         self.after(0, lambda: self.info_panel.show_image_preview(p))
-                                threading.Thread(target=_extract_and_show, daemon=True).start()
+                                self.info_panel._submit_preview_io(_extract_and_show)
 
                 elif is_image:
                     self.info_panel.show_image_preview(file_path)
