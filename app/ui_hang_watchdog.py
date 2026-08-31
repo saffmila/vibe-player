@@ -142,6 +142,12 @@ def start(widget: Any) -> None:
     )
     _watcher.start()
     _schedule_beat(widget)
+    try:
+        from tk_font_gc_fix import install as _install_tk_font_gc
+
+        _install_tk_font_gc(widget)
+    except Exception:
+        logging.debug("[UI-HANG] tk_font_gc_fix install failed", exc_info=True)
     logging.info(
         "[UI-HANG] watchdog on (beat=%dms, hang≥%.0fs) → %s",
         BEAT_MS,

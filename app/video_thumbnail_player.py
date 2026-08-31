@@ -4432,13 +4432,52 @@ class VideoThumbnailPlayer(
 
 
     def exit_program(self):
-        """
-        Closes the menu window and invokes the on_closing function.
-        """
-        self.quit()  # Gracefully exit the application loop
-        self.on_closing()  # Perform any cleanup tasks before exiting    
+        """File → Exit — same path as window X / Alt+F4."""
+        self.on_closing()
+
+    def _active_close_jobs(self) -> list[str]:
+        """Background jobs that would be aborted if the app exits now."""
+        jobs: list[str] = []
+        if getattr(self, "_batch_convert_running", False):
+            jobs.append("Batch Convert")
+        if getattr(self, "_birefnet_batch_running", False):
+            jobs.append("Remove Background")
+        if getattr(self, "_upscale_batch_running", False):
+            jobs.append("Upscale")
+        if getattr(self, "_rife_batch_running", False):
+            jobs.append("RIFE")
+        return jobs
 
     def on_closing(self):
+        if getattr(self, "_closing_in_progress", False):
+            return
+
+        jobs = self._active_close_jobs()
+        if jobs:
+            msg = (
+                "Exit Vibe Player?\n\n"
+                f"Still running: {', '.join(jobs)}.\n"
+                "Exiting will stop it."
+            )
+        else:
+            msg = "Exit Vibe Player?"
+        try:
+            if not messagebox.askyesno("Exit", msg, parent=self):
+                return
+        except Exception:
+            # If the dialog fails, do not exit — safer than closing hard.
+            return
+
+        # Unsaved captions (Autosave / Yes-No-Cancel) before teardown.
+        try:
+            editor = getattr(self, "caption_editor", None)
+            if editor is not None and hasattr(editor, "commit_before_leave"):
+                if not editor.commit_before_leave():
+                    return
+        except Exception:
+            logging.debug("caption commit on close failed", exc_info=True)
+
+        self._closing_in_progress = True
         try:
             from ui_hang_watchdog import stop as _stop_ui_hang_watchdog
 

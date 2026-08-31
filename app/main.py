@@ -784,7 +784,21 @@ def run_application():
     debug_mode = "--debug" in sys.argv
     log_path_inner = setup_logging(debug=debug_mode)
 
+    # Patch Font.__del__ before any UI/worker threads: avoids Thread.start deadlocks.
+    try:
+        from tk_font_gc_fix import install as _install_tk_font_gc
+
+        _install_tk_font_gc()
+    except Exception:
+        logging.debug("tk_font_gc_fix install failed", exc_info=True)
+
     app = VideoThumbnailPlayer(log_path=log_path_inner)
+    try:
+        from tk_font_gc_fix import install as _install_tk_font_gc
+
+        _install_tk_font_gc(app)
+    except Exception:
+        pass
     app.mainloop()
 
 

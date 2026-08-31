@@ -3438,11 +3438,18 @@ class VideoPlayer:
             except Exception as e:
                 logging.info("[pynput bridge] global mouse listener start failed: %s", e)
 
-        threading.Thread(
-            target=_run,
-            name="VideoPlayerPynputStart",
-            daemon=True,
-        ).start()
+        # Never Thread.start() on the UI thread here: Font.__del__ during bootstrap
+        # deadlocks mainloop (UI waits on _started; Font waits on Tk). Use pre-warmed pool.
+        try:
+            from tk_font_gc_fix import spawn as _ui_spawn
+
+            _ui_spawn(_run)
+        except Exception:
+            threading.Thread(
+                target=_run,
+                name="VideoPlayerPynputStart",
+                daemon=True,
+            ).start()
 
     def _menu_popup_xy(self, x_root: int, y_root: int) -> tuple[int, int]:
         """Keep popup inside the player toplevel (avoids multi-monitor geometry glitches)."""
