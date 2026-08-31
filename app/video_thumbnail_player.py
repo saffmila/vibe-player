@@ -501,6 +501,9 @@ class VideoThumbnailPlayer(
         self.wide_folder_left_frac = 0.27      # title column; divider sits just after it
         # Preferences → Debug section only when launched via run_debug.bat (--debug)
         self.debug_prefs_enabled = "--debug" in sys.argv
+        # SeedVR / RIFE promo strip padding (Preferences → Debug)
+        self.promo_strip_pad_x = 4
+        self.promo_strip_pad_top = 4
 
         self.numwidefolders_in_col = 1
         # StringVar for controlling thumbnail time via slider

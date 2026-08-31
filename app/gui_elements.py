@@ -2801,6 +2801,29 @@ def create_preferences_window(app):
 
         ctk.CTkLabel(
             debug_frame,
+            text="SeedVR / RIFE promo strip",
+            font=("Helvetica", 13),
+            anchor="w",
+        ).pack(anchor="w", padx=12, pady=(12, 2))
+        _pref_spinner_row(
+            debug_frame,
+            "Promo strip side pad (px each side)",
+            int(getattr(app, "promo_strip_pad_x", 4) or 0),
+            0,
+            40,
+            app.set_promo_strip_pad_x,
+        )
+        _pref_spinner_row(
+            debug_frame,
+            "Promo strip top pad (px)",
+            int(getattr(app, "promo_strip_pad_top", 4) or 0),
+            0,
+            40,
+            app.set_promo_strip_pad_top,
+        )
+
+        ctk.CTkLabel(
+            debug_frame,
             text="Title / filmstrip divider",
             font=("Helvetica", 13),
             anchor="w",
@@ -3191,6 +3214,8 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
         "wide_folder_tile_bg": str(getattr(app, "wide_folder_tile_bg", "#000000") or "#000000"),
         "wide_folder_tile_bg_alpha": int(getattr(app, "wide_folder_tile_bg_alpha", 255) or 255),
         "wide_folder_strip_end_pad_px": int(getattr(app, "wide_folder_strip_end_pad_px", 40) or 40),
+        "promo_strip_pad_x": int(getattr(app, "promo_strip_pad_x", 4) or 0),
+        "promo_strip_pad_top": int(getattr(app, "promo_strip_pad_top", 4) or 0),
         "wide_folder_tile_inset_px": int(getattr(app, "wide_folder_tile_inset_px", 8) or 8),
         "wide_folder_show_divider": bool(getattr(app, "wide_folder_show_divider", False)),
         "wide_folder_divider_color": str(
@@ -3399,6 +3424,18 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
             )
         except (TypeError, ValueError):
             app.wide_folder_strip_end_pad_px = 40
+        try:
+            app.promo_strip_pad_x = max(
+                0, min(40, int(preferences.get("promo_strip_pad_x", getattr(app, "promo_strip_pad_x", 4))))
+            )
+        except (TypeError, ValueError):
+            app.promo_strip_pad_x = 4
+        try:
+            app.promo_strip_pad_top = max(
+                0, min(40, int(preferences.get("promo_strip_pad_top", getattr(app, "promo_strip_pad_top", 4))))
+            )
+        except (TypeError, ValueError):
+            app.promo_strip_pad_top = 4
         try:
             app.wide_folder_tile_inset_px = max(
                 0, min(24, int(preferences.get("wide_folder_tile_inset_px", getattr(app, "wide_folder_tile_inset_px", 8))))

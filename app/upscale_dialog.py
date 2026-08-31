@@ -14,6 +14,7 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
+from promo_banner import PROMO_STRIP_DIALOG_W, attach_promo_strip, sync_promo_strip
 from seedvr2_config import (
     BATCH_SIZE_AUTO,
     BATCH_SIZE_LABELS,
@@ -58,8 +59,9 @@ from seedvr2_config import (
 from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS
 
 
-UPSCALE_DIALOG_WIDTH = 560
-UPSCALE_DIALOG_WIDTH_ADVANCED = 620  # scrollbar + room for full card border/radius
+# Fixed width (promo strip + 4px side pad). Advanced no longer widens the window.
+UPSCALE_DIALOG_WIDTH = PROMO_STRIP_DIALOG_W
+UPSCALE_DIALOG_WIDTH_ADVANCED = PROMO_STRIP_DIALOG_W
 # Soft floors; _fit_window() prefers measured size (simple mode must stay tight).
 UPSCALE_BASIC_HEIGHT = 320
 # Advanced body viewport (cards scroll inside); keep window short vs screen.
@@ -308,7 +310,7 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         self.result = None
         self._advanced_open = False
 
-        self.resizable(True, True)
+        self.resizable(False, True)
         self.minsize(UPSCALE_DIALOG_WIDTH, 360)
         self.transient(parent)
         self.grab_set()
@@ -365,6 +367,12 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             if self._n_vid:
                 subtitle += " — video jobs can take a long time"
         self.title(header)
+        attach_promo_strip(
+            self,
+            "strip_seedvr.png",
+            dialog_width=UPSCALE_DIALOG_WIDTH,
+            controller=self.controller,
+        )
         self._title_lbl = ctk.CTkLabel(
             self,
             text=header,
@@ -947,6 +955,7 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
         open_ = bool(getattr(self, "_advanced_open", False))
         chrome = 28
         for w, pad in (
+            (getattr(self, "_promo_strip_lbl", None), 0),
             (getattr(self, "_title_lbl", None), 8),
             (getattr(self, "_subtitle_lbl", None), 4),
             (getattr(self, "_button_bar", None), 18),
@@ -977,7 +986,8 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
                 measured += UPSCALE_BASIC_HEIGHT - 80
             min_h = min(260, max_h)
             # Never keep the advanced-era tall window in simple mode.
-            h = max(min_h, min(measured, 420, max_h))
+            # Extra headroom for the promo strip (~76px @ 560).
+            h = max(min_h, min(measured, 500, max_h))
         try:
             self.minsize(width, min_h)
             self.geometry(f"{width}x{h}")
@@ -986,6 +996,8 @@ class UpscaleOptionsDialog(ctk.CTkToplevel):
             else:
                 self.after_idle(self._refresh_sections_scrollregion)
                 self.after(40, self._refresh_sections_scrollregion)
+            self.after_idle(lambda: sync_promo_strip(self))
+            self.after(60, lambda: sync_promo_strip(self))
         except Exception:
             pass
 

@@ -9,8 +9,13 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
+from promo_banner import PROMO_STRIP_DIALOG_W, attach_promo_strip, sync_promo_strip
 from rife_config import PACK_MISSING_MESSAGE, runtime_status
 from video_encode_settings import RIFE_MODE_LABELS, RIFE_MULT_LABELS, make_info_box, set_info_text
+
+# Match promo strip comfort width so the banner isn't squeezed.
+_RIFE_DIALOG_W = PROMO_STRIP_DIALOG_W
+_RIFE_DIALOG_H = 460
 
 
 class RifeOptionsDialog(ctk.CTkToplevel):
@@ -24,8 +29,8 @@ class RifeOptionsDialog(ctk.CTkToplevel):
         self.controller = controller
         self.result = None
 
-        self.geometry("420x360")
-        self.minsize(400, 320)
+        self.geometry(f"{_RIFE_DIALOG_W}x{_RIFE_DIALOG_H}")
+        self.minsize(_RIFE_DIALOG_W, 400)
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -36,13 +41,20 @@ class RifeOptionsDialog(ctk.CTkToplevel):
         default_out = os.path.dirname(self.paths[0]) if self.paths else os.getcwd()
         self.out_dir_var = ctk.StringVar(value=default_out)
 
+        attach_promo_strip(
+            self,
+            "strip_rife.png",
+            dialog_width=_RIFE_DIALOG_W,
+            controller=self.controller,
+        )
+
         ctk.CTkLabel(
             self,
             text="RIFE frame interpolation",
             text_color="#00bfff",
             font=ctk.CTkFont(size=14, weight="bold"),
             anchor="w",
-        ).pack(fill="x", padx=16, pady=(14, 4))
+        ).pack(fill="x", padx=16, pady=(10, 4))
 
         status = runtime_status()
         status_text = (
@@ -50,7 +62,7 @@ class RifeOptionsDialog(ctk.CTkToplevel):
             if status.get("ready")
             else (status.get("message") or PACK_MISSING_MESSAGE)
         )
-        info = make_info_box(self, wraplength=360, icon="✨")
+        info = make_info_box(self, wraplength=_RIFE_DIALOG_W - 60, icon="✨")
         info.pack(fill="x", padx=16, pady=(0, 10))
         set_info_text(
             info,
@@ -99,6 +111,8 @@ class RifeOptionsDialog(ctk.CTkToplevel):
 
         self.lift()
         self.focus_force()
+        self.after_idle(lambda: sync_promo_strip(self))
+        self.after(80, lambda: sync_promo_strip(self))
 
     def _browse(self):
         path = filedialog.askdirectory(initialdir=self.out_dir_var.get() or None)

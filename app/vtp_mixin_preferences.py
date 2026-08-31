@@ -27,6 +27,14 @@ class VtpPreferencesMixin:
   
     def open_preferences_window(self):
         create_preferences_window(self)
+
+    def set_promo_strip_pad_x(self, pad_px: int):
+        """Side padding around SeedVR / RIFE promo strip (px each side)."""
+        self.promo_strip_pad_x = max(0, min(40, int(pad_px)))
+
+    def set_promo_strip_pad_top(self, pad_px: int):
+        """Top padding above SeedVR / RIFE promo strip (px)."""
+        self.promo_strip_pad_top = max(0, min(40, int(pad_px)))
         
 
     def open_autotag_settings_window(self):
@@ -348,6 +356,18 @@ class VtpPreferencesMixin:
                     )
                 except (TypeError, ValueError):
                     self.wide_folder_strip_end_pad_px = 40
+                try:
+                    self.promo_strip_pad_x = max(
+                        0, min(40, int(settings.get("promo_strip_pad_x", 4)))
+                    )
+                except (TypeError, ValueError):
+                    self.promo_strip_pad_x = 4
+                try:
+                    self.promo_strip_pad_top = max(
+                        0, min(40, int(settings.get("promo_strip_pad_top", 4)))
+                    )
+                except (TypeError, ValueError):
+                    self.promo_strip_pad_top = 4
                 try:
                     self.wide_folder_tile_inset_px = max(
                         0, min(24, int(settings.get("wide_folder_tile_inset_px", 8)))

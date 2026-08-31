@@ -26,6 +26,7 @@ from birefnet_config import (
     weights_status,
 )
 from birefnet_weights_setup import download_recommended_weights
+from promo_banner import PROMO_STRIP_DIALOG_W, attach_promo_strip, sync_promo_strip
 from seedvr2_config import list_cuda_gpus
 
 _STATUS_BG = ("gray85", "#0c0c0c")
@@ -35,6 +36,8 @@ _SECTION_TITLE = "#8ab4c8"
 _ROW_PY = 8
 _SECTION_GAP = 16
 _INNER_PAD = 12
+_DIALOG_W = PROMO_STRIP_DIALOG_W
+_DIALOG_H = 680
 _MORPH_OPTIONS: tuple[tuple[str, int], ...] = (
     ("None", 0),
     ("Erode 1px", -1),
@@ -98,8 +101,8 @@ class BirefnetOptionsDialog(ctk.CTkToplevel):
         self._install_thread: threading.Thread | None = None
         self._advanced_open = False
 
-        self.geometry("480x600")
-        self.minsize(460, 480)
+        self.geometry(f"{_DIALOG_W}x{_DIALOG_H}")
+        self.minsize(_DIALOG_W, 520)
         self.resizable(False, True)
         self.transient(parent)
         self.grab_set()
@@ -115,8 +118,15 @@ class BirefnetOptionsDialog(ctk.CTkToplevel):
         self.suffix_var = ctk.StringVar(value=saved_suffix)
         self.status_var = ctk.StringVar(value="Checking…")
 
+        attach_promo_strip(
+            self,
+            "strip_backgr.png",
+            dialog_width=_DIALOG_W,
+            controller=self.controller,
+        )
+
         header = ctk.CTkFrame(self, fg_color="transparent")
-        header.pack(fill="x", padx=16, pady=(14, 10))
+        header.pack(fill="x", padx=16, pady=(10, 10))
         ctk.CTkLabel(
             header,
             text="BiRefNet — remove background",
@@ -504,6 +514,8 @@ class BirefnetOptionsDialog(ctk.CTkToplevel):
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
         self.lift()
         self.focus_force()
+        self.after_idle(lambda: sync_promo_strip(self))
+        self.after(80, lambda: sync_promo_strip(self))
 
     def _set_form_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
