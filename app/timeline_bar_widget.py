@@ -542,7 +542,12 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.timeline_vertical_scroll_slack_ratio = 0.40
         self.zoom_factor = 1.0
         self.min_zoom = 0.2
+        # Floor for short clips; longer videos raise max via _effective_max_zoom().
         self.max_zoom = 5.0
+        # At max zoom, aim for at least this many px per second so ~1s loops stay
+        # editable (edge hit margin is 16px; need room for edges + center move).
+        self._zoom_target_px_per_sec = 100.0
+        self._zoom_hard_cap = 2000.0
         self.pan_offset = 0.0
         self._pan_start_x = None
         self._pan_start_offset = 0.0
@@ -1311,22 +1316,23 @@ class TimelineBarWidget(ctk.CTkFrame):
 
     def seek_and_play(self, timestamp):
             """Seeks to timestamp. Opens player if it's closed."""
-            active_player = getattr(self.controller, "current_video_window", None)
-            
-            if not active_player:
-                # 🟢 Přehrávač neběží -> Spustíme ho
-                video_name = os.path.basename(self.video_path)
-                self.controller.open_video_player(self.video_path, video_name)
-                
-                # Musíme chvilku počkat, než se okno zinicializuje, pak seekneme
-                # 300ms by mělo stačit pro vytvoření instance přehrávače
-                self.after(300, lambda: self._delayed_seek(timestamp))
-            else:
-                # Přehrávač běží -> Jen seekneme a hrajeme
-                if self.on_seek:
+            def _go(player):
+                if hasattr(player, "seek_to_time"):
+                    try:
+                        player.seek_to_time(timestamp)
+                    except Exception:
+                        if self.on_seek:
+                            self.on_seek(timestamp)
+                elif self.on_seek:
                     self.on_seek(timestamp)
-                if hasattr(active_player, 'play_video'):
-                    active_player.play_video()
+                if hasattr(player, "play_video"):
+                    try:
+                        player.play_video()
+                    except Exception:
+                        pass
+                self.set_current_time(timestamp)
+
+            self._ensure_player_then(_go)
 
     def play_video(self):
         """Otevře/přehraje aktuální video timeline widgetu od začátku.
@@ -1334,22 +1340,97 @@ class TimelineBarWidget(ctk.CTkFrame):
         Použito z RMB menu jako prosté 'Play' – uživatel může přehrát video,
         které má ve widgetu, i když mezitím browsoval v jiných složkách.
         """
-        active_player = getattr(self.controller, "current_video_window", None)
-        if not active_player:
-            if self.video_path and os.path.isfile(self.video_path):
-                self.controller.open_video_player(
-                    self.video_path, os.path.basename(self.video_path)
-                )
-        elif hasattr(active_player, "play_video"):
-            active_player.play_video()
+        def _go(player):
+            if hasattr(player, "play_video"):
+                try:
+                    player.play_video()
+                except Exception:
+                    pass
+
+        self._ensure_player_then(_go)
+
+    def _get_live_player(self):
+        return getattr(self.controller, "current_video_window", None) or getattr(
+            self.controller, "active_player", None
+        )
+
+    def _ensure_player_then(self, callback, *, retries=30, delay_ms=80, require_vlc=True):
+        """Open the main player for this timeline video if needed, then run callback(player).
+
+        Playback actions (Play Active Loop, seek+play, …) must not silently no-op when
+        the player window is closed — open it and wait until VLC is ready.
+        """
+        if not callable(callback):
+            return
+
+        def _invoke(player):
+            try:
+                callback(player)
+            except Exception as e:
+                logging.warning("[Timeline] player action failed: %s", e)
+
+        def _ready(player):
+            if player is None:
+                return False
+            if not require_vlc:
+                return True
+            return getattr(player, "player", None) is not None
+
+        existing = self._get_live_player()
+        if _ready(existing):
+            _invoke(existing)
+            return
+
+        if not self.video_path or not os.path.isfile(self.video_path):
+            logging.warning("[Timeline] Cannot open player: no video path")
+            return
+
+        open_fn = getattr(self.controller, "open_video_player", None)
+        if existing is None:
+            if not callable(open_fn):
+                logging.warning("[Timeline] controller has no open_video_player")
+                return
+            open_fn(self.video_path, os.path.basename(self.video_path))
+
+        def _wait(remaining):
+            player = self._get_live_player()
+            if player is not None and not _ready(player):
+                # Lazy-init VLC (same path as normal play).
+                if hasattr(player, "play_video"):
+                    try:
+                        player.play_video()
+                    except Exception:
+                        pass
+            if _ready(player):
+                _invoke(player)
+                return
+            if remaining <= 0:
+                logging.warning("[Timeline] Timed out waiting for player window")
+                if player is not None:
+                    _invoke(player)  # best-effort even without VLC yet
+                return
+            self.after(delay_ms, lambda: _wait(remaining - 1))
+
+        self.after(delay_ms, lambda: _wait(retries))
 
     def _delayed_seek(self, timestamp):
         """Helper for seek after player opens."""
-        if self.on_seek:
-            self.on_seek(timestamp)
-        active_player = getattr(self.controller, "current_video_window", None)
-        if active_player and hasattr(active_player, 'play_video'):
-            active_player.play_video()
+        def _go(player):
+            if hasattr(player, "seek_to_time"):
+                try:
+                    player.seek_to_time(timestamp)
+                except Exception:
+                    if self.on_seek:
+                        self.on_seek(timestamp)
+            elif self.on_seek:
+                self.on_seek(timestamp)
+            if hasattr(player, "play_video"):
+                try:
+                    player.play_video()
+                except Exception:
+                    pass
+
+        self._ensure_player_then(_go)
 
     def get_closest_marker(self, timestamp, threshold=2.0):
         if not hasattr(self, "markers") or not self.markers:
@@ -1475,6 +1556,31 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.canvas_frame.bind("<Button-4>", self._on_timeline_mousewheel, add="+")
         self.canvas_frame.bind("<Button-5>", self._on_timeline_mousewheel, add="+")
 
+        # Full-video overview strip (minimap): where am I when zoomed in.
+        self._overview_height = 16
+        self._overview_drag = None  # None | "viewport" | "jump"
+        self._overview_drag_origin_x = 0.0
+        self._overview_drag_origin_left = 0.0
+        self.overview_frame = tk.Frame(self, bg="#1a1a1a", height=self._overview_height + 4)
+        self.overview_frame.grid(row=2, column=0, columnspan=5, sticky="ew", padx=4, pady=(0, 1))
+        self.overview_frame.grid_propagate(False)
+        self.overview_canvas = tk.Canvas(
+            self.overview_frame,
+            height=self._overview_height,
+            bg="#2a2a2a",
+            highlightthickness=0,
+            cursor="sb_h_double_arrow",
+        )
+        self.overview_canvas.pack(fill="x", expand=True, padx=2, pady=2)
+        self.overview_canvas.bind("<Configure>", lambda e: self._redraw_overview())
+        self.overview_canvas.bind("<Button-1>", self._on_overview_press)
+        self.overview_canvas.bind("<B1-Motion>", self._on_overview_drag)
+        self.overview_canvas.bind("<ButtonRelease-1>", self._on_overview_release)
+        Tooltip(
+            self.overview_canvas,
+            "Overview: drag the window to pan, click elsewhere to jump",
+        )
+
         # Define button styling.
         btn_style = {
             "font": ("Segoe UI", 9),
@@ -1499,7 +1605,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         # Create and pack control buttons (row=2).
         # Loop/Cut group order: toggle | skip prev/next | add/remove segment | { } (edit active bounds only).
         self.loop_controls_frame = tk.Frame(self, bg="#333333")
-        self.loop_controls_frame.grid(row=2, column=0, pady=(1, 1), padx=(4, 6), sticky="w")
+        self.loop_controls_frame.grid(row=3, column=0, pady=(1, 1), padx=(4, 6), sticky="w")
 
         loop_btn_style = {k: v for k, v in btn_style.items() if k != "width"}
         loop_btn_style["padx"] = 8
@@ -1552,7 +1658,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.grid_columnconfigure(2, weight=0)
 
         self.right_controls_frame = tk.Frame(self, bg="#333333")
-        self.right_controls_frame.grid(row=2, column=2, pady=(1, 1), padx=(2, 4), sticky="e")
+        self.right_controls_frame.grid(row=3, column=2, pady=(1, 1), padx=(2, 4), sticky="e")
         self.right_controls_frame.pack_propagate(True)
 
         # Do not use btn_style width=14 here — it forces a very wide Snap button and a fake gap before Magnet.
@@ -1582,7 +1688,8 @@ class TimelineBarWidget(ctk.CTkFrame):
 
         self.grid_rowconfigure(0, weight=0)     # Toolbar nahoře se NESMÍ natahovat
         self.grid_rowconfigure(1, weight=1)     # Canvas (timeline) uprostřed se MUSÍ natahovat
-        self.grid_rowconfigure(2, weight=0)     # Tlačítka dole se NESMÍ natahovat
+        self.grid_rowconfigure(2, weight=0)     # Overview minimap
+        self.grid_rowconfigure(3, weight=0)     # Tlačítka dole se NESMÍ natahovat
 
         options_btn_style = dict(btn_style)
         options_btn_style["width"] = 4
@@ -1612,11 +1719,146 @@ class TimelineBarWidget(ctk.CTkFrame):
             
             
     def _zoom_percent_text(self):
-            return f"Zoom: {int(round(self.zoom_factor * 100))}%"
+        z = int(round(float(self.zoom_factor) * 100))
+        if float(self.zoom_factor) <= 1.05:
+            return f"Zoom: {z}%"
+        left, right = self._visible_rel_range()
+        duration = float(self._get_current_duration() or 0.0)
+        if duration <= 0:
+            return f"Zoom: {z}%"
+        t0 = self.format_time(left * duration).split(".")[0]
+        t1 = self.format_time(right * duration).split(".")[0]
+        return f"Zoom: {z}%  |  View {t0} – {t1}"
 
     def _update_zoom_label(self):
             if hasattr(self, "zoom_label"):
                 self.zoom_label.configure(text=self._zoom_percent_text())
+
+    def _visible_rel_range(self):
+        """Return (left, right) fraction of the full video currently visible."""
+        z = max(1e-6, float(self.zoom_factor))
+        pan = float(self.pan_offset)
+        left = 0.5 + (-0.5 - pan) / z
+        right = 0.5 + (0.5 - pan) / z
+        # Numerical clamp; width stays ~1/z
+        if left < 0.0:
+            right -= left
+            left = 0.0
+        if right > 1.0:
+            left -= right - 1.0
+            right = 1.0
+        left = max(0.0, min(1.0, left))
+        right = max(left, min(1.0, right))
+        return left, right
+
+    def _set_pan_from_visible_left(self, left_rel):
+        """Pan so the visible window starts at left_rel (0..1)."""
+        z = max(1e-6, float(self.zoom_factor))
+        span = 1.0 / z
+        left = max(0.0, min(max(0.0, 1.0 - span), float(left_rel)))
+        # pan = 0.5*(zoom-1) - left*zoom
+        self.pan_offset = 0.5 * (z - 1.0) - left * z
+        if z > 1.0:
+            lim = 0.5 * (z - 1.0)
+            self.pan_offset = max(-lim, min(lim, self.pan_offset))
+        else:
+            self.pan_offset = 0.0
+
+    def _overview_margins(self):
+        w = max(1, int(self.overview_canvas.winfo_width()))
+        pad = 3
+        return pad, w - pad, w
+
+    def _redraw_overview(self):
+        if not hasattr(self, "overview_canvas"):
+            return
+        c = self.overview_canvas
+        try:
+            if not c.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        c.delete("all")
+        x0, x1, w = self._overview_margins()
+        h = max(8, int(c.winfo_height()))
+        track_w = max(1.0, float(x1 - x0))
+
+        # Full-video track
+        c.create_rectangle(x0, 2, x1, h - 2, fill="#3a3a3a", outline="#555555", width=1, tags="ov_track")
+
+        duration = float(self._get_current_duration() or 0.0)
+
+        # Segment marks (full-video context)
+        for i, seg in enumerate(getattr(self, "segments", []) or []):
+            s = seg.get("start")
+            e = seg.get("end")
+            if s is None or e is None or duration <= 0:
+                continue
+            sx = x0 + (float(s) / duration) * track_w
+            ex = x0 + (float(e) / duration) * track_w
+            active = i == getattr(self, "active_segment_index", None)
+            fill = "#00bfff" if active else "#666688"
+            c.create_rectangle(sx, 4, max(sx + 1, ex), h - 4, fill=fill, outline="", tags="ov_seg")
+
+        # Visible viewport window
+        left, right = self._visible_rel_range()
+        vx0 = x0 + left * track_w
+        vx1 = x0 + right * track_w
+        # Keep a usable grab width even at extreme zoom
+        if vx1 - vx0 < 6:
+            mid = 0.5 * (vx0 + vx1)
+            vx0, vx1 = mid - 3, mid + 3
+        c.create_rectangle(
+            vx0, 1, vx1, h - 1,
+            fill="#5a8cff",
+            outline="#9ec1ff",
+            width=1,
+            stipple="gray50",
+            tags="ov_viewport",
+        )
+        # Solid border so the window stays readable over stipple
+        c.create_rectangle(vx0, 1, vx1, h - 1, fill="", outline="#cfe0ff", width=1, tags="ov_viewport")
+
+        # Playhead
+        if duration > 0:
+            t = max(0.0, min(duration, float(getattr(self, "current_time", 0.0) or 0.0)))
+            px = x0 + (t / duration) * track_w
+            c.create_line(px, 0, px, h, fill="#27C5F5", width=2, tags="ov_playhead")
+
+    def _on_overview_press(self, event):
+        if float(self.zoom_factor) <= 1.0:
+            # At 1x the whole bar is the view — click seeks via main timeline instead.
+            return
+        x0, x1, _w = self._overview_margins()
+        track_w = max(1.0, float(x1 - x0))
+        rel = max(0.0, min(1.0, (event.x - x0) / track_w))
+        left, right = self._visible_rel_range()
+        if left <= rel <= right:
+            self._overview_drag = "viewport"
+            self._overview_drag_origin_x = float(event.x)
+            self._overview_drag_origin_left = left
+        else:
+            # Jump: center the viewport on click
+            span = right - left
+            self._set_pan_from_visible_left(rel - span * 0.5)
+            self._overview_drag = "viewport"
+            self._overview_drag_origin_x = float(event.x)
+            self._overview_drag_origin_left, _ = self._visible_rel_range()
+            self._update_zoom_label()
+            self.redraw_timeline()
+
+    def _on_overview_drag(self, event):
+        if self._overview_drag != "viewport":
+            return
+        x0, x1, _w = self._overview_margins()
+        track_w = max(1.0, float(x1 - x0))
+        d_rel = (float(event.x) - self._overview_drag_origin_x) / track_w
+        self._set_pan_from_visible_left(self._overview_drag_origin_left + d_rel)
+        self._update_zoom_label()
+        self.redraw_timeline()
+
+    def _on_overview_release(self, event):
+        self._overview_drag = None
 
     def update_info_toolbar(self):
             """
@@ -1847,9 +2089,17 @@ class TimelineBarWidget(ctk.CTkFrame):
 
     def on_pan_drag(self, event):
         dx = self._canvas_pointer_x(event) - self._pan_start_x
-        rel_dx = dx / self.canvas.winfo_width()
-        self.pan_offset = self._pan_start_offset + rel_dx / self.zoom_factor
-        self.pan_offset = max(-0.5 * (self.zoom_factor - 1), min(0.5 * (self.zoom_factor - 1), self.pan_offset))
+        x0, x1 = self.get_timeline_bounds()
+        span = max(1.0, float(x1) - float(x0))
+        # pan_offset is applied in post-zoom screen space (see time_to_x),
+        # so mouse delta must map 1:1 — do NOT divide by zoom_factor.
+        self.pan_offset = self._pan_start_offset + (dx / span)
+        if self.zoom_factor > 1.0:
+            lim = 0.5 * (self.zoom_factor - 1.0)
+            self.pan_offset = max(-lim, min(lim, self.pan_offset))
+        else:
+            self.pan_offset = 0.0
+        self._update_zoom_label()
         self.redraw_timeline()
 
     def on_pan_end(self, event):
@@ -2772,6 +3022,9 @@ class TimelineBarWidget(ctk.CTkFrame):
             self.clear_selection()        # ...pak clear_selection() dotáže duration správného videa
             self.load_segments_for_path(self.video_path)
             video_changed = True
+            # Duration (and thus adaptive max zoom) changed — keep factor in range.
+            self._clamp_zoom_factor()
+            self._update_zoom_label()
         elif video_path is not None:
             self.video_path = video_path
             self.load_segments_for_path(self.video_path)
@@ -2898,12 +3151,64 @@ class TimelineBarWidget(ctk.CTkFrame):
 
 
     
+    def _timeline_width_for_zoom(self):
+        """Usable timeline pixel width for adaptive zoom limits."""
+        try:
+            x0, x1 = self.get_timeline_bounds()
+            w = float(x1) - float(x0)
+            if w > 1:
+                return w
+        except Exception:
+            pass
+        try:
+            w = float(self.canvas.winfo_width())
+            if w > 1:
+                return w
+        except Exception:
+            pass
+        return 800.0
+
+    def _effective_max_zoom(self):
+        """
+        Adaptive max zoom so short loops stay editable on long videos.
+
+        Fixed max_zoom=5 leaves only duration/5 visible; on a 4000s clip a 1s
+        loop is ~1px and cannot be grabbed. Scale max zoom so ~1s spans
+        ``_zoom_target_px_per_sec`` pixels (clamped to a hard cap).
+        """
+        base = float(getattr(self, "max_zoom", 5.0) or 5.0)
+        duration = float(self._get_current_duration() or 0.0)
+        if duration <= 0:
+            return base
+        width = self._timeline_width_for_zoom()
+        target_pps = float(getattr(self, "_zoom_target_px_per_sec", 100.0) or 100.0)
+        hard_cap = float(getattr(self, "_zoom_hard_cap", 2000.0) or 2000.0)
+        adaptive = (target_pps * duration) / max(1.0, width)
+        return max(base, min(adaptive, hard_cap))
+
+    def _clamp_zoom_factor(self):
+        max_z = self._effective_max_zoom()
+        min_z = float(getattr(self, "min_zoom", 0.2) or 0.2)
+        self.zoom_factor = max(min_z, min(float(self.zoom_factor), max_z))
+        # Keep pan valid after a max-zoom change (e.g. shorter video loaded).
+        if self.zoom_factor > 1.0:
+            lim = 0.5 * (self.zoom_factor - 1.0)
+            self.pan_offset = max(-lim, min(lim, float(self.pan_offset)))
+        else:
+            self.pan_offset = 0.0
+
     def _apply_zoom_step(self, direction):
+        max_z = self._effective_max_zoom()
         if direction > 0:
-            self.zoom_factor = min(self.zoom_factor * 1.2, self.max_zoom)
+            self.zoom_factor = min(self.zoom_factor * 1.2, max_z)
         else:
             self.zoom_factor = max(self.zoom_factor / 1.2, self.min_zoom)
-        logging.info(f"[DEBUG] Zoom changed to {self.zoom_factor:.2f}")
+        logging.info(
+            "[DEBUG] Zoom changed to %.2f (max=%.2f, duration=%.1fs)",
+            self.zoom_factor,
+            max_z,
+            float(self._get_current_duration() or 0.0),
+        )
         self._update_zoom_label()
         self.redraw_timeline()
 
@@ -2918,6 +3223,7 @@ class TimelineBarWidget(ctk.CTkFrame):
 
     def reset_zoom(self):
         self.zoom_factor = 1.0
+        self.pan_offset = 0.0
         self._update_zoom_label()
         self.redraw_timeline()
 
@@ -3515,21 +3821,8 @@ class TimelineBarWidget(ctk.CTkFrame):
         seg_hit = self._get_segment_hover_at(cx, cy)
         if seg_hit is None:
             # UX fallback: double-click outside segments seeks and starts playback.
-            self.on_timeline_click(event)
-            active_player = getattr(self.controller, "current_video_window", None) or getattr(self.controller, "active_player", None)
-            if active_player is not None:
-                if hasattr(active_player, "play_video"):
-                    try:
-                        active_player.play_video()
-                    except Exception:
-                        pass
-                elif hasattr(active_player, "toggle_play"):
-                    is_playing = bool(getattr(active_player, "is_playing", False))
-                    if not is_playing:
-                        try:
-                            active_player.toggle_play()
-                        except Exception:
-                            pass
+            clicked_time = self.get_time_at_x(cx)
+            self.seek_and_play(clicked_time)
             return "break"
 
         idx = int(seg_hit["index"])
@@ -3553,49 +3846,77 @@ class TimelineBarWidget(ctk.CTkFrame):
 
         self.loop_drag = None
         self.canvas.config(cursor="")
-        active_player = getattr(self.controller, "current_video_window", None) or getattr(self.controller, "active_player", None)
-        if active_player is not None:
-            try:
-                active_player.loop_active = True
-                if hasattr(active_player, "set_loop_start_from_timeline"):
-                    active_player.set_loop_start_from_timeline(start)
-                else:
-                    active_player.loop_start = start
-                if hasattr(active_player, "set_loop_end_from_timeline"):
-                    active_player.set_loop_end_from_timeline(end)
-                else:
-                    active_player.loop_end = end
-            except Exception:
-                active_player.loop_start = start
-                active_player.loop_end = end
-                active_player.loop_active = True
-
-        if self.on_seek:
-            self.on_seek(start)
-        elif active_player and hasattr(active_player, "seek"):
-            try:
-                active_player.seek(start)
-            except Exception:
-                pass
-
-        if active_player is not None:
-            if hasattr(active_player, "play_video"):
-                try:
-                    active_player.play_video()
-                except Exception:
-                    pass
-            elif hasattr(active_player, "toggle_play"):
-                is_playing = bool(getattr(active_player, "is_playing", False))
-                if not is_playing:
-                    try:
-                        active_player.toggle_play()
-                    except Exception:
-                        pass
-
+        # Show selection immediately even while player is opening.
         if hasattr(self, "loop_button"):
             self._apply_loop_button_style()
         self.redraw_timeline()
-        self._log_segments_state(f"activate_preview idx={idx} start={start:.3f} end={end:.3f}")
+
+        def _apply(player):
+            try:
+                player.loop_active = True
+                # Direct assign first — set_loop_*_from_timeline needs VLC length and
+                # can fail briefly on a freshly opened player.
+                player.loop_start = start
+                player.loop_end = end
+                if hasattr(player, "set_loop_start_from_timeline") and getattr(player, "player", None):
+                    try:
+                        player.set_loop_start_from_timeline(start)
+                        player.set_loop_end_from_timeline(end)
+                        player.loop_active = True
+                    except Exception:
+                        player.loop_start = start
+                        player.loop_end = end
+                        player.loop_active = True
+            except Exception:
+                try:
+                    player.loop_start = start
+                    player.loop_end = end
+                    player.loop_active = True
+                except Exception:
+                    pass
+
+            seeked = False
+            if hasattr(player, "seek_to_time"):
+                try:
+                    player.seek_to_time(start)
+                    seeked = True
+                except Exception:
+                    pass
+            if not seeked and self.on_seek:
+                try:
+                    self.on_seek(start)
+                    seeked = True
+                except Exception:
+                    pass
+
+            if hasattr(player, "play_video"):
+                try:
+                    player.play_video()
+                except Exception:
+                    pass
+            elif hasattr(player, "toggle_play"):
+                is_playing = bool(getattr(player, "is_playing", False))
+                if not is_playing:
+                    try:
+                        player.toggle_play()
+                    except Exception:
+                        pass
+
+            if hasattr(player, "update_loop_bar_display"):
+                try:
+                    player.update_loop_bar_display()
+                except Exception:
+                    pass
+
+            self.set_current_time(start)
+            if hasattr(self, "loop_button"):
+                self._apply_loop_button_style()
+            self.redraw_timeline()
+            self._log_segments_state(
+                f"activate_preview idx={idx} start={start:.3f} end={end:.3f}"
+            )
+
+        self._ensure_player_then(_apply)
 
     def _sync_active_segment_to_player(self):
         """Synchronize current active segment bounds into player loop visuals."""
@@ -4004,6 +4325,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.canvas.configure(scrollregion=(0, 0, vw, self._timeline_scrollregion_height()))
         self.after_idle(self._update_timeline_vscrollbar_visibility)
 
+        self._redraw_overview()
         self.update_info_toolbar()
 
     def redraw_timelineOld(self, only_thumbs=False):
@@ -4624,6 +4946,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         else:
             # Pokud kurzor vůbec neexistuje (např. úplně první spuštění), překreslíme
             self.redraw_timeline()
+        self._redraw_overview()
         self.update_info_toolbar()
 
 
