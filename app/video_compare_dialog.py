@@ -24,6 +24,7 @@ from tkinter import messagebox
 from PIL import Image as PILImage
 from PIL import ImageTk
 
+from opencv_video_clip import OpenCvClip
 from utils import get_video_size
 from vtp_constants import VIDEO_FORMATS
 
@@ -110,164 +111,8 @@ def _meta_line(path: str, *, width: int = 0, height: int = 0) -> str:
     return f"{name}  ·  {dims}  ·  {size}  ·  {ext}"
 
 
-class _OpenCvClip:
-    """Silent OpenCV reader with reliable ratio seek (no audio)."""
-
-    def __init__(self, path: str):
-        """Initializes the clip, sets up defaults, and opens the video file."""
-        self.path = os.path.normpath(path)
-        self.cap: Optional[cv2.VideoCapture] = None
-        self.fps = 25.0
-        self.frame_count = 0
-        self.duration = 0.0
-        self.width = 0
-        self.height = 0
-        self.frame_idx = 0
-        self.frame_bgr: Optional[np.ndarray] = None
-        self._open(self.path)
-
-    def _open(self, path: str) -> bool:
-        """
-        Opens the video file and initializes properties.
-        Attempts to use hardware acceleration to offload the CPU during decoding.
-        """
-        self.close()
-        self.path = os.path.normpath(path)
-
-        # Define parameters to request hardware acceleration
-        params = [
-            cv2.CAP_PROP_HW_ACCELERATION, 
-            cv2.VIDEO_ACCELERATION_ANY
-        ]
-
-        # Try to open the video with hardware acceleration enabled
-        cap = cv2.VideoCapture(self.path, cv2.CAP_FFMPEG, params)
-
-        # Fallback to default CPU decoding if HW acceleration is not supported
-        if not cap.isOpened():
-            cap = cv2.VideoCapture(self.path)
-
-        if not cap.isOpened():
-            self.cap = None
-            logging.error("[VideoCompare] OpenCV failed to open %s", self.path)
-            return False
-
-        self.cap = cap
-        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
-        self.fps = fps if fps > 1e-3 else 25.0
-        self.frame_count = max(0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0))
-        self.width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-        self.height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-
-        if self.frame_count > 0:
-            self.duration = self.frame_count / self.fps
-        else:
-            self.duration = 0.0
-
-        self.frame_idx = 0
-        self.frame_bgr = None
-        
-        # Read the first frame to initialize
-        self.read_at_index(0)
-        return True
-
-    def close(self) -> None:
-        """Releases the OpenCV VideoCapture object and clears the frame buffer."""
-        if self.cap is not None:
-            try:
-                self.cap.release()
-            except Exception:
-                pass
-        self.cap = None
-        self.frame_bgr = None
-
-    def reopen(self, path: str) -> bool:
-        """Closes the current clip and attempts to open a new path."""
-        return self._open(path)
-
-    @property
-    def ratio(self) -> float:
-        """Calculates the playback progress as a float between 0.0 and 1.0."""
-        if self.frame_count <= 1:
-            return 0.0
-        return max(0.0, min(1.0, self.frame_idx / float(self.frame_count - 1)))
-
-    @property
-    def time_s(self) -> float:
-        """Returns the timeline time in seconds based on frame index and source fps."""
-        if self.fps > 1e-6:
-            return self.frame_idx / self.fps
-        if self.duration > 0 and self.frame_count > 1:
-            return self.ratio * self.duration
-        return 0.0
-
-    def read_at_index(self, idx: int) -> bool:
-        """Decodes and retrieves a specific frame by its index."""
-        if self.cap is None:
-            return False
-        n = max(1, self.frame_count)
-        idx = int(max(0, min(n - 1, idx)))
-        try:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, float(idx))
-            ok, frame = self.cap.read()
-        except Exception:
-            logging.debug("[VideoCompare] read_at_index failed", exc_info=True)
-            return False
-        if not ok or frame is None:
-            return False
-        self.frame_bgr = frame
-        self.frame_idx = idx
-        if self.width <= 0 or self.height <= 0:
-            self.height, self.width = frame.shape[:2]
-        return True
-
-    def seek_ratio(self, ratio: float) -> bool:
-        """Seeks to a specific playback percentage (0.0 to 1.0)."""
-        ratio = max(0.0, min(1.0, float(ratio)))
-        if self.frame_count <= 1:
-            return self.read_at_index(0)
-        idx = int(round(ratio * (self.frame_count - 1)))
-        return self.seek_index(idx)
-
-    def seek_index(self, idx: int) -> bool:
-        """Prefer sequential reads when scrubbing/playing forward (fast on H.264)."""
-        if self.cap is None:
-            return False
-        n = max(1, self.frame_count)
-        idx = int(max(0, min(n - 1, idx)))
-        if idx == self.frame_idx and self.frame_bgr is not None:
-            return True
-        # Small forward steps: decode sequentially (avoids expensive keyframe seeks).
-        if idx > self.frame_idx and (idx - self.frame_idx) <= 45:
-            while self.frame_idx < idx:
-                if not self.advance_one():
-                    return self.read_at_index(idx)
-            return True
-        return self.read_at_index(idx)
-
-    def seek_time(self, seconds: float) -> bool:
-        """Seeks to a specific time in seconds."""
-        if self.fps > 1e-6:
-            return self.seek_index(int(round(float(seconds) * self.fps)))
-        if self.duration > 0:
-            return self.seek_ratio(float(seconds) / self.duration)
-        return False
-
-    def advance_one(self) -> bool:
-        """Decodes the immediately following frame (useful for normal playback speed)."""
-        if self.cap is None:
-            return False
-        if self.frame_count > 0 and self.frame_idx >= self.frame_count - 1:
-            return False
-        try:
-            ok, frame = self.cap.read()
-        except Exception:
-            return False
-        if not ok or frame is None:
-            return False
-        self.frame_bgr = frame
-        self.frame_idx = min(self.frame_idx + 1, max(0, self.frame_count - 1))
-        return True
+# Back-compat alias for any external imports of the private name.
+_OpenCvClip = OpenCvClip
 
 
 def _viewport_size(
@@ -641,8 +486,8 @@ class VideoCompareDialog(ctk.CTkToplevel):
         if self._closing:
             return
         try:
-            self._ref_clip = _OpenCvClip(self._left_path())
-            self._target_clip = _OpenCvClip(self._right_path())
+            self._ref_clip = _OpenCvClip(self._left_path(), log_tag="VideoCompare")
+            self._target_clip = _OpenCvClip(self._right_path(), log_tag="VideoCompare")
         except Exception:
             logging.exception("[VideoCompare] Failed to open clips")
             messagebox.showerror(

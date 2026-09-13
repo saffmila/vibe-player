@@ -100,8 +100,16 @@ class CropOverlayHUD(ctk.CTkFrame):
         on_apply_overwrite: Callable[[], None],
         on_apply_copy: Callable[[], None],
         on_apply_clipboard: Callable[[], None],
+        enable_rotate: bool = True,
+        show_apply_menu: bool = True,
+        apply_items: Optional[list[tuple[str, Callable[[], None]]]] = None,
+        primary_apply_label: str = "Apply",
+        compact: bool = False,
     ):
-        super().__init__(master, fg_color=_HUD_BG, corner_radius=0, height=52)
+        bar_h = 40 if compact else 52
+        pad_x = 8 if compact else 12
+        pad_y = 4 if compact else 8
+        super().__init__(master, fg_color=_HUD_BG, corner_radius=0, height=bar_h)
         self._on_mode_change = on_mode_change
         self._on_size_change = on_size_change
         self._on_aspect_change = on_aspect_change
@@ -113,18 +121,27 @@ class CropOverlayHUD(ctk.CTkFrame):
         self._on_apply_overwrite = on_apply_overwrite
         self._on_apply_copy = on_apply_copy
         self._on_apply_clipboard = on_apply_clipboard
+        self._enable_rotate = bool(enable_rotate)
+        self._show_apply_menu = bool(show_apply_menu)
+        self._apply_items = apply_items
         self._syncing = False
 
-        inner = ctk.CTkFrame(self, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=12, pady=8)
+        # Keep requested height (video dock / place overlay).
+        try:
+            self.pack_propagate(False)
+        except Exception:
+            pass
 
-        # Three zones: geometry | mode+angle (centered) | actions
+        inner = ctk.CTkFrame(self, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=pad_x, pady=pad_y)
+
+        # Three zones: geometry | mode+angle / custom center | actions
         left_bar = ctk.CTkFrame(inner, fg_color="transparent")
         right_bar = ctk.CTkFrame(inner, fg_color="transparent")
-        center_bar = ctk.CTkFrame(inner, fg_color="transparent")
+        self.center_bar = ctk.CTkFrame(inner, fg_color="transparent")
         left_bar.pack(side="left")
         right_bar.pack(side="right")
-        center_bar.pack(side="left", expand=True, fill="x", padx=12)
+        self.center_bar.pack(side="left", expand=True, fill="both", padx=(10, 10))
 
         # --- Left: size / aspect ---
         ctk.CTkLabel(left_bar, text="W", text_color="#cccccc", font=ctk.CTkFont(size=12)).pack(
@@ -199,90 +216,93 @@ class CropOverlayHUD(ctk.CTkFrame):
         )
         self.swap_btn.pack(side="left")
 
-        # --- Center: mode + angle (cluster centered in remaining space) ---
-        center_inner = ctk.CTkFrame(center_bar, fg_color="transparent")
-        center_inner.pack(anchor="center")
-
-        ctk.CTkLabel(
-            center_inner, text="Mode", text_color="#aaaaaa", font=ctk.CTkFont(size=12)
-        ).pack(side="left", padx=(0, 6))
-
-        self.mode_seg = ctk.CTkSegmentedButton(
-            center_inner,
-            values=["Crop", "Rotate"],
-            command=self._mode_chosen,
-            height=_CTRL_H,
-            font=ctk.CTkFont(size=12),
-            selected_color=_BTN_PRIMARY,
-            selected_hover_color=_BTN_PRIMARY_HOVER,
-            unselected_color=_BTN_FG,
-            unselected_hover_color=_BTN_HOVER,
-        )
-        self.mode_seg.set("Crop")
-        self.mode_seg.pack(side="left", padx=(0, 10))
-
-        ctk.CTkFrame(center_inner, width=1, height=22, fg_color="#555555").pack(
-            side="left", padx=(0, 10)
-        )
-
-        self.rot_left_btn = ctk.CTkButton(
-            center_inner,
-            text="↶ 90°",
-            command=lambda: self._on_rotate_90(-1),
-            width=58,
-            height=_CTRL_H,
-            corner_radius=_CORNER,
-            fg_color=_BTN_FG,
-            hover_color=_BTN_HOVER,
-            font=ctk.CTkFont(size=11),
-        )
-        self.rot_left_btn.pack(side="left", padx=(0, 4))
-
-        self.rot_right_btn = ctk.CTkButton(
-            center_inner,
-            text="↷ 90°",
-            command=lambda: self._on_rotate_90(1),
-            width=58,
-            height=_CTRL_H,
-            corner_radius=_CORNER,
-            fg_color=_BTN_FG,
-            hover_color=_BTN_HOVER,
-            font=ctk.CTkFont(size=11),
-        )
-        self.rot_right_btn.pack(side="left", padx=(0, 8))
-
+        # --- Center: mode + angle (optional); otherwise left empty for host widgets ---
+        self.mode_seg = None
         self.angle_var = tk.StringVar(value="0.0")
-        self.angle_entry = ctk.CTkEntry(
-            center_inner,
-            textvariable=self.angle_var,
-            width=58,
-            height=_CTRL_H,
-            corner_radius=_CORNER,
-            fg_color=_ENTRY_FG,
-            border_width=0,
-            justify="center",
-            font=ctk.CTkFont(size=12),
-        )
-        self.angle_entry.pack(side="left", padx=(0, 2))
-        self.angle_entry.bind("<Return>", self._commit_angle)
-        self.angle_entry.bind("<FocusOut>", self._commit_angle)
+        self.angle_entry = None
+        if self._enable_rotate:
+            center_inner = ctk.CTkFrame(self.center_bar, fg_color="transparent")
+            center_inner.pack(anchor="center")
 
-        ctk.CTkLabel(
-            center_inner, text="°", text_color="#aaaaaa", font=ctk.CTkFont(size=12)
-        ).pack(side="left", padx=(0, 6))
+            ctk.CTkLabel(
+                center_inner, text="Mode", text_color="#aaaaaa", font=ctk.CTkFont(size=12)
+            ).pack(side="left", padx=(0, 6))
 
-        self.reset_angle_btn = ctk.CTkButton(
-            center_inner,
-            text="0°",
-            command=self._on_angle_reset,
-            width=36,
-            height=_CTRL_H,
-            corner_radius=_CORNER,
-            fg_color=_BTN_FG,
-            hover_color=_BTN_HOVER,
-            font=ctk.CTkFont(size=11),
-        )
-        self.reset_angle_btn.pack(side="left")
+            self.mode_seg = ctk.CTkSegmentedButton(
+                center_inner,
+                values=["Crop", "Rotate"],
+                command=self._mode_chosen,
+                height=_CTRL_H,
+                font=ctk.CTkFont(size=12),
+                selected_color=_BTN_PRIMARY,
+                selected_hover_color=_BTN_PRIMARY_HOVER,
+                unselected_color=_BTN_FG,
+                unselected_hover_color=_BTN_HOVER,
+            )
+            self.mode_seg.set("Crop")
+            self.mode_seg.pack(side="left", padx=(0, 10))
+
+            ctk.CTkFrame(center_inner, width=1, height=22, fg_color="#555555").pack(
+                side="left", padx=(0, 10)
+            )
+
+            self.rot_left_btn = ctk.CTkButton(
+                center_inner,
+                text="↶ 90°",
+                command=lambda: self._on_rotate_90(-1),
+                width=58,
+                height=_CTRL_H,
+                corner_radius=_CORNER,
+                fg_color=_BTN_FG,
+                hover_color=_BTN_HOVER,
+                font=ctk.CTkFont(size=11),
+            )
+            self.rot_left_btn.pack(side="left", padx=(0, 4))
+
+            self.rot_right_btn = ctk.CTkButton(
+                center_inner,
+                text="↷ 90°",
+                command=lambda: self._on_rotate_90(1),
+                width=58,
+                height=_CTRL_H,
+                corner_radius=_CORNER,
+                fg_color=_BTN_FG,
+                hover_color=_BTN_HOVER,
+                font=ctk.CTkFont(size=11),
+            )
+            self.rot_right_btn.pack(side="left", padx=(0, 8))
+
+            self.angle_entry = ctk.CTkEntry(
+                center_inner,
+                textvariable=self.angle_var,
+                width=58,
+                height=_CTRL_H,
+                corner_radius=_CORNER,
+                fg_color=_ENTRY_FG,
+                border_width=0,
+                justify="center",
+                font=ctk.CTkFont(size=12),
+            )
+            self.angle_entry.pack(side="left", padx=(0, 2))
+            self.angle_entry.bind("<Return>", self._commit_angle)
+            self.angle_entry.bind("<FocusOut>", self._commit_angle)
+
+            ctk.CTkLabel(
+                center_inner, text="°", text_color="#aaaaaa", font=ctk.CTkFont(size=12)
+            ).pack(side="left", padx=(0, 6))
+
+            self.reset_angle_btn = ctk.CTkButton(
+                center_inner,
+                text="0°",
+                command=self._on_angle_reset,
+                width=36,
+                height=_CTRL_H,
+                corner_radius=_CORNER,
+                fg_color=_BTN_FG,
+                hover_color=_BTN_HOVER,
+                font=ctk.CTkFont(size=11),
+            )
+            self.reset_angle_btn.pack(side="left")
 
         # --- Right: Cancel + Apply ---
         self.cancel_btn = ctk.CTkButton(
@@ -303,16 +323,16 @@ class CropOverlayHUD(ctk.CTkFrame):
 
         self.apply_btn = ctk.CTkButton(
             apply_wrap,
-            text="Apply",
+            text=primary_apply_label,
             command=lambda: self._run_apply_action(self._on_apply_overwrite),
-            width=64,
+            width=max(64, 10 * len(primary_apply_label) + 16),
             height=_CTRL_H,
             corner_radius=_CORNER,
             fg_color=_BTN_PRIMARY,
             hover_color=_BTN_PRIMARY_HOVER,
             font=ctk.CTkFont(size=12, weight="bold"),
         )
-        self.apply_btn.pack(side="left", padx=(0, 4))
+        self.apply_btn.pack(side="left", padx=(0, 4 if self._show_apply_menu else 0))
 
         self.menu_btn = ctk.CTkButton(
             apply_wrap,
@@ -325,7 +345,8 @@ class CropOverlayHUD(ctk.CTkFrame):
             hover_color=_BTN_PRIMARY_HOVER,
             font=ctk.CTkFont(size=11),
         )
-        self.menu_btn.pack(side="left")
+        if self._show_apply_menu:
+            self.menu_btn.pack(side="left")
 
         # Drop-up panel placed on the HUD (not tk.Menu / not a separate Toplevel).
         self._apply_panel = None
@@ -447,7 +468,7 @@ class CropOverlayHUD(ctk.CTkFrame):
             pass
         pop.configure(bg="#2b2b2b", highlightthickness=1, highlightbackground="#555555")
 
-        items = (
+        items = self._apply_items or (
             ("Apply (Overwrite)", self._on_apply_overwrite),
             ("Save as Copy", self._on_apply_copy),
             ("Copy to Clipboard", self._on_apply_clipboard),
@@ -522,6 +543,8 @@ class CropOverlayHUD(ctk.CTkFrame):
 
     def set_tool_mode(self, mode: str):
         """Sync segmented control without re-firing the mode callback."""
+        if self.mode_seg is None:
+            return
         label = "Rotate" if mode == _TOOL_ROTATE else "Crop"
         try:
             self.mode_seg.set(label)
@@ -612,6 +635,7 @@ class CropModeController:
             on_apply_overwrite=lambda: self.apply("overwrite"),
             on_apply_copy=lambda: self.apply("copy"),
             on_apply_clipboard=lambda: self.apply("clipboard"),
+            **getattr(v, "crop_hud_kwargs", {}),
         )
         self.hud.place(relx=0.0, rely=1.0, relwidth=1.0, anchor="sw")
         self.hud.set_size_fields(rw, rh)
@@ -652,7 +676,14 @@ class CropModeController:
                 dismiss = getattr(self.hud, "_dismiss_apply_panel", None)
                 if callable(dismiss):
                     dismiss()
-                self.hud.place_forget()
+                try:
+                    self.hud.place_forget()
+                except tk.TclError:
+                    pass
+                try:
+                    self.hud.pack_forget()
+                except tk.TclError:
+                    pass
                 self.hud.destroy()
             except tk.TclError:
                 pass
@@ -728,7 +759,8 @@ class CropModeController:
             ch = max(1, int(canvas.winfo_height()))
             rel_y = hud.winfo_rooty() - canvas.winfo_rooty()
             # HUD must sit in the lower part of the canvas; anything else is bogus layout.
-            if rel_y < ch * 0.4 or rel_y > ch:
+            # ``rel_y >= ch`` means the toolbar is at/below the canvas bottom (not overlaying).
+            if rel_y < ch * 0.4 or rel_y >= ch:
                 return None
             return float(canvas.canvasy(rel_y))
         except tk.TclError:
@@ -751,6 +783,9 @@ class CropModeController:
         """Maximum allowed crop bottom (y1) in image pixels — above HUD when present."""
         _, ih = self.v.original_image.size
         limit = float(ih)
+        # Video crop (and similar): HUD lives outside the canvas — never shrink the box.
+        if not getattr(self.v, "crop_hud_overlays_canvas", True):
+            return limit
         cy = self._hud_top_canvas_y()
         bbox = self._image_canvas_bbox()
         if cy is None or not bbox:
@@ -1568,6 +1603,22 @@ class CropModeController:
 
     def apply(self, mode: str = "overwrite"):
         """mode: 'overwrite' | 'copy' | 'clipboard'."""
+        custom = getattr(self.v, "apply_video_crop", None)
+        if callable(custom):
+            try:
+                custom(mode, self.rect)
+            except Exception as e:
+                logging.info("Video crop apply failed: %s", e, exc_info=True)
+                parent = self._dialog_parent()
+
+                def _err():
+                    messagebox.showerror(
+                        "Crop Video", f"Could not crop:\n{e}", parent=parent
+                    )
+
+                self._with_native_dialogs(_err)
+            return
+
         try:
             frames = self._cropped_frames()
         except Exception as e:

@@ -391,16 +391,32 @@ _VIDEO_ROTATE_FILTERS = {
 }
 
 
+def has_video_crop(settings) -> bool:
+    if not settings:
+        return False
+    crop = settings.get("crop")
+    if not crop:
+        return False
+    try:
+        w = int(crop.get("w") if isinstance(crop, dict) else crop[0])
+        h = int(crop.get("h") if isinstance(crop, dict) else crop[1])
+    except (TypeError, ValueError, KeyError, IndexError):
+        return False
+    return w > 0 and h > 0
+
+
 def has_video_transform(settings) -> bool:
     if not settings:
         return False
     if settings.get("rotate_op") in _VIDEO_ROTATE_FILTERS:
         return True
-    return bool(settings.get("flip_h") or settings.get("flip_v"))
+    if bool(settings.get("flip_h") or settings.get("flip_v")):
+        return True
+    return has_video_crop(settings)
 
 
 def transform_input_args(settings) -> list[str]:
-    """Disable autorotate so user transpose matches stored pixels (what OpenCV thumbs show)."""
+    """Disable autorotate so user transpose/crop matches stored pixels (OpenCV)."""
     if has_video_transform(settings):
         return ["-noautorotate"]
     return []
@@ -413,9 +429,40 @@ def baked_video_output_args(settings) -> list[str]:
     return ["-map_metadata", "-1", "-metadata:s:v:0", "rotate=0"]
 
 
+def _normalize_crop_box(settings) -> tuple[int, int, int, int] | None:
+    """Return even (w, h, x, y) for FFmpeg crop=, or None."""
+    crop = (settings or {}).get("crop")
+    if not crop:
+        return None
+    try:
+        if isinstance(crop, dict):
+            w = int(crop["w"])
+            h = int(crop["h"])
+            x = int(crop.get("x", 0))
+            y = int(crop.get("y", 0))
+        else:
+            w, h, x, y = (int(v) for v in crop[:4])
+    except (TypeError, ValueError, KeyError, IndexError):
+        return None
+    if w < 2 or h < 2:
+        return None
+    # yuv420p needs even dimensions.
+    w -= w % 2
+    h -= h % 2
+    x = max(0, x - (x % 2))
+    y = max(0, y - (y % 2))
+    if w < 2 or h < 2:
+        return None
+    return w, h, x, y
+
+
 def _transform_video_filter_parts(settings) -> list[str]:
-    """User rotate / mirror only (no source-metadata compounding)."""
+    """User crop / rotate / mirror only (no source-metadata compounding)."""
     parts: list[str] = []
+    box = _normalize_crop_box(settings)
+    if box is not None:
+        w, h, x, y = box
+        parts.append(f"crop={w}:{h}:{x}:{y}")
     rotate_op = settings.get("rotate_op")
     if rotate_op in _VIDEO_ROTATE_FILTERS:
         parts.append(_VIDEO_ROTATE_FILTERS[rotate_op])
@@ -428,7 +475,8 @@ def _transform_video_filter_parts(settings) -> list[str]:
 
 def _custom_video_filter(settings):
     parts = _transform_video_filter_parts(settings)
-    # keep_size: re-encode without scale/fps so source resolution & rate stay native.
+    # keep_size: re-encode without scale/fps so source resolution & rate stay native
+    # (after optional crop the output size is the crop box).
     if settings.get("keep_size"):
         parts.append("format=yuv420p")
     else:

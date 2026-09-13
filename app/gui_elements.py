@@ -23,8 +23,17 @@ from app_settings import TaggingSettings
 from folder_favorites import build_favorites_menu, rebuild_favorites_menu
 from utils import create_menu
 import logging
-from hotkeys import DEFAULT_HOTKEYS, action_label, format_accelerator_menu, iter_help_sections, menu_accel
+from hotkeys import (
+    DEFAULT_HOTKEYS,
+    action_label,
+    format_accelerator_menu,
+    iter_help_sections,
+    menu_accel,
+    rename_accelerators_label,
+)
 from seedvr2_config import DEFAULT_DIT_MODEL, default_weights_dir
+from virtual_folders import load_virtual_folders
+from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS
 
 # .app calls video_thumbnail_player, so no need to import it
 
@@ -941,7 +950,7 @@ def setup_menu(app):
         app.view_button.winfo_rooty() + app.view_button.winfo_height()
     ))
 
-    # --- Edit Menu (formerly Options) ---
+    # --- Edit Menu (rebuild on open so Paste / selection handlers stay fresh) ---
     app._edit_menu = build_edit_menu(app)
 
     app.edit_button = ctk.CTkLabel(
@@ -952,10 +961,15 @@ def setup_menu(app):
         cursor="hand2"
     )
     app.edit_button.pack(side="left", padx=10, pady=2)
-    app.edit_button.bind("<Button-1>", lambda e: app._edit_menu.tk_popup(
-        app.edit_button.winfo_rootx(), 
-        app.edit_button.winfo_rooty() + app.edit_button.winfo_height()
-    ))
+
+    def _popup_edit_menu(_event=None):
+        app._edit_menu = build_edit_menu(app)
+        app._edit_menu.tk_popup(
+            app.edit_button.winfo_rootx(),
+            app.edit_button.winfo_rooty() + app.edit_button.winfo_height(),
+        )
+
+    app.edit_button.bind("<Button-1>", _popup_edit_menu)
 
     # --- Rating Menu ---
     app._rating_menu = build_rating_menu(app)
@@ -1274,29 +1288,480 @@ def build_view_menu(app):
 
 
 
-def build_edit_menu(app):
-    """Build Edit menu with Search, Keyboard Shortcuts, Optimize, Preferences, Plugins."""
-    edit_menu = create_menu(app, app)
+def _edit_primary_path(app):
+    """First path from current thumbnail selection, or None."""
+    thumbs = getattr(app, "selected_thumbnails", None) or []
+    if not thumbs:
+        return None
+    try:
+        return thumbs[0][0]
+    except (IndexError, TypeError):
+        return None
 
-    _search_opts = {"label": "Search...", "command": app.open_search_window}
-    _sacc = menu_accel(DEFAULT_HOTKEYS, "search")
-    if _sacc:
-        _search_opts["accelerator"] = _sacc
-    edit_menu.add_command(**_search_opts)
+
+def _edit_need_selection(app, title="Edit"):
+    path = _edit_primary_path(app)
+    if not path:
+        messagebox.showinfo(
+            title,
+            "Select one or more thumbnails first.",
+            parent=app,
+        )
+        return None
+    return path
+
+
+def _edit_need_image(app, title="Image"):
+    path = _edit_need_selection(app, title)
+    if not path:
+        return None
+    if not str(path).lower().endswith(IMAGE_FORMATS):
+        messagebox.showinfo(title, "Select an image thumbnail first.", parent=app)
+        return None
+    return path
+
+
+def _edit_need_video(app, title="Video"):
+    path = _edit_need_selection(app, title)
+    if not path:
+        return None
+    if not str(path).lower().endswith(VIDEO_FORMATS):
+        messagebox.showinfo(title, "Select a video thumbnail first.", parent=app)
+        return None
+    return path
+
+
+def _edit_add_accel(opts: dict, hotkeys, action: str) -> dict:
+    acc = menu_accel(hotkeys, action)
+    if acc:
+        opts["accelerator"] = acc
+    return opts
+
+
+def build_edit_menu(app):
+    """Edit: full thumbnail RMB parity + app settings."""
+    edit_menu = create_menu(app, app)
+    _hk = getattr(app, "hotkeys_map", None) or DEFAULT_HOTKEYS
+
+    def _open_selection():
+        path = _edit_need_selection(app, "Open")
+        if not path:
+            return
+        lower = path.lower()
+        if lower.endswith(VIDEO_FORMATS) and hasattr(app, "play_video_selection"):
+            app.play_video_selection(path)
+        elif lower.endswith(IMAGE_FORMATS) and hasattr(app, "open_image_viewer"):
+            app.open_image_viewer(path, os.path.basename(path))
+        else:
+            try:
+                os.startfile(path)
+            except Exception as exc:
+                messagebox.showerror("Open", f"Could not open file:\n{exc}", parent=app)
+
+    def _image_crop():
+        path = _edit_need_image(app, "Crop")
+        if path and hasattr(app, "start_image_crop_from_grid"):
+            app.start_image_crop_from_grid(path)
+
+    def _image_resize():
+        path = _edit_need_image(app, "Resize")
+        if path and hasattr(app, "start_image_resize_from_grid"):
+            app.start_image_resize_from_grid(path)
+
+    def _image_canvas():
+        path = _edit_need_image(app, "Canvas Size")
+        if path and hasattr(app, "start_image_canvas_size_from_grid"):
+            app.start_image_canvas_size_from_grid(path)
+
+    def _image_transform(op: str, title: str):
+        path = _edit_need_image(app, title)
+        if path and hasattr(app, "start_image_transform_from_grid"):
+            app.start_image_transform_from_grid(path, op)
+
+    def _compare_images():
+        if not getattr(app, "selected_thumbnails", None):
+            messagebox.showinfo(
+                "Compare Images",
+                "Select at least two images to compare.",
+                parent=app,
+            )
+            return
+        if not hasattr(app, "selected_image_paths_for_compare"):
+            return
+        paths = app.selected_image_paths_for_compare(None)
+        if len(paths) < 2:
+            messagebox.showinfo(
+                "Compare Images",
+                "Select at least two images to compare.",
+                parent=app,
+            )
+            return
+        app.open_image_compare(paths)
+
+    def _batch_convert():
+        path = _edit_primary_path(app)
+        if hasattr(app, "open_batch_convert_dialog"):
+            app.open_batch_convert_dialog(path)
+
+    def _convert_video():
+        path = _edit_need_video(app, "Convert Video")
+        if not path or not hasattr(app, "open_convert_video_dialog"):
+            return
+        paths = (
+            app.selected_video_paths_for_convert(path)
+            if hasattr(app, "selected_video_paths_for_convert")
+            else [path]
+        )
+        app.open_convert_video_dialog(paths or [path])
+
+    def _crop_video():
+        path = _edit_need_video(app, "Crop Video")
+        if path and hasattr(app, "open_video_crop_dialog"):
+            app.open_video_crop_dialog(path)
+
+    def _compare_videos():
+        if not getattr(app, "selected_thumbnails", None):
+            messagebox.showinfo(
+                "Compare Videos",
+                "Select at least two videos to compare.",
+                parent=app,
+            )
+            return
+        if not hasattr(app, "selected_video_paths_for_compare"):
+            return
+        paths = app.selected_video_paths_for_compare(None)
+        if len(paths) < 2:
+            messagebox.showinfo(
+                "Compare Videos",
+                "Select at least two videos to compare.",
+                parent=app,
+            )
+            return
+        app.open_video_compare(paths)
+
+    def _merge_videos():
+        if not getattr(app, "selected_thumbnails", None):
+            messagebox.showinfo(
+                "Merge Videos",
+                "Select at least two videos to merge.",
+                parent=app,
+            )
+            return
+        if not hasattr(app, "selected_video_paths_for_merge"):
+            return
+        # Menu has no RMB target — use full video selection (≥2).
+        paths = [
+            p
+            for p, _, _ in (getattr(app, "selected_thumbnails", None) or [])
+            if p and os.path.isfile(p) and str(p).lower().endswith(VIDEO_FORMATS)
+        ]
+        # de-dupe preserve order
+        seen = set()
+        uniq = []
+        for p in paths:
+            key = os.path.normcase(os.path.normpath(p))
+            if key in seen:
+                continue
+            seen.add(key)
+            uniq.append(os.path.normpath(p))
+        if len(uniq) < 2:
+            messagebox.showinfo(
+                "Merge Videos",
+                "Select at least two videos to merge.",
+                parent=app,
+            )
+            return
+        app.open_merge_videos_dialog(uniq)
+
+    def _upscale():
+        if hasattr(app, "open_upscale_dialog"):
+            app.open_upscale_dialog()
+        else:
+            messagebox.showinfo("Upscale", "Upscale is not available.")
+
+    def _rife():
+        if hasattr(app, "open_rife_dialog"):
+            app.open_rife_dialog()
+        else:
+            messagebox.showinfo("RIFE", "RIFE is not available.")
+
+    def _remove_bg():
+        if hasattr(app, "open_birefnet_dialog"):
+            app.open_birefnet_dialog()
+        else:
+            messagebox.showinfo(
+                "Remove Background",
+                "Remove Background is not available.",
+            )
+
+    def _keywords():
+        path = _edit_need_selection(app, "Keywords")
+        if path and hasattr(app, "open_keyword_window"):
+            app.open_keyword_window(path)
+
+    def _remove_keywords():
+        path = _edit_need_selection(app, "Keywords")
+        if path and hasattr(app, "open_remove_keyword_window"):
+            app.open_remove_keyword_window(path)
+
+    def _playlist(existing=True):
+        if not getattr(app, "selected_thumbnails", None):
+            messagebox.showinfo(
+                "Playlist",
+                "Select one or more thumbnails first.",
+                parent=app,
+            )
+            return
+        if hasattr(app, "add_selected_to_playlist"):
+            app.add_selected_to_playlist(new_playlist=not existing)
+
+    def _auto_tag():
+        if hasattr(app, "auto_tag_selected_items"):
+            app.auto_tag_selected_items()
+
+    def _refresh_thumbs():
+        if not getattr(app, "selected_thumbnails", None):
+            messagebox.showinfo(
+                "Refresh Thumbnail",
+                "Select one or more thumbnails first.",
+                parent=app,
+            )
+            return
+        if hasattr(app, "refresh_selected_thumbnails"):
+            app.refresh_selected_thumbnails()
+
+    def _rename():
+        path = _edit_need_selection(app, "Rename")
+        if path and hasattr(app, "rename_item"):
+            app.rename_item(path)
+
+    def _delete():
+        path = _edit_need_selection(app, "Delete")
+        if not path or not hasattr(app, "confirm_delete_item"):
+            return
+        if hasattr(app, "paths_for_file_action_context"):
+            paths = app.paths_for_file_action_context(path)
+        else:
+            paths = [p for p, _, _ in (getattr(app, "selected_thumbnails", None) or [])]
+        app.confirm_delete_item(paths=paths or [path])
+
+    def _copy(cut=False):
+        path = _edit_need_selection(app, "Cut" if cut else "Copy")
+        if path and hasattr(app, "copy_thumb_paths_to_clipboard"):
+            app.copy_thumb_paths_to_clipboard(path, cut=cut)
+
+    def _copy_path():
+        path = _edit_need_selection(app, "Copy path")
+        if path and hasattr(app, "copy_full_file_path_as_text"):
+            app.copy_full_file_path_as_text(path)
+
+    # --- Open ---
+    edit_menu.add_command(label="Open", command=_open_selection)
+    edit_menu.add_separator()
+
+    # --- Image ---
+    edit_menu.add_command(
+        **_edit_add_accel({"label": "Crop…", "command": _image_crop}, _hk, "image_crop")
+    )
+    edit_menu.add_command(
+        **_edit_add_accel(
+            {"label": "Resize…", "command": _image_resize}, _hk, "image_resize"
+        )
+    )
+    edit_menu.add_command(label="Canvas Size…", command=_image_canvas)
+    edit_menu.add_command(
+        **_edit_add_accel(
+            {
+                "label": "Rotate Left",
+                "command": lambda: _image_transform("rotate_left", "Rotate Left"),
+            },
+            _hk,
+            "image_rotate_left",
+        )
+    )
+    edit_menu.add_command(
+        **_edit_add_accel(
+            {
+                "label": "Rotate Right",
+                "command": lambda: _image_transform("rotate_right", "Rotate Right"),
+            },
+            _hk,
+            "image_rotate_right",
+        )
+    )
+    edit_menu.add_command(
+        **_edit_add_accel(
+            {
+                "label": "Flip Horizontal",
+                "command": lambda: _image_transform("flip_h", "Flip Horizontal"),
+            },
+            _hk,
+            "image_flip_h",
+        )
+    )
+    edit_menu.add_command(
+        **_edit_add_accel(
+            {
+                "label": "Flip Vertical",
+                "command": lambda: _image_transform("flip_v", "Flip Vertical"),
+            },
+            _hk,
+            "image_flip_v",
+        )
+    )
+    edit_menu.add_command(
+        **_edit_add_accel(
+            {"label": "Compare Images…", "command": _compare_images},
+            _hk,
+            "image_compare",
+        )
+    )
+    edit_menu.add_command(label="Batch Convert / Rename…", command=_batch_convert)
+    edit_menu.add_separator()
+
+    # --- Video ---
+    edit_menu.add_command(label="Convert Video…", command=_convert_video)
+    edit_menu.add_command(label="Crop Video…", command=_crop_video)
+    edit_menu.add_command(
+        **_edit_add_accel(
+            {"label": "Compare Videos…", "command": _compare_videos},
+            _hk,
+            "image_compare",
+        )
+    )
+    edit_menu.add_command(label="Merge Videos…", command=_merge_videos)
+    edit_menu.add_separator()
+
+    # --- AI ---
+    edit_menu.add_command(label="Upscale… (SeedVR 2)", command=_upscale)
+    edit_menu.add_command(label="RIFE Interpolate…", command=_rife)
+    edit_menu.add_command(label="Remove Background…", command=_remove_bg)
+    edit_menu.add_separator()
+
+    # --- Tags / playlist / refresh ---
+    edit_menu.add_command(
+        **_edit_add_accel(
+            {"label": "Add Keywords", "command": _keywords}, _hk, "keywords"
+        )
+    )
+    edit_menu.add_command(label="Remove Keywords", command=_remove_keywords)
+    edit_menu.add_command(
+        **_edit_add_accel(
+            {"label": "Add to Existing Playlist", "command": lambda: _playlist(True)},
+            _hk,
+            "add_to_playlist",
+        )
+    )
+    edit_menu.add_command(
+        **_edit_add_accel(
+            {"label": "Add to New Playlist", "command": lambda: _playlist(False)},
+            _hk,
+            "new_playlist",
+        )
+    )
+    edit_menu.add_command(label="Auto Tag", command=_auto_tag)
+    edit_menu.add_command(label="Refresh Thumbnail", command=_refresh_thumbs)
+    edit_menu.add_separator()
+
+    # --- File ops / clipboard ---
+    _rn = {"label": "Rename", "command": _rename}
+    _rn_acc = rename_accelerators_label(_hk)
+    if _rn_acc:
+        _rn["accelerator"] = _rn_acc
+    edit_menu.add_command(**_rn)
+    edit_menu.add_command(
+        **_edit_add_accel({"label": "Delete", "command": _delete}, _hk, "delete")
+    )
+    edit_menu.add_command(
+        **_edit_add_accel(
+            {"label": "Copy", "command": lambda: _copy(False)},
+            _hk,
+            "files_clipboard_copy",
+        )
+    )
+    edit_menu.add_command(label="Copy full file path", command=_copy_path)
+    edit_menu.add_command(
+        **_edit_add_accel(
+            {"label": "Cut", "command": lambda: _copy(True)},
+            _hk,
+            "files_clipboard_cut",
+        )
+    )
+    if hasattr(app, "add_clipboard_paste_cascade"):
+        app.add_clipboard_paste_cascade(
+            edit_menu, getattr(app, "current_directory", None)
+        )
+    edit_menu.add_separator()
+
+    # --- Virtual Library ---
+    try:
+        virtual_libraries = list(load_virtual_folders()["virtual_folders"].keys())
+    except Exception:
+        virtual_libraries = []
+    add_vl = create_menu(app, edit_menu)
+    for name in virtual_libraries:
+        add_vl.add_command(
+            label=name,
+            command=lambda n=name: (
+                app.add_to_virtual_library(
+                    getattr(app, "selected_thumbnails", None) or [], n
+                )
+                if hasattr(app, "add_to_virtual_library")
+                else None
+            ),
+        )
+    if virtual_libraries:
+        add_vl.add_separator()
+    if hasattr(app, "create_virtual_library"):
+        add_vl.add_command(
+            label="Create New Virtual Library",
+            command=app.create_virtual_library,
+        )
+    edit_menu.add_cascade(label="Add to Virtual Library", menu=add_vl)
+
+    active_vl = None
+    cd = getattr(app, "current_directory", None)
+    if isinstance(cd, str) and cd.startswith("virtual_library://"):
+        active_vl = cd.split("://", 1)[1].strip() or None
+        if active_vl and active_vl not in virtual_libraries:
+            active_vl = None
+    if active_vl and hasattr(app, "remove_from_virtual_library"):
+        edit_menu.add_command(
+            label=f"Remove from Virtual Library ({active_vl})",
+            command=lambda n=active_vl: app.remove_from_virtual_library(
+                getattr(app, "selected_thumbnails", None) or [], n
+            ),
+        )
+    else:
+        edit_menu.add_command(
+            label="Remove from Virtual Library",
+            state=tk.DISABLED,
+        )
+    edit_menu.add_separator()
+
+    # --- App ---
+    edit_menu.add_command(
+        **_edit_add_accel(
+            {"label": "Search...", "command": app.open_search_window},
+            _hk,
+            "search",
+        )
+    )
     edit_menu.add_separator()
     edit_menu.add_command(label="Keyboard Shortcuts", command=app.open_hotkeys_window)
     edit_menu.add_command(label="Optimize database", command=app.optimize_database)
-    _pref_opts = {"label": "Preferences", "command": app.open_preferences_window}
-    _pacc = menu_accel(DEFAULT_HOTKEYS, "open_preferences")
-    if _pacc:
-        _pref_opts["accelerator"] = _pacc
-    edit_menu.add_command(**_pref_opts)
+    edit_menu.add_command(
+        **_edit_add_accel(
+            {"label": "Preferences", "command": app.open_preferences_window},
+            _hk,
+            "open_preferences",
+        )
+    )
 
-    # --- PLUGINS MENU ---
     plugins_menu = create_menu(app, edit_menu)
     plugins_menu.add_command(
         label="AutoTag Settings...",
-        command=app.open_autotag_settings_window
+        command=app.open_autotag_settings_window,
     )
     edit_menu.add_cascade(label="Plugins", menu=plugins_menu)
     app.plugins_menu = plugins_menu

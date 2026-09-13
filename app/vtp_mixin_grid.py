@@ -51,6 +51,7 @@ from batch_processing_dialog import (
 )
 from video_operations import VideoPlayer
 from video_convert import open_convert_video_dialog
+from video_crop_dialog import open_video_crop_dialog
 from video_merge import open_merge_videos_dialog
 from utils import get_video_size
 from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS, preview_skip_subdir
@@ -4549,6 +4550,10 @@ class VtpGridMixin:
                 label=_cv_label,
                 command=lambda paths=convert_paths: self.open_convert_video_dialog(paths),
             )
+            menu.add_command(
+                label="Crop Video…",
+                command=lambda fp=file_path: self.open_video_crop_dialog(fp),
+            )
         elif (mimetype and mimetype.startswith("image")) or lower_path.endswith(IMAGE_FORMATS):
             menu.add_command(label="🖼 Show Image", command=lambda: self.open_image_viewer(file_path, os.path.basename(file_path)))
             menu.add_separator()
@@ -4767,7 +4772,7 @@ class VtpGridMixin:
         )
         if hasattr(self, "open_upscale_dialog"):
             menu.add_command(
-                label="Upscale…",
+                label="Upscale… (SeedVR 2)",
                 command=lambda: self.open_upscale_dialog(file_path),
             )
         if hasattr(self, "open_rife_dialog"):
@@ -4948,6 +4953,10 @@ class VtpGridMixin:
         if isinstance(video_paths, (str, os.PathLike)):
             video_paths = [video_paths]
         open_convert_video_dialog(self, video_paths, controller=self)
+
+    def open_video_crop_dialog(self, video_path):
+        """Interactive spatial crop (OpenCV preview + FFmpeg encode)."""
+        open_video_crop_dialog(self, video_path, controller=self)
 
     def reveal_merged_file(self, file_path):
         """Refresh current folder (if output is there) and select the merged file."""
