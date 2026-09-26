@@ -62,6 +62,7 @@ a = Analysis(
         'seedvr2_worker_host',
         'seedvr2_preview_hook',
         'rife_config',
+        'rife_setup',
         'rife_pipeline',
         'rife_dialog',
     ], 

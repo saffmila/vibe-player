@@ -665,6 +665,13 @@ def _run_superfast_image(media_path: str) -> None:
     _prepare_lightweight_env()
     prefs = _load_fast_media_prefs()
     use_pyglet = bool(prefs.get("image_viewer_use_pyglet", False))
+    try:
+        from dark_dialogs import install_dark_messagebox
+
+        ctk.set_appearance_mode("dark")
+        install_dark_messagebox()
+    except Exception:
+        logging.debug("dark messagebox install (superfast image) failed", exc_info=True)
     root = _FastImageRoot()
     name = os.path.basename(media_path)
     viewer = create_image_viewer(root, media_path, name, use_pyglet)
@@ -690,6 +697,13 @@ def _run_superfast_video(media_path: str) -> None:
     from video_operations import VideoPlayer
 
     prefs = _load_fast_media_prefs()
+    try:
+        from dark_dialogs import install_dark_messagebox
+
+        ctk.set_appearance_mode("dark")
+        install_dark_messagebox()
+    except Exception:
+        logging.debug("dark messagebox install (superfast video) failed", exc_info=True)
     root = ctk.CTk()
     root.default_directory = _runtime_base_dir()
     root.withdraw()

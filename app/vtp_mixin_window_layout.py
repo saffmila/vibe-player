@@ -660,9 +660,15 @@ class VtpWindowLayoutMixin:
         except Exception:
             pass
         error_window.attributes("-topmost", True)
+        try:
+            from dark_dialogs import _apply_windows_immersive_dark_titlebar
+
+            error_window.after_idle(_apply_windows_immersive_dark_titlebar, error_window)
+        except Exception:
+            pass
 
         label = ctk.CTkLabel(error_window, text=message, wraplength=350, anchor="w", justify="left")
-        label.pack(padx=10, pady=10)
+        label.pack(padx=16, pady=(14, 6), expand=True)
         self._error_dialog_label = label
 
         def _close():
@@ -676,8 +682,10 @@ class VtpWindowLayoutMixin:
             if error_window.winfo_exists():
                 error_window.destroy()
 
-        btn_ok = ctk.CTkButton(error_window, text="OK", command=_close)
-        btn_ok.pack(pady=10)
+        btn_row = ctk.CTkFrame(error_window, fg_color="transparent")
+        btn_row.pack(side="bottom", padx=15, pady=(8, 15))
+        btn_ok = ctk.CTkButton(btn_row, text="OK", width=100, height=30, command=_close)
+        btn_ok.pack(anchor="center")
         error_window.protocol("WM_DELETE_WINDOW", _close)
         error_window.bind("<Return>", lambda _e: _close())
         error_window.bind("<Escape>", lambda _e: _close())

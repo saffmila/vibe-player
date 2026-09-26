@@ -1432,10 +1432,18 @@ class VideoThumbnailPlayer(
         dialog_window = ctk.CTkToplevel(parent if parent is not None else self)
         self._active_universal_dialog = dialog_window
         dialog_window.title(title)
-        _dw, _dh = (600, 220) if input_field else (440, 200)
+        # Compact confirm size; wider only when an input field is shown.
+        # Message-only: ~30% narrower than old 420; height tuned for breathing room.
+        _dw, _dh = (560, 200) if input_field else (294, 130)
         if checkbox_text:
-            _dh = max(_dh, 240)
+            _dh = max(_dh, 160)
         dialog_window.resizable(False, False)
+        # CTkToplevel often inherits the parent's geometry. Pin a compact size
+        # before packing so expand=True content cannot lock in a huge window.
+        try:
+            dialog_window.geometry(f"{_dw}x{_dh}")
+        except Exception:
+            pass
         _dialog_parent = parent if parent is not None else self
         try:
             dialog_window.transient(_dialog_parent.winfo_toplevel())
@@ -1446,6 +1454,11 @@ class VideoThumbnailPlayer(
         dialog_window.attributes('-topmost', True)
         if modal:
             dialog_window.grab_set()
+        # Match app dark chrome (native caption bar stays light otherwise on Windows).
+        try:
+            dialog_window.after_idle(_apply_windows_immersive_dark_titlebar, dialog_window)
+        except Exception:
+            pass
 
         def _clear_active_dialog(event):
             if event.widget is not dialog_window:
@@ -1455,18 +1468,31 @@ class VideoThumbnailPlayer(
 
         dialog_window.bind("<Destroy>", _clear_active_dialog, add="+")
 
-        # Buttons first (bottom) so long messages cannot clip Confirm/Cancel.
+        # Buttons first (bottom). Centered pair with ~15px inset from edges.
         btn_row = ctk.CTkFrame(dialog_window, fg_color="transparent")
-        btn_row.pack(side="bottom", fill="x", padx=10, pady=(4, 12))
+        btn_row.pack(side="bottom", padx=15, pady=(8, 15))
+        btn_inner = ctk.CTkFrame(btn_row, fg_color="transparent")
+        btn_inner.pack(anchor="center")
 
         content = ctk.CTkFrame(dialog_window, fg_color="transparent")
-        content.pack(side="top", fill="both", expand=True, padx=14, pady=(14, 4))
+        content.pack(side="top", fill="both", expand=True, padx=16, pady=(14, 6))
 
-        _msg_wrap = 540 if input_field else 400
-        label = ctk.CTkLabel(
-            content, text=message, wraplength=_msg_wrap, anchor="w", justify="left"
-        )
-        label.pack(fill="x", anchor="w")
+        _msg_wrap = 500 if input_field else 250
+        if input_field:
+            label = ctk.CTkLabel(
+                content, text=message, wraplength=_msg_wrap, anchor="w", justify="left"
+            )
+            label.pack(fill="x", anchor="w")
+        else:
+            # Confirm / info dialogs: centered message (no expand — keeps dialog short).
+            label = ctk.CTkLabel(
+                content,
+                text=message,
+                wraplength=_msg_wrap,
+                anchor="center",
+                justify="center",
+            )
+            label.pack(expand=True)
 
         # Add input field if required
         input_var = ctk.StringVar(value=default_input) if input_field else None
@@ -1508,8 +1534,10 @@ class VideoThumbnailPlayer(
 
         btn_confirm = None
         if confirm_callback is not None:
-            btn_confirm = ctk.CTkButton(btn_row, text=confirm_text, command=on_confirm)
-            btn_confirm.pack(side="left", padx=(0, 8))
+            btn_confirm = ctk.CTkButton(
+                btn_inner, text=confirm_text, width=100, height=30, command=on_confirm
+            )
+            btn_confirm.pack(side="left", padx=6)
 
         # Third button
         if third_button and third_callback:
@@ -1517,8 +1545,10 @@ class VideoThumbnailPlayer(
                 third_callback()
                 dialog_window.destroy()
 
-            btn_third = ctk.CTkButton(btn_row, text=third_button, command=on_third)
-            btn_third.pack(side="left", padx=(0, 8))
+            btn_third = ctk.CTkButton(
+                btn_inner, text=third_button, width=100, height=30, command=on_third
+            )
+            btn_third.pack(side="left", padx=6)
 
         # Cancel button
         btn_cancel = None
@@ -1528,28 +1558,39 @@ class VideoThumbnailPlayer(
                     cancel_callback()
                     if dialog_window.winfo_exists():
                         dialog_window.destroy()
-                btn_cancel = ctk.CTkButton(btn_row, text=cancel_text, command=on_cancel)
-                btn_cancel.pack(side="right")
+                btn_cancel = ctk.CTkButton(
+                    btn_inner, text=cancel_text, width=100, height=30, command=on_cancel
+                )
+                btn_cancel.pack(side="left", padx=6)
             else:
                 btn_cancel = ctk.CTkButton(
-                    btn_row,
+                    btn_inner,
                     text=cancel_text,
+                    width=100,
+                    height=30,
                     command=lambda: dialog_window.winfo_exists() and dialog_window.destroy(),
                 )
-                btn_cancel.pack(side="right")
+                btn_cancel.pack(side="left", padx=6)
 
         # Input prompts stay compact (Favorites/Rename). Message-only dialogs
-        # still size-to-content so SeedVR/batch/DnD multi-line text fits.
+        # stay near the pinned size — do not let reqheight balloon to 420+.
         try:
+            dialog_window.update_idletasks()
+            req_h = int(dialog_window.winfo_reqheight())
+            req_w = int(dialog_window.winfo_reqwidth())
             if input_field:
-                self._center_toplevel_window(dialog_window, _dw, _dh)
-            elif parent is not None:
-                dialog_window.update_idletasks()
-                req_h = int(dialog_window.winfo_reqheight())
-                req_w = max(_dw, int(dialog_window.winfo_reqwidth()))
-                max_h = max(280, min(560, int(dialog_window.winfo_screenheight()) - 100))
+                max_w = 620
+                max_h = max(_dh + 20, min(420, int(dialog_window.winfo_screenheight()) - 120))
+                w = max(_dw, min(max(req_w, _dw), max_w))
                 h = max(_dh, min(req_h + 8, max_h))
-                w = req_w
+            else:
+                max_w = 340
+                # Short confirms stay tight; multi-line (delete / batch jobs) can grow a bit.
+                line_count = (message or "").count("\n") + 1
+                max_h = min(240, 130 + max(0, line_count - 1) * 28)
+                w = max(_dw, min(max(req_w, _dw), max_w))
+                h = max(_dh, min(req_h + 4, max_h))
+            if parent is not None:
                 try:
                     px = parent.winfo_rootx() + max(0, (parent.winfo_width() - w) // 2)
                     py = parent.winfo_rooty() + max(0, (parent.winfo_height() - h) // 2)
@@ -1557,12 +1598,7 @@ class VideoThumbnailPlayer(
                 except Exception:
                     self._center_toplevel_window(dialog_window, w, h)
             else:
-                dialog_window.update_idletasks()
-                req_h = int(dialog_window.winfo_reqheight())
-                req_w = max(_dw, int(dialog_window.winfo_reqwidth()))
-                max_h = max(280, min(560, int(dialog_window.winfo_screenheight()) - 100))
-                h = max(_dh, min(req_h + 8, max_h))
-                self._center_toplevel_window(dialog_window, req_w, h)
+                self._center_toplevel_window(dialog_window, w, h)
         except Exception:
             self._center_toplevel_window(dialog_window, _dw, _dh)
 
@@ -3620,8 +3656,13 @@ class VideoThumbnailPlayer(
      
     def setup_styles(self):
             ctk.set_appearance_mode("dark")  # Set the appearance mode of the interface
-            ctk.set_default_color_theme("blue")  # Set the default color theme     
-            
+            ctk.set_default_color_theme("blue")  # Set the default color theme
+            try:
+                from dark_dialogs import install_dark_messagebox
+
+                install_dark_messagebox()
+            except Exception:
+                logging.debug("dark messagebox install failed", exc_info=True)            
 
 
     def get_image_size(self, image_path):
@@ -4465,10 +4506,28 @@ class VideoThumbnailPlayer(
         else:
             msg = "Exit Vibe Player?"
         try:
-            if not messagebox.askyesno("Exit", msg, parent=self):
-                return
+            self.universal_dialog(
+                title="Exit",
+                message=msg,
+                confirm_callback=self._finish_closing,
+                confirm_text="Exit",
+                cancel_text="Cancel",
+            )
         except Exception:
             # If the dialog fails, do not exit — safer than closing hard.
+            logging.debug("exit confirm dialog failed", exc_info=True)
+
+    def _finish_closing(self):
+        """Exit confirmed — continue after the dark dialog finishes closing."""
+        if getattr(self, "_closing_in_progress", False):
+            return
+        try:
+            self.after(10, self._proceed_close_after_confirm)
+        except Exception:
+            self._proceed_close_after_confirm()
+
+    def _proceed_close_after_confirm(self):
+        if getattr(self, "_closing_in_progress", False):
             return
 
         # Unsaved captions (Autosave / Yes-No-Cancel) before teardown.
@@ -4481,6 +4540,9 @@ class VideoThumbnailPlayer(
             logging.debug("caption commit on close failed", exc_info=True)
 
         self._closing_in_progress = True
+        self._teardown_and_destroy()
+
+    def _teardown_and_destroy(self):
         try:
             from ui_hang_watchdog import stop as _stop_ui_hang_watchdog
 
@@ -6181,7 +6243,7 @@ class VideoThumbnailPlayer(
 
         # Reverse is a toggle in the dropdown, never a sort key.
         if sort_option and ("Reverse order" in str(sort_option) or str(sort_option).startswith("↕")):
-            sort_option = "Filename"
+            sort_option = getattr(self, "_last_sort_key", None) or "Filename"
 
         rating_by_path: dict[str, int] = {}
         area_by_path: dict[str, int] = {}

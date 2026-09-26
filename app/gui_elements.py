@@ -2356,6 +2356,9 @@ def setup_gui(app):
         getattr(app, "_pending_sort_reverse", getattr(app, "sort_reverse", False))
     )
     app.sort_option = ctk.StringVar(value=_saved_sort)
+    # CTkComboBox overwrites the StringVar with the chosen row before command runs,
+    # so Reverse would wipe the real key — keep the last real key separately.
+    app._last_sort_key = _saved_sort
     app._sort_keys = tuple(_SORT_KEYS)
     app._sort_reverse_label_off = _SORT_REVERSE_LABEL_OFF
     app._sort_reverse_label_on = _SORT_REVERSE_LABEL_ON
@@ -2372,16 +2375,18 @@ def setup_gui(app):
         if choice in reverse_labels:
             app.sort_reverse = not bool(getattr(app, "sort_reverse", False))
             # Keep the real sort key selected — Reverse is a toggle, not a mode.
-            current = app.sort_option.get()
+            # Do not read sort_option here: ComboBox already set it to the reverse label.
+            current = getattr(app, "_last_sort_key", None)
             if current not in _SORT_KEYS:
-                current = _saved_sort if _saved_sort in _SORT_KEYS else "Filename"
-                app.sort_option.set(current)
+                current = "Filename"
+            app.sort_option.set(current)
             try:
                 app.sort_dropdown.set(current)
             except Exception:
                 pass
             _sync_sort_dropdown_values()
         elif choice in _SORT_KEYS:
+            app._last_sort_key = choice
             app.sort_option.set(choice)
         if hasattr(app, "save_preferences"):
             try:
@@ -3652,9 +3657,11 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
         else getattr(app, "_pending_sort_option", "Filename")
     )
     if _sort_val not in _sort_keys:
-        _sort_val = getattr(app, "_pending_sort_option", "Filename")
+        _sort_val = getattr(app, "_last_sort_key", None)
         if _sort_val not in _sort_keys:
-            _sort_val = "Filename"
+            _sort_val = getattr(app, "_pending_sort_option", "Filename")
+            if _sort_val not in _sort_keys:
+                _sort_val = "Filename"
 
     preferences = {
         "capture_method": app.capture_method_var.get(),

@@ -155,7 +155,9 @@ def _extract_frames(
             cmd += ["-t", f"{dur:.6f}"]
     elif end is not None:
         cmd += ["-t", f"{float(end):.6f}"]
-    cmd += ["-vsync", "0", "-q:v", "2", pattern]
+    # FFmpeg 5.1+ renamed -vsync → -fps_mode; FFmpeg 9 dropped -vsync entirely.
+    # passthrough = keep every input frame (same as legacy -vsync 0).
+    cmd += ["-fps_mode", "passthrough", "-q:v", "2", pattern]
     _run(cmd, label="Extract frames", should_stop=should_stop)
 
 

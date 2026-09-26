@@ -492,6 +492,7 @@ class VtpPreferencesMixin:
                 if sort_val not in _SORT_KEYS:
                     sort_val = "Filename"
                 self._pending_sort_option = sort_val
+                self._last_sort_key = sort_val
                 self.sort_reverse = bool(settings.get("sort_reverse", False))
                 self._pending_sort_reverse = self.sort_reverse
                 if getattr(self, "sort_option", None) is not None:
@@ -640,6 +641,7 @@ class VtpPreferencesMixin:
             self.delete_to_trash = True
             self.auto_refresh_folder = False
             self._pending_sort_option = "Filename"
+            self._last_sort_key = "Filename"
             self.sort_reverse = False
             self._pending_sort_reverse = False
             if getattr(self, "sort_option", None) is not None:

@@ -1,9 +1,10 @@
 """
 rife_config.py — Locate optional rife-ncnn-vulkan pack (tools/rife/).
 
-The binary + models are NOT part of the base install. Users extract
-``VibePlayer-rife-pack`` over the portable folder, or run
-``python scripts/fetch_rife_ncnn.py`` during development.
+The binary + models are NOT part of the base install. Users can:
+  • click Install RIFE pack… in the RIFE dialog (preferred),
+  • extract ``VibePlayer-rife-pack`` over the portable folder, or
+  • run ``python scripts/fetch_rife_ncnn.py`` during development.
 """
 
 from __future__ import annotations
@@ -30,9 +31,10 @@ PREFERRED_MODELS = (
 )
 
 PACK_MISSING_MESSAGE = (
-    "RIFE pack not found. Download the optional RIFE pack and extract it into "
-    "your Vibe Player folder (so tools/rife/rife-ncnn-vulkan.exe exists), "
-    "or run: python scripts/fetch_rife_ncnn.py"
+    "RIFE pack not found. Use Install RIFE pack… in this dialog, "
+    "or extract the optional pack into your Vibe Player folder "
+    "(so tools/rife/rife-ncnn-vulkan.exe exists). "
+    "Dev checkout: python scripts/fetch_rife_ncnn.py"
 )
 
 MODEL_MISSING_MESSAGE = (
