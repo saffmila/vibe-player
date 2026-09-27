@@ -3786,20 +3786,33 @@ class VtpGridMixin:
                 icon_size,
             )
 
-            # 1) Load PIL images from disk
-            folder_tree_pil = Image.open(os.path.join(P, "tree_folder.PNG")).resize((icon_size, icon_size), Image.LANCZOS)
-            folder_tree_green_pil = Image.open(os.path.join(P, "tree_folder_green.png")).resize((icon_size, icon_size), Image.LANCZOS)
-            folder_virtual_pil = Image.open(os.path.join(P, "tree_folder_virtual.png")).resize((icon_size, icon_size), Image.LANCZOS)
-            hdd_pil = Image.open(os.path.join(P, "tree_hdd.PNG")).resize((icon_size, icon_size), Image.LANCZOS)
-            google_pil = Image.open(os.path.join(P, "tree_google.PNG")).resize((icon_size, icon_size), Image.LANCZOS)
-            desktop_pil = Image.open(os.path.join(P, "tree_desktop.png")).resize((icon_size, icon_size), Image.LANCZOS)
-            downloads_pil = Image.open(os.path.join(P, "tree_downloads.png")).resize((icon_size, icon_size), Image.LANCZOS)
-            documents_pil = Image.open(os.path.join(P, "tree_documents.png")).resize((icon_size, icon_size), Image.LANCZOS)
-            pictures_pil = Image.open(os.path.join(P, "tree_pictures.png")).resize((icon_size, icon_size), Image.LANCZOS)
-            videos_pil = Image.open(os.path.join(P, "tree_videos.png")).resize((icon_size, icon_size), Image.LANCZOS)
+            # 1) Load PIL images from disk (case-insensitive resolve for Linux)
+            def _icon(name):
+                direct = os.path.join(P, name)
+                if os.path.isfile(direct):
+                    return direct
+                want = name.lower()
+                try:
+                    for entry in os.listdir(P):
+                        if entry.lower() == want:
+                            return os.path.join(P, entry)
+                except OSError:
+                    pass
+                return direct
+
+            folder_tree_pil = Image.open(_icon("tree_folder.PNG")).resize((icon_size, icon_size), Image.LANCZOS)
+            folder_tree_green_pil = Image.open(_icon("tree_folder_green.png")).resize((icon_size, icon_size), Image.LANCZOS)
+            folder_virtual_pil = Image.open(_icon("tree_folder_virtual.png")).resize((icon_size, icon_size), Image.LANCZOS)
+            hdd_pil = Image.open(_icon("tree_hdd.PNG")).resize((icon_size, icon_size), Image.LANCZOS)
+            google_pil = Image.open(_icon("tree_google.PNG")).resize((icon_size, icon_size), Image.LANCZOS)
+            desktop_pil = Image.open(_icon("tree_desktop.png")).resize((icon_size, icon_size), Image.LANCZOS)
+            downloads_pil = Image.open(_icon("tree_downloads.png")).resize((icon_size, icon_size), Image.LANCZOS)
+            documents_pil = Image.open(_icon("tree_documents.png")).resize((icon_size, icon_size), Image.LANCZOS)
+            pictures_pil = Image.open(_icon("tree_pictures.png")).resize((icon_size, icon_size), Image.LANCZOS)
+            videos_pil = Image.open(_icon("tree_videos.png")).resize((icon_size, icon_size), Image.LANCZOS)
             
-            folder_grid_pil = Image.open(os.path.join(P, "folder.png")).resize((96, 96), Image.LANCZOS)
-            folder_grid_green_pil = Image.open(os.path.join(P, "folder_g.png")).resize((96, 96), Image.LANCZOS)
+            folder_grid_pil = Image.open(_icon("folder.png")).resize((96, 96), Image.LANCZOS)
+            folder_grid_green_pil = Image.open(_icon("folder_g.png")).resize((96, 96), Image.LANCZOS)
 
             # 2) ttk.Treeview PhotoImage versions
             self.folder_treeicon = ImageTk.PhotoImage(folder_tree_pil)

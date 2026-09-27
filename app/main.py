@@ -159,10 +159,15 @@ def _runtime_tools_base_dir() -> str:
 def _load_fast_media_prefs():
     """Read VLC-related keys from ``settings.json`` without loading the main window."""
     path = os.path.join(APP_DIR, "settings.json")
+    if sys.platform == "win32":
+        default_vout, default_hw = "direct3d11", "dxva2"
+    else:
+        # Omit Windows-only modules; empty vout lets libVLC auto-select on Linux/macOS.
+        default_vout, default_hw = "", "any"
     out = {
-        "video_output": "direct3d11",
+        "video_output": default_vout,
         "audio_output": "default",
-        "hardware_decoding": "dxva2",
+        "hardware_decoding": default_hw,
         "audio_device": "",
         "auto_play": True,
         "video_show_hud": True,

@@ -122,6 +122,27 @@ def get_audio_devices():
     return _audio_devices_cache
 
 
+# Windows-only libVLC modules — passing these on Linux makes vlc.Instance() return None.
+_WIN_ONLY_VOUT = frozenset({"direct3d11", "direct3d9", "glwin32"})
+_WIN_ONLY_AOUT = frozenset({"waveout", "directsound", "wasapi", "mmdevice"})
+_WIN_ONLY_HW = frozenset({"dxva2", "d3d11va"})
+
+
+def embed_vlc_window(player, window_id: int) -> None:
+    """Attach libVLC output to a Tk window id (HWND / X11 / Cocoa)."""
+    if player is None:
+        return
+    wid = int(window_id or 0)
+    if sys.platform == "win32":
+        player.set_hwnd(wid)
+    elif sys.platform == "darwin" and hasattr(player, "set_nsobject"):
+        player.set_nsobject(wid)
+    elif hasattr(player, "set_xwindow"):
+        player.set_xwindow(wid)
+    elif hasattr(player, "set_hwnd"):
+        player.set_hwnd(wid)
+
+
 def _build_vlc_options(
     *,
     video_path: str | None,
@@ -133,17 +154,28 @@ def _build_vlc_options(
     use_gpu_upscale: bool,
     log_precheck: bool = True,
 ) -> tuple[list[str], bool, str, str]:
+    is_windows = sys.platform == "win32"
     legacy_mpeg_profile = (
         os.path.splitext(str(video_path or ""))[1].lower()
         in _LEGACY_MPEG_PLAYBACK_EXTS
     )
     effective_video_output = "direct3d9" if legacy_mpeg_profile else video_output
     effective_hw_decoding = "none" if legacy_mpeg_profile else hardware_decoding
-    effective_gpu_upscale = bool(use_gpu_upscale) and not legacy_mpeg_profile
+    # GPU upscale path forces D3D11 — Windows only.
+    effective_gpu_upscale = bool(use_gpu_upscale) and not legacy_mpeg_profile and is_windows
+
+    if not is_windows:
+        # Drop Windows-only modules that crash libvlc_new on Linux/macOS.
+        if (effective_video_output or "").lower() in _WIN_ONLY_VOUT:
+            effective_video_output = ""
+        if (effective_hw_decoding or "").lower() in _WIN_ONLY_HW:
+            effective_hw_decoding = "any"
+        if (audio_output or "").lower() in _WIN_ONLY_AOUT:
+            audio_output = "default"
 
     if log_precheck:
         logging.info("--- [VLC PRE-CHECK] ---")
-        logging.info(f"  > Video Output: {effective_video_output}")
+        logging.info(f"  > Video Output: {effective_video_output or '(auto)'}")
         logging.info(f"  > Audio Output: {audio_output}")
         logging.info(f"  > HW Decoding: {effective_hw_decoding}")
         logging.info(f"  > Audio Device: {audio_device}")
@@ -174,11 +206,13 @@ def _build_vlc_options(
         logging.info(f"[GPU Upscale] Args: --vout=direct3d11 --avcodec-hw=d3d11va  (vendor={gpu_vendor})")
     else:
         vlc_options = [
-            f'--vout={effective_video_output}',
-            f'--avcodec-hw={effective_hw_decoding}',
             '--file-logging',
-            '--logfile=vlc-log.txt'
+            '--logfile=vlc-log.txt',
         ]
+        if effective_video_output:
+            vlc_options.insert(0, f'--vout={effective_video_output}')
+        if effective_hw_decoding:
+            vlc_options.insert(1 if effective_video_output else 0, f'--avcodec-hw={effective_hw_decoding}')
 
     # Optional video quality filters configured in app preferences.
     # VLC accepts multiple filters as a colon-separated chain.
@@ -199,25 +233,33 @@ def _build_vlc_options(
 
     has_explicit_device = bool(audio_device and str(audio_device).strip())
 
-    if audio_output and audio_output not in ("", "default", "directsound"):
-        if audio_output in ("wasapi", "mmdevice") and not has_explicit_device:
-            vlc_options.append('--aout=waveout')
-            logging.info(
-                "[VLC Audio] '%s' bez explicitního zařízení -> fallback na waveout",
-                audio_output,
-            )
+    if is_windows:
+        if audio_output and audio_output not in ("", "default", "directsound"):
+            if audio_output in ("wasapi", "mmdevice") and not has_explicit_device:
+                vlc_options.append('--aout=waveout')
+                logging.info(
+                    "[VLC Audio] '%s' bez explicitního zařízení -> fallback na waveout",
+                    audio_output,
+                )
+            else:
+                vlc_options.append(f'--aout={audio_output}')
+        elif audio_output == 'directsound' and has_explicit_device:
+            vlc_options.append('--aout=directsound')
         else:
-            vlc_options.append(f'--aout={audio_output}')
-    elif audio_output == 'directsound' and has_explicit_device:
-        vlc_options.append('--aout=directsound')
+            vlc_options.append('--aout=waveout')
+            logging.info("[VLC Audio] Používám waveout (nejkompatibilnější, nevyžaduje exkluzivní přístup)")
+
+        if audio_output == 'directsound' and has_explicit_device:
+            vlc_options.append(f'--directx-audio-device={audio_device}')
     else:
-        vlc_options.append('--aout=waveout')
-        logging.info("[VLC Audio] Používám waveout (nejkompatibilnější, nevyžaduje exkluzivní přístup)")
+        # Let libVLC pick pulse/alsa unless the user explicitly chose a Linux module.
+        if audio_output and audio_output not in ("", "default"):
+            vlc_options.append(f'--aout={audio_output}')
+            logging.info("[VLC Audio] Using explicit aout=%s", audio_output)
+        else:
+            logging.info("[VLC Audio] Using libVLC default audio output (Linux/macOS)")
 
-    if audio_output == 'directsound' and has_explicit_device:
-        vlc_options.append(f'--directx-audio-device={audio_device}')
-
-    return vlc_options, effective_gpu_upscale, effective_video_output, effective_hw_decoding
+    return vlc_options, effective_gpu_upscale, effective_video_output or "", effective_hw_decoding
 
 
 def prewarm_vlc_instance(
@@ -526,11 +568,17 @@ class VideoPlayer:
                 return "break"
             return handler
 
+        def fullscreen_on_f(event=None):
+            # Tk bare "f" also matches Ctrl+F; leave Ctrl+F for global Search.
+            if event is not None and (getattr(event, "state", 0) & 0x4):
+                return
+            self.toggle_fullscreen(event)
+
         self.video_window.bind("<Control-w>", lambda e: self.close_video_player())
         if callable(getattr(self.controller, "open_library", None)):
             self.video_window.bind("<Control-l>", lambda e: self.controller.open_library())
             self.video_window.bind("<Control-L>", lambda e: self.controller.open_library())
-        self.video_window.bind(hk("video_fullscreen", "f"), self.toggle_fullscreen)
+        self.video_window.bind(hk("video_fullscreen", "f"), fullscreen_on_f)
         self.video_window.bind("<Shift-F>", self.toggle_fullscreen)
         self.video_window.bind("<Alt-Return>", self.toggle_fullscreen)
         self.video_window.bind("<Alt-KP_Enter>", self.toggle_fullscreen)
@@ -1707,12 +1755,15 @@ class VideoPlayer:
             if effective_gpu_upscale:
                 logging.warning("[GPU Upscale] GPU upscale instance failed. Falling back to standard VLC settings.")
                 fallback_options = [
-                    f'--vout={effective_video_output}',
-                    f'--avcodec-hw={effective_hw_decoding}',
                     '--file-logging',
                     '--logfile=vlc-log.txt',
-                    f'--aout=waveout',
                 ]
+                if effective_video_output:
+                    fallback_options.insert(0, f'--vout={effective_video_output}')
+                if effective_hw_decoding:
+                    fallback_options.append(f'--avcodec-hw={effective_hw_decoding}')
+                if sys.platform == "win32":
+                    fallback_options.append('--aout=waveout')
                 if getattr(self.controller, "vlc_enable_postproc", False):
                     postproc_q = int(getattr(self.controller, "vlc_postproc_quality", 6))
                     postproc_q = max(0, min(6, postproc_q))
@@ -2629,9 +2680,14 @@ class VideoPlayer:
             ):
                 setattr(self, attr, None)
             try:
-                # Sestavíme cestu k icons adresáři
-                # self.parent je hlavní VideoThumbnailPlayer, který má nastavenou cestu v default_directory
-                P = os.path.join(self.parent.default_directory, "icons")
+                # Resolve icons dir: parent may be the main app or an embed frame (CTkFrame).
+                app_dir = getattr(self.parent, "default_directory", None)
+                if not app_dir:
+                    controller = getattr(self, "controller", None)
+                    app_dir = getattr(controller, "default_directory", None) if controller else None
+                if not app_dir:
+                    app_dir = os.path.dirname(os.path.abspath(__file__))
+                P = os.path.join(app_dir, "icons")
                 
                 # Načtení ikon s novou cestou (normál + hover cyan)
                 self.play_button_icon, self.play_button_icon_hover = self._icon_hover_pair(
@@ -3266,9 +3322,17 @@ class VideoPlayer:
         if not self.player or not widget or not widget.winfo_exists():
             return
         try:
-            self.player.set_hwnd(widget.winfo_id())
+            embed_vlc_window(self.player, widget.winfo_id())
         except Exception as exc:
-            logging.info("[VLC] set_hwnd failed: %s", exc)
+            logging.info("[VLC] embed window failed: %s", exc)
+
+    def _safe_clear_hwnd(self):
+        if not self.player:
+            return
+        try:
+            embed_vlc_window(self.player, 0)
+        except Exception as exc:
+            logging.info("[VLC] clear embed window failed: %s", exc)
            
            
     def _bind_video_context_menu(self):
@@ -4221,17 +4285,23 @@ class VideoPlayer:
             # self.hide_controls_frame()
 
     def show_controls_frame(self):
+        controls = getattr(self, "controls_frame", None)
+        if controls is None:
+            return
         if not self.controls_frame_visible:
-            self.controls_frame.pack(side=tk.BOTTOM, fill=tk.X)
+            controls.pack(side=tk.BOTTOM, fill=tk.X)
             self.controls_frame_visible = True
             logging.info("Showing controls frame.")  # Debug
 
     def hide_controls_frame(self):
         if self.embed:
             return  # Nikdy neschovávej controls_frame v preview!
-        
+
+        controls = getattr(self, "controls_frame", None)
+        if controls is None:
+            return
         if self.controls_frame_visible:
-            self.controls_frame.pack_forget()
+            controls.pack_forget()
             self.controls_frame_visible = False
             logging.info("Hiding controls frame.")  # Debug
 
@@ -5043,13 +5113,13 @@ class VideoPlayer:
         ``wait_stop=False`` skips the blocking sleep loop (playlist auto-advance / already-Ended).
         """
         logging.info("[Cleanup][VLC] shutdown start detach_hwnd=%s wait_stop=%s player=%r", detach_hwnd, wait_stop, player)
-        if detach_hwnd and os.name == "nt" and hasattr(player, "set_hwnd"):
+        if detach_hwnd:
             try:
-                logging.info("[Cleanup][VLC] before player.set_hwnd(0)")
-                player.set_hwnd(0)
-                logging.info("[Cleanup][VLC] after player.set_hwnd(0)")
+                logging.info("[Cleanup][VLC] before detach embed window")
+                embed_vlc_window(player, 0)
+                logging.info("[Cleanup][VLC] after detach embed window")
             except Exception as e:
-                logging.info("[Cleanup][VLC] player.set_hwnd(0) failed: %s", e)
+                logging.info("[Cleanup][VLC] detach embed window failed: %s", e)
         try:
             logging.info("[Cleanup][VLC] before player.get_state()")
             st = player.get_state()

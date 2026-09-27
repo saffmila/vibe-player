@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 
 import customtkinter as ctk
@@ -269,10 +270,10 @@ class VtpPreferencesMixin:
                     self.info_panel.preview_auto_play_var.set(
                         settings.get("preview_auto_play", True)
                     )
-                self.video_output_var.set(settings.get("video_output", 'direct3d11'))
+                self.video_output_var.set(settings.get("video_output", 'direct3d11' if sys.platform == 'win32' else ''))
                 # self.audio_output_var.set(settings.get("audio_output", 'directsound'))
                 self.audio_output_var.set(settings.get("audio_output", 'default'))
-                self.hardware_decoding_var.set(settings.get("hardware_decoding", 'dxva2'))
+                self.hardware_decoding_var.set(settings.get("hardware_decoding", 'dxva2' if sys.platform == 'win32' else 'any'))
                 # self.audio_device_var.set(settings.get("audio_device", self.audio_device_var.get()))
                 audio_device_from_settings = settings.get("audio_device")
                 if audio_device_from_settings:
@@ -622,9 +623,9 @@ class VtpPreferencesMixin:
             self.play_broken_videos = True
             if hasattr(self, "play_broken_videos_var"):
                 self.play_broken_videos_var.set(True)
-            self.video_output_var.set('direct3d11')
-            self.audio_output_var.set('wasapi')
-            self.hardware_decoding_var.set('dxva2')
+            self.video_output_var.set('direct3d11' if sys.platform == 'win32' else '')
+            self.audio_output_var.set('wasapi' if sys.platform == 'win32' else 'default')
+            self.hardware_decoding_var.set('dxva2' if sys.platform == 'win32' else 'any')
             # self.audio_device_var.set(sd.query_devices()[0]['name'])  # Default to first audio device
             self.thumbnail_time = 0.1  # Default to 10% for thumbnail creation time
             self.thumbnail_time_var.set(10)

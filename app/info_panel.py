@@ -7,7 +7,7 @@ Hosts tabbed metadata, optional embedded preview player, and multi-timeline cont
 import customtkinter as ctk
 import tkinter as tk
 from database import Database
-from video_operations import VideoPlayer
+from video_operations import VideoPlayer, embed_vlc_window
 from PIL import Image, ImageTk
 from image_loader import load_pil_frames
 import os
@@ -835,7 +835,7 @@ class InfoPanelFrame(ctk.CTkFrame):
                 if media is not None:
                     self.preview_player.player.set_media(media)
                     frame.update()
-                    self.preview_player.player.set_hwnd(frame.winfo_id())
+                    embed_vlc_window(self.preview_player.player, frame.winfo_id())
                     pp = self.preview_player
                     pp._ensure_preview_muted()
                     pp.player.play()
@@ -858,7 +858,7 @@ class InfoPanelFrame(ctk.CTkFrame):
                     self.show_preview_placeholder("Failed to load video.")
 
             except Exception as e:
-                logging.info("[GUI] set_hwnd/play failed:%s ", e)
+                logging.info("[GUI] embed/play failed:%s ", e)
                 self.show_preview_placeholder("Error playing video.")
 
         self.after(0, embed_and_play_in_gui)
@@ -867,7 +867,7 @@ class InfoPanelFrame(ctk.CTkFrame):
         """
         Starts video preview in the info panel.
         A background thread only checks that the file exists (keeps UI responsive while browsing).
-        VLC (media_new, set_hwnd, play) and all Tk updates run on the main thread — never call
+        VLC (media_new, embed window, play) and all Tk updates run on the main thread — never call
         them from the worker (Windows freezes / crashes when Tk/VLC are touched off-thread).
         """
         if self._main_player_open():
@@ -906,7 +906,7 @@ class InfoPanelFrame(ctk.CTkFrame):
                 pp.stop_video()
             player = getattr(pp, "player", None)
             if player is not None:
-                player.set_hwnd(0)
+                embed_vlc_window(player, 0)
         except Exception as e:
             logging.debug("[InfoPanel] stop_video_preview: %s", e)
 

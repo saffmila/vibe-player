@@ -391,8 +391,14 @@ class ImageViewerLegacy:
         
         # 4. Fullscreen
         self.image_window.bind(hk('image_fullscreen', '<F11>'), consume(self.toggle_fullscreen))
-        # Fallback pro "F" (běžné v prohlížečích) a Alt-Enter
-        self.image_window.bind("f", consume(lambda e: self._hotkey_unless_crop(self.toggle_fullscreen, e)))
+        # Plain F = fullscreen; Ctrl+F stays reserved for Search (Tk "f" also matches with Control).
+        def _fullscreen_on_f(e):
+            if getattr(e, "state", 0) & 0x4:
+                return
+            self._hotkey_unless_crop(self.toggle_fullscreen, e)
+            return "break"
+
+        self.image_window.bind("f", _fullscreen_on_f)
         self.image_window.bind("<Alt-Return>", consume(self.toggle_fullscreen))
 
         self.image_window.bind("<F10>", lambda e: self.debug_print_monitor())

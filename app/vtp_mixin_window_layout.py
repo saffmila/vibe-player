@@ -571,13 +571,60 @@ class VtpWindowLayoutMixin:
     def toggle_fullscreen(self, event=None):
             """Toggle between maximized and normal window state."""
             try:
-                # ... state toggle ...
-                is_zoomed = self.state() == 'zoomed'
+                # Tk on Linux rejects state('zoomed'); use -zoomed / -fullscreen fallbacks.
+                is_zoomed = False
+                try:
+                    is_zoomed = str(self.state()) == 'zoomed'
+                except Exception:
+                    pass
+                if not is_zoomed:
+                    try:
+                        is_zoomed = bool(self.attributes('-zoomed'))
+                    except Exception:
+                        pass
+                if not is_zoomed:
+                    try:
+                        is_zoomed = bool(self.attributes('-fullscreen'))
+                    except Exception:
+                        pass
+
                 if not is_zoomed:
                     self.last_geometry = self.geometry()
-                    self.state('zoomed')
+                    maximized = False
+                    try:
+                        self.state('zoomed')
+                        maximized = True
+                    except Exception:
+                        pass
+                    if not maximized:
+                        try:
+                            self.attributes('-zoomed', True)
+                            maximized = True
+                        except Exception:
+                            pass
+                    if not maximized:
+                        try:
+                            self.attributes('-fullscreen', True)
+                            maximized = True
+                        except Exception:
+                            pass
+                    if not maximized:
+                        self.geometry(
+                            f"{self.winfo_screenwidth()}x{self.winfo_screenheight()}+0+0"
+                        )
                 else:
-                    self.state('normal')
+                    try:
+                        self.attributes('-fullscreen', False)
+                    except Exception:
+                        pass
+                    try:
+                        self.attributes('-zoomed', False)
+                    except Exception:
+                        pass
+                    try:
+                        self.state('normal')
+                    except Exception:
+                        pass
                     if hasattr(self, 'last_geometry') and self.last_geometry:
                         self.geometry(self.last_geometry)
 

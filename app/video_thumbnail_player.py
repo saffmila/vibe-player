@@ -128,7 +128,7 @@ from info_panel import InfoPanelFrame
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
-from video_operations import VideoPlayer, get_audio_devices, prewarm_vlc_instance
+from video_operations import VideoPlayer, get_audio_devices, prewarm_vlc_instance, embed_vlc_window
 from timeline_manager import TimelineManager
 from timeline_bar_widget import TimelineBarWidget
 from caption_editor_widget import CaptionEditorWidget
@@ -5492,7 +5492,7 @@ class VideoThumbnailPlayer(
                 vw.pack_forget()
                 # Detach VLC from hwnd so it stops drawing
                 if getattr(self.info_panel.preview_player, "player", None):
-                    self.info_panel.preview_player.player.set_hwnd(0)
+                    embed_vlc_window(self.info_panel.preview_player.player, 0)
             except Exception:
                 pass
 
@@ -5673,16 +5673,48 @@ class VideoThumbnailPlayer(
             drive_string = win32api.GetLogicalDriveStrings()
             drives = [d for d in drive_string.split('\000') if d]
             return drives
-        else:  # Unix-like
-            return ['/mnt', '/media']
+        else:  # Unix-like — include common removable-mount roots
+            candidates = ['/', '/mnt', '/media', '/run/media']
+            # /run/media/<user>/... — expand one level so USB disks appear in the tree
+            run_media = '/run/media'
+            if os.path.isdir(run_media):
+                try:
+                    for user_dir in sorted(os.listdir(run_media)):
+                        user_path = os.path.join(run_media, user_dir)
+                        if os.path.isdir(user_path):
+                            candidates.append(user_path)
+                            try:
+                                for vol in sorted(os.listdir(user_path)):
+                                    vol_path = os.path.join(user_path, vol)
+                                    if os.path.isdir(vol_path):
+                                        candidates.append(vol_path)
+                            except OSError:
+                                pass
+                except OSError:
+                    pass
+            seen = set()
+            drives = []
+            for path in candidates:
+                try:
+                    real = os.path.realpath(path) if os.path.exists(path) else path
+                except OSError:
+                    real = path
+                key = os.path.normcase(real)
+                if key in seen:
+                    continue
+                if os.path.isdir(path):
+                    seen.add(key)
+                    drives.append(path)
+            return drives or ['/']
 
 
-    def refresh_tree_view(self, target_directory=None):
+    def refresh_tree_view(self, target_directory=None, _retry=0):
         """
         Refresh the tree view, focusing on the given directory or the current_directory.
         
         Args:
             target_directory (str): The directory to refresh and focus on. Defaults to current_directory.
+            _retry (int): Internal guard against infinite recursion when the path is absent from the tree.
         """
         # Determine the target directory
         target_directory = target_directory or self.current_directory
@@ -5712,10 +5744,15 @@ class VideoThumbnailPlayer(
                 self._heal_open_tree_dummy_rows()
                 # see() after populate/heal — earlier see is lost when siblings are inserted
                 self._reveal_tree_item(item)
-            else:
+            elif _retry < 1:
                 logging.info(f"No tree node found for {target_directory}. Attempting to repopulate tree.")
                 self.populate_tree()  # Fall back to repopulating the entire tree
-                self.refresh_tree_view(target_directory)  # Retry after repopulation
+                self.refresh_tree_view(target_directory, _retry=_retry + 1)
+            else:
+                logging.warning(
+                    "No tree node found for %s after repopulate; skipping to avoid recursion.",
+                    target_directory,
+                )
         else:
             logging.info(f"Skipping refresh: {target_directory} is not a directory.")  # Debug
 
