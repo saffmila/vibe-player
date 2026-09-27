@@ -1,6 +1,9 @@
 """
 Shared encode settings UI (Preset / Video / Audio cards) for Convert + Timeline Export.
 
+Named presets lock size/format/quality. Edit (or Manual…) unlocks the current
+values for editing. Last Manual fields are remembered for the app session.
+
 Export/convert *logic* stays in callers; this module only builds settings widgets
 and collects a settings dict for custom re-encode.
 """
@@ -17,6 +20,10 @@ DEFAULT_AUDIO_BITRATE = "192k"
 SUPPORTED_FORMATS = [".mp4", ".avi", ".mkv", ".mov", ".webm"]
 CUSTOM_SCROLL_HEIGHT = 500
 EXPORT_CUSTOM_SCROLL_HEIGHT = 400
+
+# Last Manual… encode fields for this app session (not persisted to disk).
+# Lets "Manual…" restore prior edits after browsing named presets.
+_last_manual_settings: dict | None = None
 
 # Rotate labels → ops (same keys as image batch / convert transforms).
 VIDEO_ROTATE_OPTIONS: dict[str, str | None] = {
@@ -82,6 +89,8 @@ PRESET_INFO = {
         "Choose format, size, quality and audio bitrate"
     ),
 }
+
+_CUSTOMIZE_HINT = "Use Edit to unlock and edit these values"
 
 AUDIO_INFO = {
     "96k": "96 kbps — compact, speech / background",
@@ -192,6 +201,7 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
         self.rife_mult_var = ctk.StringVar(value="2×")
         self.rife_mode_var = ctk.StringVar(value=RIFE_MODE_LABELS[0])
         self._dim_entries: list[ctk.CTkEntry] = []
+        self._manual_active = False
 
         self._scroll = ctk.CTkScrollableFrame(
             self, height=scroll_height, fg_color="transparent"
@@ -200,23 +210,49 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
 
         preset_card, preset_body = make_section(self._scroll, "Preset")
         preset_card.pack(fill="x", pady=(0, 8))
+        preset_row = ctk.CTkFrame(preset_body, fg_color="transparent")
+        preset_row.pack(fill="x", pady=(0, 9))
         self._preset_menu = ctk.CTkOptionMenu(
-            preset_body,
+            preset_row,
             variable=self.preset_var,
             values=self._preset_values,
             command=self.apply_preset,
             height=28,
         )
-        self._preset_menu.pack(fill="x", pady=(0, 6))
+        self._preset_menu.pack(side="left", fill="x", expand=True)
+        self._customize_btn = ctk.CTkButton(
+            preset_row,
+            text="Edit",
+            width=56,
+            height=28,
+            corner_radius=4,
+            font=ctk.CTkFont(size=13),
+            fg_color=("#3a5f8a", "#2a4a6e"),
+            hover_color=("#4a6f9a", "#355a82"),
+            text_color="#ffffff",
+            command=self.customize_preset,
+        )
+        self._customize_btn.pack(side="right", padx=(6, 0))
         self._preset_info = make_info_box(preset_body, icon="🎬")
         self._preset_info.pack(fill="x", pady=(0, 2))
 
         video_card, video_body = make_section(self._scroll, "Video")
         video_card.pack(fill="x", pady=(0, 8))
         self._size_form = ctk.CTkFrame(video_body, fg_color="transparent")
-        self._add_entry(self._size_form, "Width:", self.width_var)
-        self._add_entry(self._size_form, "Height:", self.height_var)
-        self._add_entry(self._size_form, "FPS:", self.fps_var)
+        self._size_form.grid_columnconfigure(2, weight=1)
+        self._add_dim_row(0, "Width:", self.width_var)
+        self._add_dim_row(1, "Height:", self.height_var)
+        self._swap_wh_btn = ctk.CTkButton(
+            self._size_form,
+            text="⇅",
+            width=28,
+            height=28,
+            corner_radius=4,
+            command=self._swap_width_height,
+            font=ctk.CTkFont(size=14),
+        )
+        self._swap_wh_btn.grid(row=0, column=1, rowspan=2, padx=(0, 6), pady=1)
+        self._add_dim_row(2, "FPS:", self.fps_var)
         self._size_form.pack(fill="x", pady=(0, 4))
 
         self._format_row = ctk.CTkFrame(video_body, fg_color="transparent")
@@ -349,14 +385,21 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
         if preset and preset.get("keep_size"):
             self.apply_preset(name)
 
-    def _add_entry(self, frame, label, var):
-        row = ctk.CTkFrame(frame, fg_color="transparent")
-        row.pack(fill="x", pady=1)
-        ctk.CTkLabel(row, text=label, width=100, anchor="w").pack(side="left")
-        entry = ctk.CTkEntry(row, textvariable=var, height=28)
-        entry.pack(side="left", fill="x", expand=True)
+    def _add_dim_row(self, row: int, label: str, var: ctk.StringVar):
+        ctk.CTkLabel(self._size_form, text=label, width=100, anchor="w").grid(
+            row=row, column=0, sticky="w", pady=1
+        )
+        entry = ctk.CTkEntry(self._size_form, textvariable=var, height=28)
+        entry.grid(row=row, column=2, sticky="ew", pady=1)
         self._dim_entries.append(entry)
         return entry
+
+    def _swap_width_height(self):
+        if not self._manual_active:
+            return
+        w, h = self.width_var.get(), self.height_var.get()
+        self.width_var.set(h)
+        self.height_var.set(w)
 
     def _set_dim_fields_enabled(self, enabled: bool):
         state = "normal" if enabled else "disabled"
@@ -367,6 +410,12 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
                 entry.configure(state=state, text_color=text_color, fg_color=fg_color)
             except Exception:
                 entry.configure(state=state)
+        btn = getattr(self, "_swap_wh_btn", None)
+        if btn is not None:
+            try:
+                btn.configure(state=state)
+            except Exception:
+                pass
 
     def _set_format_enabled(self, enabled: bool):
         self._format_menu.configure(state="normal" if enabled else "disabled")
@@ -395,6 +444,8 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
                 f"Manual · {ext} · video quality {q}\n"
                 "Edit size, format, quality and audio below"
             )
+        elif name in self.presets:
+            text = f"{text}\n{_CUSTOMIZE_HINT}"
         set_info_text(self._preset_info, text)
 
     def refresh_audio_info(self):
@@ -449,18 +500,22 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
         self._refresh_rife_info()
 
     def apply_preset(self, preset_name: str | None = None):
-        """Named presets lock size/format/quality; only Manual… edits them."""
+        """Named presets lock size/format/quality; Manual… (or Edit) edits them."""
         name = preset_name or self.preset_var.get()
+        # OptionMenu updates the var before calling command, so detect "was Manual"
+        # via _manual_active rather than comparing preset_var.
+        if self._manual_active and name != PRESET_CUSTOM:
+            self._snapshot_manual_settings()
+
         is_custom = name == PRESET_CUSTOM or name not in self.presets
         if is_custom:
-            self._set_dim_fields_enabled(True)
-            self._set_format_enabled(True)
-            self._set_quality_enabled(True)
-            self.refresh_preset_info()
-            self.refresh_audio_info()
+            # Re-selecting Manual while already editing must not clobber in-progress values.
+            restore = not self._manual_active
+            self._enter_manual(restore_saved=restore)
             return
 
         preset = self.presets[name]
+        self._manual_active = False
         self._set_dim_fields_enabled(True)
         self.ext_var.set(preset["ext"])
         if preset.get("keep_size"):
@@ -474,8 +529,70 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
         self._set_dim_fields_enabled(False)
         self._set_format_enabled(False)
         self._set_quality_enabled(False)
+        self._set_customize_enabled(True)
         self.refresh_preset_info()
         self.refresh_audio_info()
+
+    def customize_preset(self):
+        """Unlock current preset values by switching to Manual… (no restore)."""
+        if self.preset_var.get() == PRESET_CUSTOM or self._manual_active:
+            return
+        self.preset_var.set(PRESET_CUSTOM)
+        self._enter_manual(restore_saved=False)
+
+    def _enter_manual(self, *, restore_saved: bool):
+        """Unlock encode fields; optionally restore last Manual snapshot."""
+        if restore_saved:
+            self._restore_manual_settings()
+        self._manual_active = True
+        self._set_dim_fields_enabled(True)
+        self._set_format_enabled(True)
+        self._set_quality_enabled(True)
+        self._set_customize_enabled(False)
+        self.refresh_preset_info()
+        self.refresh_audio_info()
+
+    def _set_customize_enabled(self, enabled: bool):
+        btn = getattr(self, "_customize_btn", None)
+        if btn is None:
+            return
+        try:
+            btn.configure(state="normal" if enabled else "disabled")
+        except Exception:
+            pass
+
+    def _snapshot_manual_settings(self):
+        global _last_manual_settings
+        _last_manual_settings = {
+            "ext": self.ext_var.get() or ".mp4",
+            "width": self.width_var.get(),
+            "height": self.height_var.get(),
+            "fps": self.fps_var.get(),
+            "video_quality": self.video_quality_var.get() or DEFAULT_VIDEO_QUALITY,
+            "audio_bitrate": self.audio_bitrate_var.get() or DEFAULT_AUDIO_BITRATE,
+            "include_audio": bool(self.sound_var.get()),
+        }
+
+    def _restore_manual_settings(self) -> bool:
+        """Apply last Manual snapshot if present. Returns True when restored."""
+        snap = _last_manual_settings
+        if not snap:
+            return False
+        self.ext_var.set(snap.get("ext") or ".mp4")
+        self.width_var.set(snap.get("width") or "")
+        self.height_var.set(snap.get("height") or "")
+        self.fps_var.set(snap.get("fps") or "")
+        q = snap.get("video_quality") or DEFAULT_VIDEO_QUALITY
+        if q not in VIDEO_QUALITY_LEVELS:
+            q = DEFAULT_VIDEO_QUALITY
+        self.video_quality_var.set(q)
+        br = snap.get("audio_bitrate") or DEFAULT_AUDIO_BITRATE
+        if br not in AUDIO_BITRATE_LEVELS:
+            br = DEFAULT_AUDIO_BITRATE
+        self.audio_bitrate_var.set(br)
+        if "include_audio" in snap:
+            self.sound_var.set(bool(snap["include_audio"]))
+        return True
 
     def get_custom_settings(self) -> dict:
         """
@@ -543,4 +660,6 @@ class VideoEncodeSettingsPanel(ctk.CTkFrame):
         }
         if settings["width"] <= 0 or settings["height"] <= 0 or settings["fps"] <= 0:
             raise ValueError("Width, height, and FPS must be positive.")
+        if from_custom_ui:
+            self._snapshot_manual_settings()
         return settings
