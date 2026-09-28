@@ -786,11 +786,11 @@ class InfoPanelFrame(ctk.CTkFrame):
             return
         media = None
         try:
-            media = self.preview_player.instance.media_new(vp)
+            media = self.preview_player._create_media(vp)
             if hasattr(self.preview_player, "_apply_preview_media_options"):
                 self.preview_player._apply_preview_media_options(media)
         except Exception as e:
-            logging.info("[Preview] VLC media_new failed: %s", e)
+            logging.info("[Preview] VLC media create failed: %s", e)
             media = None
 
         if getattr(self, "_pending_preview_path", None) != vp:

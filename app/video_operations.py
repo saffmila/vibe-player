@@ -967,6 +967,10 @@ class VideoPlayer:
             return
         if has_dims:
             return
+        # Still resolving/demuxing — do not false-positive "broken" (slow disks / odd names).
+        if st in (vlc.State.Opening, vlc.State.Buffering):
+            logging.info("[BrokenOverlay] still opening/buffering — skip")
+            return
         if not strict:
             return
 
@@ -979,9 +983,7 @@ class VideoPlayer:
 
         if st in (
             vlc.State.Playing,
-            vlc.State.Buffering,
             vlc.State.Paused,
-            vlc.State.Opening,
             vlc.State.Ended,
         ):
             logging.info("[BrokenOverlay] strict: state=%s no dims -> overlay", st)
@@ -1815,6 +1817,41 @@ class VideoPlayer:
         _log_vlc_timing("_ensure_vlc_player total", ensure_start)
         return True
 
+    @staticmethod
+    def _is_remote_media_mrl(mrl: str) -> bool:
+        """True for network/stream locations (not local filesystem paths)."""
+        lower = (mrl or "").strip().lower()
+        if not lower:
+            return False
+        return lower.startswith((
+            "http://", "https://", "rtsp://", "rtsps://", "rtp://",
+            "udp://", "mms://", "mmsh://", "dvd://", "vcd://", "cdda://",
+            "screen://", "dshow://", "v4l2://", "smb://", "ftp://", "sftp://",
+            "file://",  # already a location URI — use media_new / location API
+        ))
+
+    def _create_media(self, path, *options):
+        """
+        Create libVLC media for a local path or remote MRL.
+
+        python-vlc's ``media_new()`` treats any string with ``:`` after index 1 as a
+        URL (``media_new_location``). On Linux that breaks legal filenames such as
+        ``clip (9:16).mp4`` or ``Title: subtitle.mp4``. Always use ``media_new_path``
+        for local files — safe on Windows too (``C:\\...`` already went through path).
+        """
+        if not self.instance:
+            raise RuntimeError("VLC instance is not initialized")
+        mrl = str(path or "")
+        if mrl and not self._is_remote_media_mrl(mrl) and hasattr(self.instance, "media_new_path"):
+            media = self.instance.media_new_path(os.path.normpath(mrl))
+        else:
+            media = self.instance.media_new(mrl)
+        for opt in options:
+            if opt is None or opt == "":
+                continue
+            media.add_option(str(opt))
+        return media
+
     def _apply_preview_media_options(self, media) -> None:
         """Disable audio track for muted embedded preview media."""
         if not self.embed or not getattr(self, "mute_embed", True) or media is None:
@@ -2641,7 +2678,7 @@ class VideoPlayer:
         if not self._ensure_vlc_player():
             return
 
-        media = self.instance.media_new(self.video_path)
+        media = self._create_media(self.video_path)
         self._apply_preview_media_options(media)
         self.player.set_media(media)
         self._mark_media_loaded()
@@ -4358,7 +4395,7 @@ class VideoPlayer:
                     was_playing = self.playing
                     self.pause_video() if was_playing else setattr(self, "last_position", self.player.get_time())
 
-                    media = self.instance.media_new(self.video_path)
+                    media = self._create_media(self.video_path)
                     media.add_option(f"sub-file={converted_path}")
 
                     self.player.set_media(media)
@@ -4497,7 +4534,7 @@ class VideoPlayer:
 
         # 2. Vytvoření média a zbytek logiky (zůstává stejné)
         media_start = time.perf_counter()
-        media = self.instance.media_new(self.video_path)
+        media = self._create_media(self.video_path)
         _log_vlc_timing("media_new", media_start)
         self._apply_preview_media_options(media)
 
@@ -4729,7 +4766,7 @@ class VideoPlayer:
             except Exception:
                 pass
 
-            new_media = self.instance.media_new(path)
+            new_media = self._create_media(path)
             self.player.set_media(new_media)
             self._mark_media_loaded()
             if hasattr(self, "video_label") and self.video_label.winfo_exists():
@@ -4810,7 +4847,7 @@ class VideoPlayer:
         self.video_window.title((name or "").lower())
 
         # 2. Vytvoříme NOVÉ MÉDIUM, ale POUŽIJEME STÁVAJÍCÍ PŘEHRÁVAČ.
-        new_media = self.instance.media_new(self.video_path)
+        new_media = self._create_media(self.video_path)
         self.player.set_media(new_media)
 
         # 3. Spustíme přehrávání nového média
