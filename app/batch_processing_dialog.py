@@ -339,13 +339,17 @@ def process_one_image(
 
         q = max(1, min(100, int(quality)))
         if ext in (".jpg", ".jpeg"):
-            save_kw.update(quality=q, subsampling=0, optimize=True)
+            # Skip optimize=True — Huffman pass adds time for little gain at batch sizes.
+            save_kw.update(quality=q, subsampling=0)
         elif ext == ".webp":
-            save_kw.update(quality=q, method=4)
+            # method 0–6: higher = slower/smaller. 4 is a heavy default for batch.
+            save_kw.update(quality=q, method=0)
         elif ext == ".png":
             # Lossless deflate level — not "quality". 0 = store, 9 = max compress.
+            # Do NOT set optimize=True: Pillow then forces compress_level=9 and
+            # ignores the slider (multi-second saves on ~4K photos).
             level = max(0, min(9, int(png_compress)))
-            save_kw.update(compress_level=level, optimize=level > 0)
+            save_kw.update(compress_level=level)
 
         first.save(tmp_path, **save_kw)
         os.replace(tmp_path, dest_path)
@@ -1491,7 +1495,8 @@ class BatchProcessDialog(ctk.CTkToplevel):
         # Per-format compression memory so switching formats restores values.
         self._jpg_quality = 90
         self._webp_quality = 90
-        self._png_compress = 6
+        # Default 1 = fast PNG (slider still goes to 9 for smaller files).
+        self._png_compress = 1
 
         self._use_advanced = tk.BooleanVar(value=False)
         self._adv_resize_enabled = False
@@ -1804,7 +1809,7 @@ class BatchProcessDialog(ctk.CTkToplevel):
             self._compress_slider.configure(from_=0, to=9, number_of_steps=9)
             self._compress_var.set(self._png_compress)
             self._compress_hint.configure(
-                text="PNG deflate level 0–9 (lossless; higher = smaller/slower)."
+                text="PNG level 0–9 (lossless). Lower = faster; higher = smaller file."
             )
             self._set_compression_controls_enabled(True)
         else:  # BMP — no quality / compression parameter
@@ -2047,6 +2052,50 @@ class BatchProcessDialog(ctk.CTkToplevel):
             pass
         self.destroy()
 
+    def _ensure_output_dir(self, out_dir: str, on_ready) -> None:
+        """If ``out_dir`` exists, call ``on_ready``; else ask to create it via universal_dialog."""
+        if os.path.isdir(out_dir):
+            on_ready()
+            return
+        if os.path.exists(out_dir):
+            messagebox.showerror(
+                "Output folder",
+                f"Path exists but is not a folder:\n{out_dir}",
+                parent=self,
+            )
+            return
+
+        def _create() -> None:
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+            except OSError as exc:
+                messagebox.showerror(
+                    "Output folder",
+                    f"Cannot create folder:\n{out_dir}\n\n{exc}",
+                    parent=self,
+                )
+                return
+            on_ready()
+
+        owner = self._parent if hasattr(self._parent, "universal_dialog") else None
+        message = (
+            f"Output folder does not exist:\n{out_dir}\n\n"
+            "Create it?"
+        )
+        if owner is not None:
+            owner.universal_dialog(
+                title="Create folder?",
+                message=message,
+                confirm_callback=_create,
+                confirm_text="Create",
+                cancel_text="Cancel",
+                show_cancel=True,
+                parent=self,
+            )
+            return
+        if messagebox.askyesno("Create folder?", message, parent=self):
+            _create()
+
     def _on_start(self):
         fmt = self._format_var.get()
         out_ext = OUTPUT_FORMATS.get(fmt)
@@ -2057,13 +2106,24 @@ class BatchProcessDialog(ctk.CTkToplevel):
         output_dir = None
         if self._out_mode.get() == "custom":
             output_dir = (self._outdir_var.get() or "").strip()
-            if not output_dir or not os.path.isdir(output_dir):
+            if not output_dir:
                 messagebox.showerror(
                     "Batch Convert",
                     "Please choose a valid output folder.",
                     parent=self,
                 )
                 return
+            self._ensure_output_dir(output_dir, lambda: self._finish_start(output_dir))
+            return
+
+        self._finish_start(output_dir)
+
+    def _finish_start(self, output_dir: Optional[str]):
+        fmt = self._format_var.get()
+        out_ext = OUTPUT_FORMATS.get(fmt)
+        if not out_ext:
+            messagebox.showerror("Batch Convert", "Unknown output format.", parent=self)
+            return
 
         rename_enabled = bool(self._rename_var.get())
         pattern = self._pattern_var.get()
