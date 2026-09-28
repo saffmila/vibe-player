@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
+import sys
 import tempfile
 import threading
+from typing import Callable
 
 from tkinter import messagebox
 
@@ -17,6 +20,332 @@ from vtp_constants import IMAGE_FORMATS
 
 class VtpBirefnetMixin:
     """Context-menu driven BiRefNet background removal for still images."""
+
+    def ensure_birefnet_ready(
+        self,
+        on_ready: Callable[[], None],
+        *,
+        title: str = "Batch Convert",
+        parent=None,
+    ) -> None:
+        """
+        Make sure BiRefNet deps + CUDA torch are ready, offering auto-install.
+
+        Calls ``on_ready`` when the runtime is usable. Install dialogs warn about
+        download size/time and support Cancel.
+        """
+        from birefnet_config import python_deps_status, runtime_status
+
+        owner = parent if parent is not None else self
+
+        deps = python_deps_status()
+        if not deps.get("ready"):
+            if deps.get("error") == "deps_import_error":
+                # Wheels are present but Torch/kornia cannot load in this process
+                # (typical right after a CUDA wheel swap on Windows).
+                self._offer_restart_after_torch_install(
+                    deps.get("message") or "",
+                    title=title,
+                )
+                return
+            self.offer_install_birefnet_python_deps(
+                list(deps.get("missing") or []),
+                lambda: self.ensure_birefnet_ready(
+                    on_ready, title=title, parent=parent
+                ),
+                title=title,
+                parent=owner,
+            )
+            return
+
+        rt = runtime_status(deep=True)
+        if rt.get("ready"):
+            on_ready()
+            return
+
+        err = rt.get("error") or ""
+        if getattr(sys, "frozen", False) and err in (
+            "gpu_pack_missing",
+            "cuda_unavailable",
+            "runtime_error",
+        ):
+            messagebox.showwarning(
+                title,
+                rt.get("message")
+                or "Autotag GPU Pack is not installed.\n"
+                "Extract the pack over VibePlayer/ and restart.",
+                parent=owner,
+            )
+            return
+
+        if err in ("cuda_unavailable", "gpu_pack_missing", "runtime_error"):
+            self.offer_install_birefnet_torch_cuda(
+                lambda: self.ensure_birefnet_ready(
+                    on_ready, title=title, parent=parent
+                ),
+                title=title,
+                parent=owner,
+            )
+            return
+
+        messagebox.showwarning(
+            title,
+            rt.get("message") or "GPU runtime is not ready.",
+            parent=owner,
+        )
+
+    def offer_install_birefnet_python_deps(
+        self,
+        missing: list[str],
+        on_success: Callable[[], None],
+        *,
+        title: str = "Batch Convert",
+        parent=None,
+    ) -> None:
+        """Ask to pip-install missing BiRefNet deps, then call ``on_success``."""
+        pkgs = [p for p in (missing or []) if p]
+        if not pkgs:
+            on_success()
+            return
+
+        owner = parent if parent is not None else self
+        joined = ", ".join(pkgs)
+
+        def _install() -> None:
+            from birefnet_weights_setup import install_birefnet_python_deps
+
+            self._run_birefnet_pip_install_job(
+                title=title,
+                action_detail=f"pip install {joined}",
+                installer=lambda progress_cb, should_stop: install_birefnet_python_deps(
+                    pkgs,
+                    progress_cb=progress_cb,
+                    should_stop=should_stop,
+                ),
+                on_success=on_success,
+            )
+
+        message = (
+            f"Missing packages:\n{joined}\n\n"
+            "Install them now and continue?\n"
+            "(Usually under a minute. You can Cancel anytime.)"
+        )
+        if hasattr(self, "universal_dialog"):
+            self.universal_dialog(
+                title="Install packages?",
+                headline="Background removal needs extra Python packages.",
+                message=message,
+                confirm_callback=_install,
+                confirm_text="Install",
+                cancel_text="Cancel",
+                show_cancel=True,
+                secondary_cancel=True,
+                dialog_width=412,
+                parent=owner,
+            )
+            return
+        if messagebox.askyesno(
+            "Install packages?",
+            "Background removal needs extra Python packages.\n\n" + message,
+            parent=owner,
+        ):
+            _install()
+
+    def offer_install_birefnet_torch_cuda(
+        self,
+        on_success: Callable[[], None],
+        *,
+        title: str = "Batch Convert",
+        parent=None,
+    ) -> None:
+        """Ask to install CUDA PyTorch, with size/time warning + Cancel."""
+        from birefnet_weights_setup import (
+            BIREFNET_TORCH_DISK_ESTIMATE,
+            BIREFNET_TORCH_TIME_HINT,
+            install_birefnet_torch_cuda,
+        )
+
+        owner = parent if parent is not None else self
+
+        def _install() -> None:
+            self._run_birefnet_pip_install_job(
+                title=title,
+                action_detail=f"PyTorch CUDA ({BIREFNET_TORCH_DISK_ESTIMATE})",
+                installer=lambda progress_cb, should_stop: install_birefnet_torch_cuda(
+                    progress_cb=progress_cb,
+                    should_stop=should_stop,
+                ),
+                on_success=on_success,
+                allow_restart=True,
+            )
+
+        message = (
+            f"Download size: about {BIREFNET_TORCH_DISK_ESTIMATE}\n"
+            f"This can take {BIREFNET_TORCH_TIME_HINT} depending on your connection.\n\n"
+            "Install now and continue?\n"
+            "You can Cancel during the download."
+        )
+        if hasattr(self, "universal_dialog"):
+            self.universal_dialog(
+                title="Install PyTorch CUDA?",
+                headline="Background removal needs PyTorch with CUDA.",
+                message=message,
+                confirm_callback=_install,
+                confirm_text="Install",
+                cancel_text="Cancel",
+                show_cancel=True,
+                secondary_cancel=True,
+                dialog_width=412,  # ~40% wider than default 294
+                parent=owner,
+            )
+            return
+        if messagebox.askyesno(
+            "Install PyTorch CUDA?",
+            "Background removal needs PyTorch with CUDA.\n\n" + message,
+            parent=owner,
+        ):
+            _install()
+
+    def _run_birefnet_pip_install_job(
+        self,
+        *,
+        title: str,
+        action_detail: str,
+        installer: Callable,
+        on_success: Callable[[], None],
+        allow_restart: bool = False,
+    ) -> None:
+        progress = open_file_op_progress_dialog(
+            self,
+            title=title,
+            total=1,
+            action_label="Installing",
+            topmost=True,
+        )
+        progress.set_progress(0, detail=action_detail)
+
+        def _worker() -> None:
+            result: dict = {
+                "ok": False,
+                "message": "Install failed unexpectedly.",
+            }
+            try:
+                result = installer(
+                    lambda step, total, detail: self.after(
+                        0,
+                        lambda s=step, d=detail: progress.set_progress(s, detail=d),
+                    ),
+                    lambda: bool(getattr(progress, "cancelled", False)),
+                ) or result
+            except Exception as exc:
+                logging.exception("BiRefNet pip install worker crashed")
+                result = {
+                    "ok": False,
+                    "message": f"Install crashed:\n{exc}",
+                    "cancelled": False,
+                }
+
+            def _done() -> None:
+                try:
+                    progress.close()
+                except Exception:
+                    pass
+                if result.get("cancelled"):
+                    return
+                if not result.get("ok"):
+                    messagebox.showerror(
+                        title,
+                        result.get("message") or "Install failed.",
+                        parent=self,
+                    )
+                    return
+                if allow_restart and result.get("restart_required"):
+                    self._offer_restart_after_torch_install(
+                        result.get("message") or "",
+                        title=title,
+                    )
+                    return
+                try:
+                    on_success()
+                except Exception:
+                    logging.exception("BiRefNet install success callback failed")
+
+            self.after(0, _done)
+
+        threading.Thread(
+            target=_worker, daemon=True, name="birefnet-pip-install"
+        ).start()
+
+    def _offer_restart_after_torch_install(
+        self, message: str, *, title: str = "Batch Convert"
+    ) -> None:
+        body = (
+            "This process still has the old Torch loaded.\n"
+            "Restart Vibe Player, then run background removal again.\n\n"
+            "Restart now?"
+        )
+
+        def _restart() -> None:
+            self._restart_vibe_player_process()
+
+        if hasattr(self, "universal_dialog"):
+            self.universal_dialog(
+                title="Restart required",
+                headline="PyTorch CUDA is installed.",
+                message=body,
+                confirm_callback=_restart,
+                confirm_text="Restart",
+                cancel_text="Later",
+                show_cancel=True,
+                secondary_cancel=True,
+                dialog_width=412,
+                parent=self,
+            )
+            return
+        if messagebox.askyesno(
+            "Restart required",
+            "PyTorch CUDA is installed.\n\n" + body,
+            parent=self,
+        ):
+            _restart()
+
+    def _restart_vibe_player_process(self) -> None:
+        """Relaunch this app and exit (needed after swapping Torch DLLs on Windows)."""
+        try:
+            main_file = getattr(sys.modules.get("__main__"), "__file__", None)
+            app_dir = (
+                os.path.dirname(os.path.abspath(main_file))
+                if main_file
+                else os.path.dirname(os.path.abspath(__file__))
+            )
+        except Exception:
+            app_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(app_dir)
+        try:
+            if getattr(sys, "frozen", False):
+                cmd = [sys.executable]
+                cwd = os.path.dirname(os.path.abspath(sys.executable))
+            else:
+                run_bat = os.path.join(project_root, "run.bat")
+                if os.path.isfile(run_bat):
+                    cmd = [run_bat]
+                    cwd = project_root
+                else:
+                    cmd = [sys.executable, os.path.join(app_dir, "main.py")]
+                    cwd = app_dir
+            subprocess.Popen(cmd, cwd=cwd, env={**os.environ})
+        except Exception as exc:
+            logging.exception("Failed to relaunch Vibe Player")
+            messagebox.showerror(
+                "Restart",
+                f"Could not restart automatically:\n{exc}\n\nPlease restart manually.",
+                parent=self,
+            )
+            return
+        try:
+            self.after(150, lambda: os._exit(0))
+        except Exception:
+            os._exit(0)
 
     def _notify_birefnet_issue_once(self, error_code: str | None, message: str):
         flag = f"_birefnet_issue_shown_{error_code or 'unknown'}"
@@ -30,6 +359,8 @@ class VtpBirefnetMixin:
             title = "GPU pack"
         elif error_code == "weights_missing":
             title = "BiRefNet weights"
+        elif error_code == "deps_missing":
+            title = "Python packages"
         self.after(0, lambda: messagebox.showwarning(title, text))
 
     def selected_paths_for_birefnet(self, clicked_path: str | None = None) -> list[str]:
@@ -81,6 +412,21 @@ class VtpBirefnetMixin:
             messagebox.showerror(
                 "Remove Background",
                 "BiRefNet plugin not loaded. Check app.log.",
+            )
+            return
+
+        self.ensure_birefnet_ready(
+            lambda: self._start_birefnet_batch_after_ready(paths, options, plugin),
+            title="Remove Background",
+        )
+
+    def _start_birefnet_batch_after_ready(
+        self, paths: list[str], options: dict, plugin
+    ) -> None:
+        if getattr(self, "_birefnet_batch_running", False):
+            messagebox.showinfo(
+                "Remove Background",
+                "A background removal job is already running.",
             )
             return
 

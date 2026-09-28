@@ -11,6 +11,7 @@ import os
 import queue
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import customtkinter as ctk
 import tkinter as tk
@@ -3485,11 +3486,10 @@ class VtpGridMixin:
         if remove_background:
             from birefnet_config import runtime_status
 
-            rt = runtime_status(deep=True)
-            if not rt.get("ready"):
-                messagebox.showwarning(
-                    "Batch Convert",
-                    rt.get("message") or "Autotag GPU Pack is not installed.",
+            if not runtime_status(deep=True).get("ready"):
+                self.ensure_birefnet_ready(
+                    lambda: self.start_batch_image_process(job),
+                    title="Batch Convert",
                 )
                 return
             out_ext = ".png"
@@ -3506,23 +3506,131 @@ class VtpGridMixin:
             ok = 0
             skipped = 0
             aborted = False
+            done_count = 0
             _unload_birefnet = remove_background
-            try:
-                for i, src in enumerate(paths, start=1):
-                    if progress.cancelled:
-                        aborted = True
-                        break
-                    name = os.path.basename(src)
-                    self.after(
-                        0,
-                        lambda i=i, name=name: progress.set_progress(
-                            i - 1, detail=name
-                        ),
+            conflict_lock = threading.Lock()
+            state_lock = threading.Lock()
+
+            def _bump_progress(name: str) -> None:
+                nonlocal done_count
+                with state_lock:
+                    done_count += 1
+                    n = done_count
+                self.after(
+                    0,
+                    lambda n=n, name=name: progress.set_progress(n, detail=name),
+                )
+
+            def _convert_file(src: str, dest: str) -> str:
+                """Apply transforms / optional BiRefNet; return final dest path."""
+                if remove_background:
+                    from birefnet_pipeline import remove_background_from_file
+
+                    has_ops = any(
+                        [
+                            rotate_op,
+                            flip_h,
+                            flip_v,
+                            crop_settings,
+                            resize_settings,
+                            canvas_settings,
+                        ]
                     )
+
+                    def _should_stop_bg() -> bool:
+                        return bool(progress.cancelled)
+
+                    bg_kwargs = {
+                        "bg_mode": str(
+                            birefnet_options.get("bg_mode") or "transparent"
+                        ),
+                        "bg_color": birefnet_options.get("bg_color"),
+                        "cuda_device": birefnet_options.get("cuda_device"),
+                        "model_variant": birefnet_options.get("model_variant"),
+                        "mask_threshold": int(
+                            birefnet_options.get("mask_threshold") or 0
+                        ),
+                        "mask_feather": int(
+                            birefnet_options.get("mask_feather") or 0
+                        ),
+                        "mask_morph": int(birefnet_options.get("mask_morph") or 0),
+                        "should_stop": _should_stop_bg,
+                    }
+
+                    if has_ops:
+                        import tempfile
+
+                        fd, tmp_path = tempfile.mkstemp(
+                            suffix=".png", dir=os.path.dirname(dest) or None
+                        )
+                        os.close(fd)
+                        try:
+                            process_one_image(
+                                src,
+                                tmp_path,
+                                rotate_op=rotate_op,
+                                flip_h=flip_h,
+                                flip_v=flip_v,
+                                crop_settings=crop_settings,
+                                resize_settings=resize_settings,
+                                canvas_settings=canvas_settings,
+                                quality=quality,
+                                png_compress=png_compress,
+                            )
+                            result = remove_background_from_file(
+                                tmp_path,
+                                dest,
+                                **bg_kwargs,
+                            )
+                        finally:
+                            try:
+                                os.remove(tmp_path)
+                            except OSError:
+                                pass
+                    else:
+                        result = remove_background_from_file(
+                            src,
+                            dest,
+                            **bg_kwargs,
+                        )
+
+                    if progress.cancelled:
+                        raise InterruptedError("Batch convert cancelled")
+                    if not result.get("ok"):
+                        raise RuntimeError(
+                            result.get("message") or "Background removal failed."
+                        )
+                    if result.get("output_path"):
+                        return result["output_path"]
+                    return dest
+
+                process_one_image(
+                    src,
+                    dest,
+                    rotate_op=rotate_op,
+                    flip_h=flip_h,
+                    flip_v=flip_v,
+                    crop_settings=crop_settings,
+                    resize_settings=resize_settings,
+                    canvas_settings=canvas_settings,
+                    quality=quality,
+                    png_compress=png_compress,
+                )
+                return dest
+
+            def _process_one(index: int, src: str):
+                """One file: resolve conflict then convert. Returns status tuple."""
+                name = os.path.basename(src)
+                if progress.cancelled:
+                    return ("aborted", name, None)
+
+                with conflict_lock:
+                    if progress.cancelled:
+                        return ("aborted", name, None)
                     try:
                         suggested = build_output_path(
                             src,
-                            index=i,
+                            index=index,
                             out_ext=out_ext,
                             output_dir=output_dir,
                             rename_enabled=rename_enabled,
@@ -3536,137 +3644,103 @@ class VtpGridMixin:
                             ask_before_overwrite=ask_before_overwrite,
                         )
                     except InterruptedError:
-                        aborted = True
-                        break
+                        return ("aborted", name, None)
                     except Exception as e:
-                        logging.info("Batch convert conflict failed for %s: %s", src, e)
-                        errors.append(f"{name}: {e}")
-                        self.after(
-                            0,
-                            lambda i=i, name=name: progress.set_progress(
-                                i, detail=name
-                            ),
+                        logging.info(
+                            "Batch convert conflict failed for %s: %s", src, e
                         )
-                        continue
+                        return ("error", name, f"{name}: {e}")
 
-                    if dest is None:
-                        skipped += 1
-                        self.after(
-                            0,
-                            lambda i=i, name=name: progress.set_progress(
-                                i, detail=f"{name} (skipped)"
-                            ),
-                        )
-                        continue
+                if dest is None:
+                    return ("skip", name, None)
 
-                    try:
-                        if remove_background:
-                            from birefnet_pipeline import remove_background_from_file
+                if progress.cancelled:
+                    return ("aborted", name, None)
 
-                            has_ops = any(
-                                [
-                                    rotate_op,
-                                    flip_h,
-                                    flip_v,
-                                    crop_settings,
-                                    resize_settings,
-                                    canvas_settings,
-                                ]
-                            )
+                try:
+                    final_dest = _convert_file(src, dest)
+                    return ("ok", name, final_dest)
+                except InterruptedError:
+                    return ("aborted", name, None)
+                except Exception as e:
+                    logging.info("Batch convert failed for %s: %s", src, e)
+                    return ("error", name, f"{name}: {e}")
 
-                            def _should_stop_bg() -> bool:
-                                return bool(progress.cancelled)
+            try:
+                # BiRefNet shares one GPU model — keep sequential. Plain convert
+                # benefits from parallel Pillow encode (zlib releases the GIL).
+                if remove_background or len(paths) <= 1:
+                    workers = 1
+                else:
+                    cpu = os.cpu_count() or 4
+                    workers = max(1, min(4, cpu, len(paths)))
+                logging.info(
+                    "Batch convert: %d worker(s) for %d file(s)",
+                    workers,
+                    len(paths),
+                )
 
-                            bg_kwargs = {
-                                "bg_mode": str(
-                                    birefnet_options.get("bg_mode") or "transparent"
-                                ),
-                                "bg_color": birefnet_options.get("bg_color"),
-                                "cuda_device": birefnet_options.get("cuda_device"),
-                                "model_variant": birefnet_options.get(
-                                    "model_variant"
-                                ),
-                                "mask_threshold": int(
-                                    birefnet_options.get("mask_threshold") or 0
-                                ),
-                                "mask_feather": int(
-                                    birefnet_options.get("mask_feather") or 0
-                                ),
-                                "mask_morph": int(
-                                    birefnet_options.get("mask_morph") or 0
-                                ),
-                                "should_stop": _should_stop_bg,
-                            }
-
-                            if has_ops:
-                                import tempfile
-
-                                fd, tmp_path = tempfile.mkstemp(
-                                    suffix=".png", dir=os.path.dirname(dest) or None
-                                )
-                                os.close(fd)
-                                try:
-                                    process_one_image(
-                                        src,
-                                        tmp_path,
-                                        rotate_op=rotate_op,
-                                        flip_h=flip_h,
-                                        flip_v=flip_v,
-                                        crop_settings=crop_settings,
-                                        resize_settings=resize_settings,
-                                        canvas_settings=canvas_settings,
-                                        quality=quality,
-                                        png_compress=png_compress,
-                                    )
-                                    result = remove_background_from_file(
-                                        tmp_path,
-                                        dest,
-                                        **bg_kwargs,
-                                    )
-                                finally:
-                                    try:
-                                        os.remove(tmp_path)
-                                    except OSError:
-                                        pass
-                            else:
-                                result = remove_background_from_file(
-                                    src,
-                                    dest,
-                                    **bg_kwargs,
-                                )
-
-                            if progress.cancelled:
-                                aborted = True
-                                break
-                            if not result.get("ok"):
-                                raise RuntimeError(
-                                    result.get("message") or "Background removal failed."
-                                )
-                            if result.get("output_path"):
-                                dest = result["output_path"]
+                if workers == 1:
+                    for i, src in enumerate(paths, start=1):
+                        if progress.cancelled:
+                            aborted = True
+                            break
+                        status, name, payload = _process_one(i, src)
+                        if status == "aborted":
+                            aborted = True
+                            break
+                        if status == "skip":
+                            skipped += 1
+                            _bump_progress(f"{name} (skipped)")
+                        elif status == "error":
+                            errors.append(payload or name)
+                            _bump_progress(name)
                         else:
-                            process_one_image(
-                                src,
-                                dest,
-                                rotate_op=rotate_op,
-                                flip_h=flip_h,
-                                flip_v=flip_v,
-                                crop_settings=crop_settings,
-                                resize_settings=resize_settings,
-                                canvas_settings=canvas_settings,
-                                quality=quality,
-                                png_compress=png_compress,
-                            )
-                        ok += 1
-                        written.append(dest)
-                    except Exception as e:
-                        logging.info("Batch convert failed for %s: %s", src, e)
-                        errors.append(f"{name}: {e}")
+                            ok += 1
+                            written.append(payload)
+                            _bump_progress(name)
+                else:
+                    with ThreadPoolExecutor(
+                        max_workers=workers,
+                        thread_name_prefix="batch-convert",
+                    ) as pool:
+                        futures = [
+                            pool.submit(_process_one, i, src)
+                            for i, src in enumerate(paths, start=1)
+                        ]
+                        for fut in as_completed(futures):
+                            if fut.cancelled():
+                                continue
+                            try:
+                                status, name, payload = fut.result()
+                            except Exception as e:
+                                logging.info("Batch convert worker crashed: %s", e)
+                                with state_lock:
+                                    errors.append(str(e))
+                                _bump_progress("?")
+                                continue
 
-                    self.after(
-                        0,
-                        lambda i=i, name=name: progress.set_progress(i, detail=name),
-                    )
+                            if status == "aborted":
+                                aborted = True
+                            elif status == "skip":
+                                with state_lock:
+                                    skipped += 1
+                                _bump_progress(f"{name} (skipped)")
+                            elif status == "error":
+                                with state_lock:
+                                    errors.append(payload or name)
+                                _bump_progress(name)
+                            else:
+                                with state_lock:
+                                    ok += 1
+                                    written.append(payload)
+                                _bump_progress(name)
+
+                            if aborted or progress.cancelled:
+                                aborted = True
+                                for pending in futures:
+                                    pending.cancel()
+                                # Keep draining in-flight workers so counts stay accurate.
             finally:
                 if _unload_birefnet:
                     try:

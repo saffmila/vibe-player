@@ -137,6 +137,18 @@ def python_deps_status() -> dict[str, Any]:
             __import__(name)
         except ImportError:
             missing.append(name)
+        except Exception as exc:
+            # e.g. kornia → torch DLL load failure (WinError 127) after a Torch swap.
+            return {
+                "ready": False,
+                "error": "deps_import_error",
+                "message": (
+                    f"Package '{name}' is installed but failed to import:\n{exc}\n\n"
+                    "If you just installed PyTorch CUDA, restart Vibe Player."
+                ),
+                "missing": [],
+                "import_error": str(exc),
+            }
     if missing:
         joined = ", ".join(missing)
         return {

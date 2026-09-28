@@ -152,7 +152,12 @@ def _load_model(
 
         model.to(want_dev)
         model.eval()
-        model.half()
+        # FP16 (half) produces all-NaN masks on some CUDA stacks (torch 2.9 / cu130).
+        # Prefer FP32 for correctness; VRAM at 1024² is still modest.
+        try:
+            model.float()
+        except Exception:
+            pass
         _model = model
         _model_device = want_dev
         _model_cuda_index = want_idx
@@ -229,7 +234,13 @@ def remove_background_from_image(
         ]
     )
 
-    tensor = transform(rgb).unsqueeze(0).to(device).half()
+    tensor = transform(rgb).unsqueeze(0).to(device)
+    # Match model dtype (FP32). Avoid .half() — yields NaN masks on some GPUs.
+    try:
+        param = next(model.parameters())
+        tensor = tensor.to(dtype=param.dtype)
+    except StopIteration:
+        pass
 
     if _stopped(should_stop):
         raise InterruptedError("Cancelled.")
@@ -242,7 +253,20 @@ def remove_background_from_image(
             pred = preds
         mask = pred.sigmoid().float().cpu()
 
+    if torch.isnan(mask).any() or torch.isinf(mask).any():
+        raise RuntimeError(
+            "BiRefNet produced an invalid mask (NaN/Inf). "
+            "Try again after restarting the app; if it persists, update NVIDIA drivers."
+        )
+
     mask = mask[0].squeeze()
+    # All-zero / near-zero alpha → fully transparent (looks black in most viewers).
+    if float(mask.max()) < 1e-4:
+        raise RuntimeError(
+            "BiRefNet returned an empty mask (no foreground detected). "
+            "Try another model variant or check the source image."
+        )
+
     mask_pil = transforms.ToPILImage()(mask)
     mask_pil = mask_pil.resize((orig_w, orig_h), Image.LANCZOS)
     mask_pil = post_process_mask(

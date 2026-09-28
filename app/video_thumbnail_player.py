@@ -1397,6 +1397,9 @@ class VideoThumbnailPlayer(
         checkbox_text=None,
         checkbox_variable=None,
         parent=None,
+        headline=None,
+        dialog_width=None,
+        secondary_cancel=False,
     ):
         """
         Create a universal dialog window for confirmation, error, or input.
@@ -1413,6 +1416,9 @@ class VideoThumbnailPlayer(
             modal (bool): Whether to grab all app input while the dialog is open.
             checkbox_text (str): Optional checkbox label below the message.
             checkbox_variable: Optional BooleanVar for the checkbox (created if missing).
+            headline (str): Optional bold blue lead line above ``message``.
+            dialog_width (int): Optional width override (px).
+            secondary_cancel (bool): Style Cancel as muted secondary vs primary blue.
         """
         # Avoid stacking multiple universal dialogs (e.g. repeated DnD warnings).
         existing = getattr(self, "_active_universal_dialog", None)
@@ -1435,8 +1441,18 @@ class VideoThumbnailPlayer(
         # Compact confirm size; wider only when an input field is shown.
         # Message-only: ~30% narrower than old 420; height tuned for breathing room.
         _dw, _dh = (560, 200) if input_field else (294, 130)
+        if dialog_width is not None:
+            try:
+                _dw = max(240, int(dialog_width))
+            except (TypeError, ValueError):
+                pass
         if checkbox_text:
             _dh = max(_dh, 160)
+        if headline:
+            _dh = max(_dh, 168)
+        line_count = (message or "").count("\n") + 1 + (1 if headline else 0)
+        if line_count >= 4 and not input_field:
+            _dh = max(_dh, 150 + min(line_count, 8) * 18)
         dialog_window.resizable(False, False)
         # CTkToplevel often inherits the parent's geometry. Pin a compact size
         # before packing so expand=True content cannot lock in a huge window.
@@ -1470,14 +1486,31 @@ class VideoThumbnailPlayer(
 
         # Buttons first (bottom). Centered pair with ~15px inset from edges.
         btn_row = ctk.CTkFrame(dialog_window, fg_color="transparent")
-        btn_row.pack(side="bottom", padx=15, pady=(8, 15))
+        btn_row.pack(side="bottom", padx=18, pady=(10, 16))
         btn_inner = ctk.CTkFrame(btn_row, fg_color="transparent")
         btn_inner.pack(anchor="center")
 
+        _side_pad = 22 if (headline or dialog_width) else 16
         content = ctk.CTkFrame(dialog_window, fg_color="transparent")
-        content.pack(side="top", fill="both", expand=True, padx=16, pady=(14, 6))
+        content.pack(
+            side="top", fill="both", expand=True, padx=_side_pad, pady=(16, 8)
+        )
 
-        _msg_wrap = 500 if input_field else 250
+        _msg_wrap = max(220, _dw - 48)
+        if input_field:
+            _msg_wrap = max(_msg_wrap, 500)
+
+        if headline:
+            ctk.CTkLabel(
+                content,
+                text=str(headline),
+                wraplength=_msg_wrap,
+                anchor="center",
+                justify="center",
+                font=ctk.CTkFont(size=13, weight="bold"),
+                text_color=("#3a9ef0", "#3a9ef0"),
+            ).pack(fill="x", pady=(0, 10))
+
         if input_field:
             label = ctk.CTkLabel(
                 content, text=message, wraplength=_msg_wrap, anchor="w", justify="left"
@@ -1535,7 +1568,7 @@ class VideoThumbnailPlayer(
         btn_confirm = None
         if confirm_callback is not None:
             btn_confirm = ctk.CTkButton(
-                btn_inner, text=confirm_text, width=100, height=30, command=on_confirm
+                btn_inner, text=confirm_text, width=108, height=32, command=on_confirm
             )
             btn_confirm.pack(side="left", padx=6)
 
@@ -1546,12 +1579,21 @@ class VideoThumbnailPlayer(
                 dialog_window.destroy()
 
             btn_third = ctk.CTkButton(
-                btn_inner, text=third_button, width=100, height=30, command=on_third
+                btn_inner, text=third_button, width=108, height=32, command=on_third
             )
             btn_third.pack(side="left", padx=6)
 
         # Cancel button
         btn_cancel = None
+        _cancel_kw = {"width": 108, "height": 32}
+        if secondary_cancel:
+            _cancel_kw.update(
+                fg_color=("#3a3a3a", "#3a3a3a"),
+                hover_color=("#4a4a4a", "#4a4a4a"),
+                text_color=("#e8e8e8", "#e8e8e8"),
+                border_width=1,
+                border_color=("#555555", "#555555"),
+            )
         if show_cancel:
             if cancel_callback:
                 def on_cancel():
@@ -1559,16 +1601,15 @@ class VideoThumbnailPlayer(
                     if dialog_window.winfo_exists():
                         dialog_window.destroy()
                 btn_cancel = ctk.CTkButton(
-                    btn_inner, text=cancel_text, width=100, height=30, command=on_cancel
+                    btn_inner, text=cancel_text, command=on_cancel, **_cancel_kw
                 )
                 btn_cancel.pack(side="left", padx=6)
             else:
                 btn_cancel = ctk.CTkButton(
                     btn_inner,
                     text=cancel_text,
-                    width=100,
-                    height=30,
                     command=lambda: dialog_window.winfo_exists() and dialog_window.destroy(),
+                    **_cancel_kw,
                 )
                 btn_cancel.pack(side="left", padx=6)
 
@@ -1584,12 +1625,11 @@ class VideoThumbnailPlayer(
                 w = max(_dw, min(max(req_w, _dw), max_w))
                 h = max(_dh, min(req_h + 8, max_h))
             else:
-                max_w = 340
+                max_w = max(340, _dw + 24)
                 # Short confirms stay tight; multi-line (delete / batch jobs) can grow a bit.
-                line_count = (message or "").count("\n") + 1
-                max_h = min(240, 130 + max(0, line_count - 1) * 28)
+                max_h = min(320, max(_dh, 130 + max(0, line_count - 1) * 26))
                 w = max(_dw, min(max(req_w, _dw), max_w))
-                h = max(_dh, min(req_h + 4, max_h))
+                h = max(_dh, min(req_h + 8, max_h))
             if parent is not None:
                 try:
                     px = parent.winfo_rootx() + max(0, (parent.winfo_width() - w) // 2)
