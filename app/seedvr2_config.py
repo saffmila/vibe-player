@@ -557,10 +557,20 @@ def friendly_dit_label(filename: str) -> str:
         bits.append("GGUF Q6")
     elif "q8" in lower:
         bits.append("GGUF Q8")
+    elif "nvfp4" in lower:
+        bits.append("NVFP4")
+    elif "mxfp8" in lower:
+        bits.append("MXFP8")
     elif "int8" in lower:
         bits.append("INT8")
     elif lower.endswith(".gguf"):
         bits.append("GGUF")
+    # numz CLI supports FP16/FP8/GGUF only — mark Comfy-native quants clearly.
+    unsupported = (not lower.endswith(".gguf")) and any(
+        tok in lower for tok in ("int8_convrot", "nvfp4", "mxfp8", "_int8.", "-int8.")
+    )
+    if unsupported:
+        bits.append("unsupported here")
     summary = " · ".join(bits) if bits else "DiT"
     return f"{summary}  —  {name}"
 

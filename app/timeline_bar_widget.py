@@ -1548,7 +1548,7 @@ class TimelineBarWidget(ctk.CTkFrame):
         self.canvas.bind("<space>", self.on_space_press)
         self.canvas.bind("m", self._magnet_keyboard_toggle)
         self.canvas.bind("M", self._magnet_keyboard_toggle)
-        self.canvas.bind("<Enter>", lambda e: self.canvas.focus_set())
+        self.canvas.bind("<Enter>", self._focus_timeline_canvas_on_enter)
         self.canvas.bind("<MouseWheel>", self._on_timeline_mousewheel, add="+")
         self.canvas_frame.bind("<MouseWheel>", self._on_timeline_mousewheel, add="+")
         self.canvas.bind("<Button-4>", self._on_timeline_mousewheel, add="+")
@@ -3622,6 +3622,17 @@ class TimelineBarWidget(ctk.CTkFrame):
             sb.set(first, last)
         self.after_idle(self._update_timeline_vscrollbar_visibility)
 
+    def _focus_timeline_canvas_on_enter(self, _event=None):
+        """Arrow-key / hotkey focus for the strip — do not steal Captions/text focus."""
+        ctrl = getattr(self, "controller", None)
+        has_text = getattr(ctrl, "_has_text_input_focus", None) if ctrl is not None else None
+        if callable(has_text) and has_text():
+            return
+        try:
+            self.canvas.focus_set()
+        except Exception:
+            pass
+
     def _on_timeline_mousewheel(self, event):
         if not self._timeline_vscroll_needed():
             return None
@@ -4896,6 +4907,15 @@ class TimelineBarWidget(ctk.CTkFrame):
 
           # The code below will ONLY run if the timeline is visible:
         active_player = getattr(self.controller, "active_player", None)
+
+        # Never call into libvlc while the player is tearing down — get_time() can
+        # deadlock with media_player_stop on another thread (UI hang on close).
+        if active_player and (
+            getattr(active_player, "_cleaning_up", False)
+            or getattr(active_player, "_cleanup_done", False)
+        ):
+            self.after(300, self._periodic_update)
+            return
         
         # --- FIX: Kontrola viditelnosti ZDROJOVÉHO přehrávače ---
         # Pokud je to "embed" (náhled v InfoPanelu), musíme ověřit, zda je InfoPanel viditelný.

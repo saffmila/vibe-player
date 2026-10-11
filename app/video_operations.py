@@ -68,6 +68,73 @@ def _log_player_timing(label: str, start_time: float) -> None:
     logging.info("[VideoPlayer TIMING] %s: %.3fs", label, time.perf_counter() - start_time)
 
 
+def _vlc_stop_in_background(player) -> threading.Event:
+    """
+    Start ``player.stop()`` on a daemon thread. Never call this on the UI thread
+    synchronously, and never pump Tk ``update()`` while waiting — a timer callback
+    (timeline ``get_time``) can deadlock with ``libvlc_media_player_stop``.
+    """
+    done = threading.Event()
+    if player is None:
+        done.set()
+        return done
+
+    def _run() -> None:
+        try:
+            player.stop()
+        except Exception as exc:
+            logging.info("[Cleanup][VLC] background player.stop() failed: %s", exc)
+        finally:
+            done.set()
+
+    threading.Thread(target=_run, name="vlc-stop", daemon=True).start()
+    return done
+
+
+def _vlc_stop_with_timeout(player, *, timeout_s: float = 1.5) -> bool:
+    """Wait briefly for background stop. No Tk pumping. Returns True if finished."""
+    done = _vlc_stop_in_background(player)
+    if done.wait(timeout=max(0.05, float(timeout_s))):
+        return True
+    logging.error(
+        "[Cleanup][VLC] player.stop() timed out after %.1fs — continuing "
+        "(D3D11/HW decode teardown still running in background)",
+        timeout_s,
+    )
+    return False
+
+
+def _vlc_release_chain_in_background(player, instance=None) -> None:
+    """stop → media detach → player.release → instance.release on a daemon thread."""
+
+    def _run() -> None:
+        try:
+            try:
+                player.stop()
+            except Exception:
+                pass
+            try:
+                m = player.get_media()
+                if m is not None:
+                    player.set_media(None)
+                    m.release()
+            except Exception:
+                pass
+            try:
+                player.release()
+            except Exception:
+                pass
+            if instance is not None:
+                try:
+                    instance.release()
+                except Exception:
+                    pass
+        except Exception as exc:
+            logging.info("[Cleanup][VLC] background release chain failed: %s", exc)
+
+    threading.Thread(target=_run, name="vlc-release-chain", daemon=True).start()
+
+
 def _dnd_tk_surface(widget):
     """Plain Tk widget for tkinterdnd2 (CustomTkinter hosts use ``_canvas``)."""
     if widget is None:
@@ -423,6 +490,7 @@ class VideoPlayer:
         self._open_full_app_overlay_hide_job = None
         self._cleaning_up = False
         self._cleanup_done = False
+        self._vlc_stop_timed_out = False
         self._media_end_handled_path = None
         self._playlist_advance_in_progress = False
         self._saw_playing_since_media_load = False
@@ -599,6 +667,14 @@ class VideoPlayer:
         self.video_window.bind("<Control-Left>", lambda e: self.skip_to_previous_cut())
         self.video_window.bind("<Shift-Right>", consume_shortcut(lambda: self.long_seek(direction=1)))
         self.video_window.bind("<Shift-Left>", consume_shortcut(lambda: self.long_seek(direction=-1)))
+        self.video_window.bind(
+            hk("video_frame_forward", "<period>"),
+            consume_shortcut(lambda: self.frame_step(direction=1)),
+        )
+        self.video_window.bind(
+            hk("video_frame_backward", "<comma>"),
+            consume_shortcut(lambda: self.frame_step(direction=-1)),
+        )
 
         # Speed bindings when this window has focus
         self.video_window.bind("<greater>", lambda e: self.speed_step(+1))
@@ -2079,6 +2155,85 @@ class VideoPlayer:
         self.last_position = target_ms
         self._sync_seek_ui(target_ms / 1000.0)
         logging.info("[Seek] Long seek %s by %.1fs to %.2fs", "forward" if direction >= 0 else "backward", seconds, target_ms / 1000.0)
+
+    def _get_video_fps(self) -> float:
+        """Cached source FPS for frame stepping; defaults to 24 when unknown."""
+        path = getattr(self, "video_path", None)
+        cached = getattr(self, "_cached_fps", None)
+        if (
+            cached
+            and cached > 0
+            and getattr(self, "_cached_fps_path", None) == path
+        ):
+            return float(cached)
+
+        fps = None
+        if path:
+            try:
+                from utils import extract_video_info
+
+                info = extract_video_info(path)
+                raw = info.get("fps") if isinstance(info, dict) else None
+                if raw is not None:
+                    fps = float(raw)
+            except Exception as e:
+                logging.info("[Seek] FPS probe failed for %s: %s", path, e)
+                fps = None
+
+        if not fps or fps <= 0 or fps > 240:
+            fps = 24.0
+        self._cached_fps = float(fps)
+        self._cached_fps_path = path
+        return self._cached_fps
+
+    def frame_step(self, direction: int):
+        """Step one frame while paused. direction: +1 forward, -1 backward."""
+        if not self.player:
+            return
+        try:
+            st = self.player.get_state()
+        except Exception:
+            return
+        if st not in (vlc.State.Playing, vlc.State.Paused):
+            return
+
+        # VLC next_frame() only advances while paused.
+        if self.playing or st == vlc.State.Playing:
+            self.pause_video()
+
+        fps = self._get_video_fps()
+        frame_ms = max(1, int(round(1000.0 / fps)))
+        try:
+            current_ms = max(0, int(self.player.get_time()))
+            duration_ms = max(0, int(self.player.get_length() or 0))
+        except Exception:
+            return
+
+        self._clear_bookmark_nav_anchor()
+
+        if direction >= 0:
+            used_next_frame = False
+            try:
+                self.player.next_frame()
+                used_next_frame = True
+            except Exception as e:
+                logging.info("[Seek] next_frame failed: %s — falling back to seek", e)
+
+            target_ms = current_ms + frame_ms
+            if duration_ms > 0:
+                target_ms = min(target_ms, duration_ms)
+            if not used_next_frame:
+                self.player.set_time(target_ms)
+            self.last_position = target_ms
+            self._sync_seek_ui(target_ms / 1000.0)
+            logging.info("[Seek] Frame step forward (~%.3fs) to %.3fs", frame_ms / 1000.0, target_ms / 1000.0)
+            return
+
+        target_ms = max(0, current_ms - frame_ms)
+        self.player.set_time(target_ms)
+        self.last_position = target_ms
+        self._sync_seek_ui(target_ms / 1000.0)
+        logging.info("[Seek] Frame step backward (~%.3fs) to %.3fs", frame_ms / 1000.0, target_ms / 1000.0)
 
 
 
@@ -4625,9 +4780,12 @@ class VideoPlayer:
         if hasattr(self, "player") and self.player is not None:
             try:
                 logging.info(f"[DEBUG][stop_video] Will call self.player.stop()! State: {self.player.get_state()}")
-                self.player.stop()
+                ok = _vlc_stop_with_timeout(self.player, timeout_s=1.5)
                 self.playing = False
-                logging.info("[DEBUG][stop_video] self.player.stop() DONE, playing set to False.")
+                logging.info(
+                    "[DEBUG][stop_video] self.player.stop() DONE (ok=%s), playing set to False.",
+                    ok,
+                )
             except Exception as e:
                 logging.info("[DEBUG][stop_video] Exception: %s", e)
         else:
@@ -5176,44 +5334,64 @@ class VideoPlayer:
                 logging.info("[Cleanup][VLC] player.set_pause(0) failed: %s", e)
 
         # stop() on an already-Ended player often hangs on Windows — skip it.
+        # Never call stop() on the Tk UI thread, and never pump Tk while waiting:
+        # timeline after() → get_time() deadlocks with libvlc_media_player_stop.
+        # (Window close uses cleanup()'s async release chain instead of this helper.)
+        stop_ok = True
+        self._vlc_stop_timed_out = False
         if not already_ended:
             try:
-                logging.info("[Cleanup][VLC] before player.stop()")
-                player.stop()
-                logging.info("[Cleanup][VLC] after player.stop()")
+                # wait_stop only controls the post-stop is_playing poll; stop itself
+                # always has a hard timeout so the UI cannot hang forever.
+                timeout_s = 1.5 if wait_stop else 0.8
+                logging.info(
+                    "[Cleanup][VLC] before player.stop() (background, timeout=%.1fs)",
+                    timeout_s,
+                )
+                stop_ok = _vlc_stop_with_timeout(player, timeout_s=timeout_s)
+                self._vlc_stop_timed_out = not stop_ok
+                logging.info("[Cleanup][VLC] after player.stop() ok=%s wait_stop=%s", stop_ok, wait_stop)
             except Exception as e:
                 logging.info("[Cleanup][VLC] player.stop() failed: %s", e)
-            if wait_stop:
+                stop_ok = False
+                self._vlc_stop_timed_out = True
+            if wait_stop and stop_ok:
                 try:
                     t0 = time.time()
                     while (time.time() - t0) < 1.2:
                         try:
-                            logging.debug("[Cleanup][VLC] before player.is_playing()")
                             if not player.is_playing():
-                                logging.info("[Cleanup][VLC] playback stopped after %.2fs", time.time() - t0)
+                                logging.info(
+                                    "[Cleanup][VLC] playback stopped after %.2fs",
+                                    time.time() - t0,
+                                )
                                 break
                         except Exception as e:
                             logging.info("[Cleanup][VLC] player.is_playing() failed: %s", e)
                             break
-                        time.sleep(0.05)
+                        time.sleep(0.02)
                 except Exception as e:
                     logging.info("[Cleanup][VLC] stop wait failed: %s", e)
         else:
             logging.info("[Cleanup][VLC] skip stop/wait (state=%s)", st)
 
-        try:
-            logging.info("[Cleanup][VLC] before player.get_media()")
-            m = player.get_media()
-            logging.info("[Cleanup][VLC] after player.get_media(): %r", m)
-            if m is not None:
-                logging.info("[Cleanup][VLC] before player.set_media(None)")
-                player.set_media(None)
-                logging.info("[Cleanup][VLC] after player.set_media(None)")
-                logging.info("[Cleanup][VLC] before media.release()")
-                m.release()
-                logging.info("[Cleanup][VLC] after media.release()")
-        except Exception as e:
-            logging.info("[Cleanup][VLC] media detach/release failed: %s", e)
+        # If stop is still running / timed out, further sync libvlc calls often hang.
+        if stop_ok:
+            try:
+                logging.info("[Cleanup][VLC] before player.get_media()")
+                m = player.get_media()
+                logging.info("[Cleanup][VLC] after player.get_media(): %r", m)
+                if m is not None:
+                    logging.info("[Cleanup][VLC] before player.set_media(None)")
+                    player.set_media(None)
+                    logging.info("[Cleanup][VLC] after player.set_media(None)")
+                    logging.info("[Cleanup][VLC] before media.release()")
+                    m.release()
+                    logging.info("[Cleanup][VLC] after media.release()")
+            except Exception as e:
+                logging.info("[Cleanup][VLC] media detach/release failed: %s", e)
+        else:
+            logging.warning("[Cleanup][VLC] skipping sync media detach/release (async stop in flight)")
         self._loaded_video_path = None
         logging.info("[Cleanup][VLC] shutdown done")
 
@@ -5260,14 +5438,32 @@ class VideoPlayer:
                     logging.info("[Cleanup] Listener stop (%s): %s", attr, e)
 
         player = getattr(self, "player", None)
+        instance = getattr(self, "instance", None)
+        # Close must never block on libvlc stop/release (D3D11 + timeline get_time deadlock).
+        # Detach HWND on UI thread, then tear down VLC entirely in the background.
         if player is not None:
             try:
-                logging.info("[Cleanup] Před VLC shutdown helperem.")
-                self._shutdown_vlc_player(player, detach_hwnd=True)
-                logging.info("[Cleanup] Po VLC shutdown helperu.")
-                logging.info("[Cleanup] VLC playback zastaveno, médium uvolněno.")
+                logging.info("[Cleanup] Před VLC async teardown (detach HWND, then background stop/release).")
+                try:
+                    embed_vlc_window(player, 0)
+                    logging.info("[Cleanup][VLC] after detach embed window")
+                except Exception as e:
+                    logging.info("[Cleanup][VLC] detach embed window failed: %s", e)
+                self._loaded_video_path = None
+                _vlc_release_chain_in_background(player, instance)
+                logging.info("[Cleanup] VLC teardown scheduled on background thread.")
             except Exception as e:
-                logging.debug("[Cleanup] vlc shutdown: %s", e)
+                logging.debug("[Cleanup] vlc async teardown: %s", e)
+            self.player = None
+            self.instance = None
+        elif instance is not None:
+            def _orphan_instance(inst=instance):
+                try:
+                    inst.release()
+                except Exception:
+                    pass
+            threading.Thread(target=_orphan_instance, name="vlc-orphan-instance", daemon=True).start()
+            self.instance = None
 
         video_window = getattr(self, "video_window", None)
         if video_window is not None:
@@ -5279,30 +5475,7 @@ class VideoPlayer:
                 logging.info("[Cleanup] Okno destroy: %s", e)
             self.video_window = None
 
-        if player is not None:
-            try:
-                logging.info("[Cleanup] Před player.release().")
-                player.release()
-                logging.info("[Cleanup] Po player.release().")
-                logging.info("[Cleanup] VLC přehrávač uvolněn.")
-            except Exception as e:
-                logging.info("[Cleanup] Chyba při uvolňování přehrávače: %s", e)
-            finally:
-                self.player = None
-                time.sleep(0.05)
-
-        instance = getattr(self, "instance", None)
-        if instance:
-            try:
-                logging.info("[Cleanup] Před instance.release().")
-                instance.release()
-                logging.info("[Cleanup] Po instance.release().")
-                logging.info("[Cleanup] VLC instance uvolněna.")
-            except Exception as e:
-                logging.info("[Cleanup] Chyba při uvolňování VLC instance: %s", e)
-            finally:
-                self.instance = None
-
+        self._vlc_stop_timed_out = False
         self._drain_pynput_queue()
 
     def close_video_player(self):
@@ -5675,8 +5848,13 @@ class VideoPlayer:
         """
         Returns the current playback time in seconds.
         """
+        if getattr(self, "_cleaning_up", False) or getattr(self, "_cleanup_done", False):
+            return 0.0
         if hasattr(self, "player") and self.player is not None:
-            return self.player.get_time() / 1000.0
+            try:
+                return self.player.get_time() / 1000.0
+            except Exception:
+                return 0.0
         return 0.0
 
 

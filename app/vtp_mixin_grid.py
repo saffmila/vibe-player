@@ -7161,6 +7161,22 @@ class VtpGridMixin:
         else:
             logging.info("[DEBUG] No active video player for long seek backward")
 
+    def frame_step_forward_global(self):
+        """Step one frame forward on the active video player."""
+        active_video = getattr(self, "current_video_window", None) or getattr(self, "active_player", None)
+        if active_video and hasattr(active_video, "frame_step"):
+            active_video.frame_step(direction=1)
+        else:
+            logging.info("[DEBUG] No active video player for frame step forward")
+
+    def frame_step_backward_global(self):
+        """Step one frame backward on the active video player."""
+        active_video = getattr(self, "current_video_window", None) or getattr(self, "active_player", None)
+        if active_video and hasattr(active_video, "frame_step"):
+            active_video.frame_step(direction=-1)
+        else:
+            logging.info("[DEBUG] No active video player for frame step backward")
+
     def skip_global_back(self):
         if self.current_video_window:
             self.current_video_window.skip_back()

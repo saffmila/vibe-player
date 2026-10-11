@@ -45,6 +45,8 @@ class VtpUpscaleMixin:
             title = "SeedVR 2 weights"
         elif error_code == "runner_missing":
             title = "SeedVR 2 runner"
+        elif error_code == "unsupported_model":
+            title = "SeedVR 2 model"
         elif error_code in ("rife_pack_missing", "rife_model_missing"):
             title = "RIFE pack"
         self.after(0, lambda: messagebox.showwarning(title, text))
@@ -302,6 +304,7 @@ class VtpUpscaleMixin:
         total: int,
         detail: str,
         phase: str | None = None,
+        file_frac: float | None = None,
     ):
         """Schedule FileOpProgressDialog update on the Tk thread."""
         if dialog is None:
@@ -310,7 +313,13 @@ class VtpUpscaleMixin:
         def _update():
             try:
                 if dialog.winfo_exists():
-                    dialog.set_progress(current, total, detail=detail, phase=phase)
+                    dialog.set_progress(
+                        current,
+                        total,
+                        detail=detail,
+                        phase=phase,
+                        file_frac=file_frac,
+                    )
             except Exception:
                 pass
 
@@ -621,7 +630,18 @@ class VtpUpscaleMixin:
                     line = (msg or "").strip() or "Working…"
                     resolved_phase = phase or self._infer_upscale_phase(line)
                     detail = f"{name}\n{line}"
-                    self._upscale_progress_update(progress, i - 1, t, detail, phase=resolved_phase)
+                    try:
+                        file_frac = max(0.0, min(1.0, float(frac)))
+                    except (TypeError, ValueError):
+                        file_frac = None
+                    self._upscale_progress_update(
+                        progress,
+                        i - 1,
+                        t,
+                        detail,
+                        phase=resolved_phase,
+                        file_frac=file_frac,
+                    )
                     self.after(0, lambda m=line: self.status_bar.set_action_message(m[:120]))
                     low = line.lower()
                     if progress is not None and ("chunk preview" in low or "preview updated" in low):
@@ -717,8 +737,20 @@ class VtpUpscaleMixin:
 
                         def _rife_progress(pct: float, msg: str, i=idx, t=total, name=base):
                             detail = f"{name}\nRIFE: {msg}"
+                            try:
+                                p = float(pct)
+                                # RIFE callbacks may send 0..1 or 0..100.
+                                file_frac = p / 100.0 if p > 1.0 else p
+                                file_frac = max(0.0, min(1.0, file_frac))
+                            except (TypeError, ValueError):
+                                file_frac = None
                             self._upscale_progress_update(
-                                progress, i - 1, t, detail, phase="upscale"
+                                progress,
+                                i - 1,
+                                t,
+                                detail,
+                                phase="upscale",
+                                file_frac=file_frac,
                             )
                             self.after(
                                 0,

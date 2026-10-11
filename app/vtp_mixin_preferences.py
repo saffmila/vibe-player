@@ -186,9 +186,9 @@ class VtpPreferencesMixin:
         # Get the desired state from settings, default to True if not found
         desired_timeline_state = settings.get("timeline_widget_expanded", True)
         saved_timeline_restore_height = settings.get("timeline_widget_restore_height", 150)
-        # Peek mode early so ShowTWidget is not wrongly True while Captions is active.
+        # Peek mode early so ShowTWidget is not wrongly True while Captions/Prompt is active.
         _peek_mode = settings.get("bottom_panel_mode", "Timeline")
-        if _peek_mode not in ("Timeline", "Captions"):
+        if _peek_mode not in ("Timeline", "Captions", "Prompt"):
             _peek_mode = "Timeline"
         if not bool(settings.get("captions_mode_enabled", False)):
             _peek_mode = "Timeline"
@@ -208,15 +208,17 @@ class VtpPreferencesMixin:
                 if hasattr(self.timeline_container, "set_restore_height"):
                     self.timeline_container.set_restore_height(saved_timeline_restore_height)
 
-        # --- Bottom panel mode (Timeline / Captions) ---
+        # --- Bottom panel mode (Timeline / Captions / Prompt) ---
         captions_enabled = bool(settings.get("captions_mode_enabled", False))
         if hasattr(self, "captions_mode_enabled_var"):
             self.captions_mode_enabled_var.set(captions_enabled)
         if hasattr(self, "caption_autosave_var"):
             self.caption_autosave_var.set(bool(settings.get("caption_autosave", True)))
+        if hasattr(self, "prompt_autoload_var"):
+            self.prompt_autoload_var.set(bool(settings.get("prompt_autoload", True)))
 
         desired_mode = settings.get("bottom_panel_mode", "Timeline")
-        if desired_mode not in ("Timeline", "Captions"):
+        if desired_mode not in ("Timeline", "Captions", "Prompt"):
             desired_mode = "Timeline"
         if not captions_enabled:
             desired_mode = "Timeline"
@@ -477,7 +479,7 @@ class VtpPreferencesMixin:
                     self.info_panel.multiTimeline_limit_var.set(
                         self.preview_window_strip_limit
                     )
-                self.dnd_confirm_dialogs = bool(settings.get("dnd_confirm_dialogs", False))
+                self.dnd_confirm_dialogs = bool(settings.get("dnd_confirm_dialogs", True))
                 self.copy_move_with_captions = bool(
                     settings.get("copy_move_with_captions", True)
                 )
@@ -637,7 +639,7 @@ class VtpPreferencesMixin:
             self.folder_view_mode.set("Standard")
             self.widefolder_size = (560, 400)  # Default size
             self.memory_cache = True  # Default if no settings file exists
-            self.dnd_confirm_dialogs = False
+            self.dnd_confirm_dialogs = True
             self.copy_move_with_captions = True
             self.delete_to_trash = True
             self.auto_refresh_folder = False

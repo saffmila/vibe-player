@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 import platform
+import time
 import tkinter as tk
 from tkinter import ttk
 from typing import Any, Callable
@@ -173,11 +174,11 @@ class TogglePanelFrame(ctk.CTkFrame):
             logging.info("Error placing sash for %s/%s: %s", self.title, widget_path, e)
 
     def _collapsed_proxy_title(self):
-        """Title on the thin collapsed bar — prefer Timeline/Captions mode when set."""
+        """Title on the thin collapsed bar — prefer Timeline/Captions/Prompt mode when set."""
         app = self.app
         if app is not None and self.title == "Timeline":
             mode = getattr(app, "bottom_panel_mode", None)
-            if mode in ("Timeline", "Captions"):
+            if mode in ("Timeline", "Captions", "Prompt"):
                 return mode
         return self.title
 
@@ -196,7 +197,7 @@ class TogglePanelFrame(ctk.CTkFrame):
         label.pack(side="left", padx=(5, 0), pady=1)
         proxy._proxy_title_label = label  # noqa: SLF001
 
-        # Mirror Timeline/Captions switch on the proxy (real header is unmapped while collapsed).
+        # Mirror Timeline/Captions/Prompt switch on the proxy (real header is unmapped while collapsed).
         app = self.app
         captions_on = False
         if app is not None:
@@ -213,9 +214,9 @@ class TogglePanelFrame(ctk.CTkFrame):
         ):
             switch = ctk.CTkSegmentedButton(
                 header,
-                values=["Timeline", "Captions"],
+                values=["Timeline", "Captions", "Prompt"],
                 variable=app.bottom_panel_mode_var,
-                width=160,
+                width=240,
                 height=18,
                 font=ctk.CTkFont(size=10),
                 command=app.set_bottom_panel_mode,
@@ -501,6 +502,16 @@ def open_conflict_dialog(parent, file_name: str) -> tuple[str, bool]:
     return dialog.show_modal()
 
 
+def _format_progress_duration(seconds: float) -> str:
+    """Compact duration for live progress / ETA (e.g. ``1:05``, ``1:02:03``)."""
+    s = max(0, int(round(float(seconds))))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    if h:
+        return f"{h}:{m:02d}:{sec:02d}"
+    return f"{m}:{sec:02d}"
+
+
 class FileOpProgressDialog(ctk.CTkToplevel):
     """Modal progress dialog for multi-item copy/move (DnD / paste) and Upscale."""
 
@@ -527,6 +538,11 @@ class FileOpProgressDialog(ctk.CTkToplevel):
         "idle": "Working",
     }
 
+    # Wait until upscaling has been running long enough for a stable ETA.
+    _ETA_MIN_ELAPSED_S = 15.0
+    _ETA_MIN_GAIN = 0.05
+    _ETA_MIN_OVERALL = 0.10
+
     def __init__(
         self,
         parent,
@@ -542,7 +558,7 @@ class FileOpProgressDialog(ctk.CTkToplevel):
         self.title(title)
         self._show_preview = bool(show_preview)
         self._preview_fit = bool(preview_fit)
-        self.geometry("520x520" if self._show_preview else "460x210")
+        self.geometry("520x540" if self._show_preview else "460x230")
         self.resizable(False, False)
         # topmost=True keeps short DnD ops visible; False lets long jobs (Upscale)
         # sink with the app when the user switches away.
@@ -562,6 +578,9 @@ class FileOpProgressDialog(ctk.CTkToplevel):
         self._preview_poll_after = None
         self._preview_image = None
         self._preview_polling = False
+        self._eta_t0: float | None = None
+        self._eta_frac0: float | None = None
+        self._last_overall_frac = 0.0
 
         try:
             self.transient(parent)
@@ -571,6 +590,7 @@ class FileOpProgressDialog(ctk.CTkToplevel):
         self.phase_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value=f"{action_label} 0 / {self._total}")
         self.detail_var = tk.StringVar(value="Preparing…")
+        self.eta_var = tk.StringVar(value="")
 
         self.phase_label = ctk.CTkLabel(
             self,
@@ -595,7 +615,16 @@ class FileOpProgressDialog(ctk.CTkToplevel):
             justify="center",
             wraplength=480,
         )
-        self.detail_label.pack(fill="x", padx=16, pady=(0, 10))
+        self.detail_label.pack(fill="x", padx=16, pady=(0, 4))
+        self.eta_label = ctk.CTkLabel(
+            self,
+            textvariable=self.eta_var,
+            anchor="center",
+            justify="center",
+            text_color="#9a9a9a",
+            font=ctk.CTkFont(size=12),
+        )
+        self.eta_label.pack(fill="x", padx=16, pady=(0, 10))
 
         self.progress = ctk.CTkProgressBar(self, orientation="horizontal", mode="determinate")
         self.progress.pack(fill="x", padx=16, pady=(0, 12))
@@ -713,15 +742,93 @@ class FileOpProgressDialog(ctk.CTkToplevel):
         except Exception:
             pass
 
-    def set_progress(self, current: int, total: int | None = None, detail: str = "", phase: str | None = None):
-        """Update bar and labels. Call from the Tk main thread only."""
+    def _switch_to_determinate(self):
+        """Stop spinner and show a real progress fraction (single-file upscale)."""
+        if not self._indeterminate:
+            return
+        try:
+            self.progress.stop()
+            self.progress.configure(mode="determinate")
+        except Exception:
+            pass
+        self._indeterminate = False
+
+    def _update_eta_label(self, overall_frac: float, phase: str):
+        """Show elapsed / ETA once upscaling has produced a stable rate."""
+        now = time.monotonic()
+        overall = max(0.0, min(1.0, float(overall_frac)))
+        self._last_overall_frac = overall
+
+        if phase == "done":
+            if self._eta_t0 is not None:
+                elapsed = now - self._eta_t0
+                self.eta_var.set(f"Elapsed {_format_progress_duration(elapsed)}")
+            return
+
+        if phase != "upscale":
+            # Keep previous ETA text during brief load flickers mid-batch.
+            if self._eta_t0 is None:
+                self.eta_var.set("")
+            return
+
+        if self._eta_t0 is None:
+            if overall >= 0.05:
+                self._eta_t0 = now
+                self._eta_frac0 = overall
+            self.eta_var.set("")
+            return
+
+        elapsed = now - self._eta_t0
+        gained = max(0.0, overall - float(self._eta_frac0 or 0.0))
+        elapsed_txt = _format_progress_duration(elapsed)
+
+        if (
+            elapsed < self._ETA_MIN_ELAPSED_S
+            or gained < self._ETA_MIN_GAIN
+            or overall < self._ETA_MIN_OVERALL
+        ):
+            self.eta_var.set(f"Elapsed {elapsed_txt} · estimating…")
+            return
+
+        rate = gained / elapsed
+        if rate <= 1e-12:
+            self.eta_var.set(f"Elapsed {elapsed_txt}")
+            return
+        remain_s = max(0.0, 1.0 - overall) / rate
+        if remain_s > 48 * 3600:
+            self.eta_var.set(f"Elapsed {elapsed_txt}")
+            return
+        self.eta_var.set(
+            f"Elapsed {elapsed_txt} · ~{_format_progress_duration(remain_s)} remaining"
+        )
+
+    def set_progress(
+        self,
+        current: int,
+        total: int | None = None,
+        detail: str = "",
+        phase: str | None = None,
+        file_frac: float | None = None,
+    ):
+        """Update bar and labels. Call from the Tk main thread only.
+
+        ``current`` is completed items (0-based while a file is in progress).
+        Optional ``file_frac`` (0..1) is progress within the current item and
+        enables percent / ETA for single-file jobs.
+        """
         if phase:
             self.set_phase(phase)
         if total is not None and total > 0:
             self._total = int(total)
         cur = max(0, int(current))
         tot = max(1, self._total)
-        frac = min(1.0, cur / tot)
+        ff = None
+        if file_frac is not None:
+            try:
+                ff = max(0.0, min(1.0, float(file_frac)))
+            except (TypeError, ValueError):
+                ff = None
+        overall = min(1.0, (cur + (ff if ff is not None else 0.0)) / tot)
         try:
             if not self.winfo_exists():
                 return
@@ -730,11 +837,23 @@ class FileOpProgressDialog(ctk.CTkToplevel):
                 prefix = "Loading"
             elif self._phase == "upscale":
                 prefix = self._action_label
-            self.status_var.set(f"{prefix} {min(cur, tot)} / {tot}")
+
+            if ff is not None and cur < tot:
+                display_cur = cur + 1
+                pct = int(round(ff * 100.0))
+                self.status_var.set(f"{prefix} {display_cur} / {tot} · {pct}%")
+            else:
+                self.status_var.set(f"{prefix} {min(cur, tot)} / {tot}")
+
             if detail:
                 self.detail_var.set(detail)
+
+            if ff is not None and ff > 0:
+                self._switch_to_determinate()
             if not self._indeterminate:
-                self.progress.set(frac)
+                self.progress.set(overall)
+
+            self._update_eta_label(overall, self._phase)
         except Exception:
             pass
 
@@ -1211,7 +1330,7 @@ def build_view_menu(app):
     if not hasattr(app, "captions_mode_enabled_var"):
         app.captions_mode_enabled_var = ctk.BooleanVar(value=False)
     view_menu.add_checkbutton(
-        label="Enable Captions Mode",
+        label="Enable Captions and Prompt Preview",
         variable=app.captions_mode_enabled_var,
         command=lambda: app.set_captions_mode_enabled(
             app.captions_mode_enabled_var.get(),
@@ -3425,7 +3544,7 @@ def create_preferences_window(app):
     adv_open = {"v": False}
     adv_body = ctk.CTkFrame(advanced_outer)
 
-    dnd_confirm_var = ctk.BooleanVar(value=getattr(app, "dnd_confirm_dialogs", False))
+    dnd_confirm_var = ctk.BooleanVar(value=getattr(app, "dnd_confirm_dialogs", True))
     delete_to_trash_var = ctk.BooleanVar(
         value=bool(getattr(app, "delete_to_trash", True))
     )
@@ -3720,6 +3839,11 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
             if getattr(app, "caption_autosave_var", None) is not None
             else True
         ),
+        "prompt_autoload": (
+            bool(app.prompt_autoload_var.get())
+            if getattr(app, "prompt_autoload_var", None) is not None
+            else True
+        ),
         "info_panel_restore_height": (
             app.info_panel_container.get_restore_height()
             if app.info_panel_container and hasattr(app.info_panel_container, "get_restore_height")
@@ -3746,7 +3870,7 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
         "timeline_strip_count": getattr(app, "timeline_strip_count", 20),
         "preview_window_strip_limit": bool(getattr(app, "preview_window_strip_limit", True)),
         "search_results_page_size": int(getattr(app, "search_results_page_size", 250)),
-        "dnd_confirm_dialogs": getattr(app, "dnd_confirm_dialogs", False),
+        "dnd_confirm_dialogs": getattr(app, "dnd_confirm_dialogs", True),
         "copy_move_with_captions": bool(getattr(app, "copy_move_with_captions", True)),
         "delete_to_trash": bool(getattr(app, "delete_to_trash", True)),
         "auto_refresh_folder": bool(getattr(app, "auto_refresh_folder", False)),
@@ -4049,7 +4173,7 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
     if hasattr(app, "play_broken_videos_var"):
         app.play_broken_videos_var.set(app.play_broken_videos)
 
-    app.dnd_confirm_dialogs = bool(preferences.get("dnd_confirm_dialogs", False))
+    app.dnd_confirm_dialogs = bool(preferences.get("dnd_confirm_dialogs", True))
     app.copy_move_with_captions = bool(preferences.get("copy_move_with_captions", True))
     app.delete_to_trash = bool(preferences.get("delete_to_trash", True))
     app.auto_refresh_folder = bool(preferences.get("auto_refresh_folder", False))

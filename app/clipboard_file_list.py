@@ -100,7 +100,15 @@ def set_clipboard_file_paths(paths: List[str], *, cut: bool = False) -> bool:
 
 
 def get_clipboard_file_paths() -> List[str]:
-    """Return absolute paths from CF_HDROP, or the in-process fallback."""
+    """Return absolute paths from CF_HDROP, or the in-process fallback.
+
+    Important: if the OS clipboard no longer has CF_HDROP (e.g. user copied
+    plain text in a caption editor), clear the in-process path list. Otherwise
+    a later Ctrl+V with focus outside the text widget would paste stale files
+    into the current folder.
+    """
+    global _internal_paths, _internal_pending_move
+
     if os.name == "nt":
         try:
             import win32clipboard
@@ -108,6 +116,11 @@ def get_clipboard_file_paths() -> List[str]:
 
             win32clipboard.OpenClipboard(0)
             try:
+                if not win32clipboard.IsClipboardFormatAvailable(win32con.CF_HDROP):
+                    # Clipboard was replaced (text copy, etc.) — drop stale paths.
+                    _internal_paths = []
+                    _internal_pending_move = False
+                    return []
                 raw = win32clipboard.GetClipboardData(win32con.CF_HDROP)
             finally:
                 win32clipboard.CloseClipboard()
@@ -122,6 +135,7 @@ def get_clipboard_file_paths() -> List[str]:
                 logging.info("[clipboard] unexpected CF_HDROP type: %s", type(raw))
                 out = list(_internal_paths)
         except Exception as e:
+            # OpenClipboard busy / API error — keep in-process fallback.
             logging.info("[clipboard] CF_HDROP read failed: %s — using fallback", e)
             out = list(_internal_paths)
     else:

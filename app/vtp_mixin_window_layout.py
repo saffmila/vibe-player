@@ -524,10 +524,10 @@ class VtpWindowLayoutMixin:
 
             self._enforce_collapsed_panel_heights()
 
-            # Captions packed during startup (often while collapsed / before sash place)
+            # Captions/Prompt packed during startup (often while collapsed / before sash place)
             # can stay invisible until the user toggles the panel — remount after layout.
             if (
-                getattr(self, "bottom_panel_mode", None) == "Captions"
+                getattr(self, "bottom_panel_mode", None) in ("Captions", "Prompt")
                 and getattr(self, "timeline_container", None) is not None
                 and getattr(self.timeline_container, "expanded", False)
                 and hasattr(self, "_remount_bottom_panel_content")

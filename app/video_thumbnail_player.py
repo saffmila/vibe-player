@@ -132,6 +132,7 @@ from video_operations import VideoPlayer, get_audio_devices, prewarm_vlc_instanc
 from timeline_manager import TimelineManager
 from timeline_bar_widget import TimelineBarWidget
 from caption_editor_widget import CaptionEditorWidget
+from prompt_preview_widget import PromptPreviewWidget
 from multi_timeline_viewer import MultiTimelineViewer
 from utils import create_menu
 if sys.platform == "win32":
@@ -318,8 +319,8 @@ class VideoThumbnailPlayer(
         self._dnd_drag_happened = False
         # Set by real double-click open so the following ButtonRelease is not treated as a new click.
         self._thumb_double_click_consumed = False
-        # Confirm dialogs before DnD copy/move (default off — Advanced in preferences)
-        self.dnd_confirm_dialogs = False
+        # Confirm dialogs before DnD copy/move (default on — can disable in preferences)
+        self.dnd_confirm_dialogs = True
         # Include image/video caption sidecars (.txt) with copy/move (default on)
         self.copy_move_with_captions = True
         self.folder_title_font_base_size = 12
@@ -751,23 +752,23 @@ class VideoThumbnailPlayer(
 
         self.timeline_container = TogglePanelFrame(self.right_split, title="Timeline", app=self)
 
-        # Mode switch: Timeline ↔ Captions (hidden until View → Enable Captions mode)
+        # Mode switch: Timeline | Captions | Prompt (opt-in via View menu)
         self.bottom_panel_mode = "Timeline"
         self.bottom_panel_mode_var = ctk.StringVar(value="Timeline")
         if not hasattr(self, "captions_mode_enabled_var"):
             self.captions_mode_enabled_var = ctk.BooleanVar(value=False)
         self.bottom_panel_switch = ctk.CTkSegmentedButton(
             self.timeline_container.header_frame,
-            values=["Timeline", "Captions"],
+            values=["Timeline", "Captions", "Prompt"],
             variable=self.bottom_panel_mode_var,
-            width=160,
+            width=240,
             height=18,
             font=ctk.CTkFont(size=10),
             command=self.set_bottom_panel_mode,
         )
         # Packed only when captions mode is enabled (see set_captions_mode_enabled)
 
-        # Autosave toggle — shown only in Captions mode, to the right of the switch
+        # Autosave — Captions mode only
         self.caption_autosave_var = ctk.BooleanVar(value=True)
         self.caption_autosave_check = ctk.CTkCheckBox(
             self.timeline_container.header_frame,
@@ -780,7 +781,20 @@ class VideoThumbnailPlayer(
             font=ctk.CTkFont(size=10),
             command=self._on_caption_autosave_toggled,
         )
-        # Packed when Captions mode is active
+
+        # Auto load prompt — Prompt mode only (default on)
+        self.prompt_autoload_var = ctk.BooleanVar(value=True)
+        self.prompt_autoload_check = ctk.CTkCheckBox(
+            self.timeline_container.header_frame,
+            text="Auto load",
+            variable=self.prompt_autoload_var,
+            width=100,
+            height=18,
+            checkbox_width=16,
+            checkbox_height=16,
+            font=ctk.CTkFont(size=10),
+            command=self._on_prompt_autoload_toggled,
+        )
 
         self.timeline_widget = TimelineBarWidget(
             parent=self.timeline_container,
@@ -796,6 +810,12 @@ class VideoThumbnailPlayer(
             controller=self,
         )
         # Packed only when Captions mode is active
+
+        self.prompt_preview = PromptPreviewWidget(
+            parent=self.timeline_container,
+            controller=self,
+        )
+        # Packed only when Prompt mode is active
 
         self.timeline_container.content_widget = self.timeline_widget
         self.timeline_container.parent_paned = self.right_split
@@ -888,7 +908,7 @@ class VideoThumbnailPlayer(
 
         self.canvas.bind('<Button-1>', self.detect_canvas_click)
         self.canvas.bind("<Button-3>", self._on_thumbnail_canvas_empty_rmb, add="+")
-        self.canvas.bind("<Enter>", lambda e: self.canvas.focus_set())
+        self.canvas.bind("<Enter>", self._focus_thumb_canvas_on_enter)
         self.canvas.bind("<Configure>", self._on_main_canvas_configure)
 
         self.canvas.bind("<Up>",   lambda e: self.move_selection("up", shift=(e.state & 0x0001), ctrl=(e.state & 0x0004)))
@@ -2674,8 +2694,8 @@ class VideoThumbnailPlayer(
             return
         self.show_empty_thumbnail_view_context_menu(event)
 
-    def _skip_file_clipboard_hotkey(self) -> bool:
-        """Skip file/selection hotkeys while typing in Entry/Text/Combo (incl. main window)."""
+    def _has_text_input_focus(self) -> bool:
+        """True when Entry/Text/Combo (or Captions/Prompt panel) owns keyboard focus."""
         if self._is_input_focused():
             return True
         focused = self.focus_get()
@@ -2691,6 +2711,19 @@ class VideoThumbnailPlayer(
             "CTkTextbox",
             "CTkComboBox",
         )
+
+    def _skip_file_clipboard_hotkey(self) -> bool:
+        """Skip file/selection hotkeys while typing in Entry/Text/Combo (incl. main window)."""
+        return self._has_text_input_focus()
+
+    def _focus_thumb_canvas_on_enter(self, _event=None):
+        """Give arrow-key focus to the thumb canvas, but never steal from text editors."""
+        if self._has_text_input_focus():
+            return
+        try:
+            self.canvas.focus_set()
+        except Exception:
+            pass
 
     def _primary_path_for_file_clipboard(self):
         if self._tree_selection_is_active_scope():
@@ -2742,6 +2775,40 @@ class VideoThumbnailPlayer(
             except Exception:
                 pass
         return self._primary_path_for_file_clipboard()
+
+    def _route_ctrl_f_to_text_find(self) -> bool:
+        """If focus is in Captions/Prompt editor (or its find bar), open text find."""
+        focused = self.focus_get()
+        if focused is None:
+            return False
+        for attr in ("caption_editor", "prompt_preview"):
+            panel = getattr(self, attr, None)
+            if panel is None:
+                continue
+            try:
+                w = focused
+                while w is not None:
+                    if w is panel:
+                        open_find = getattr(panel, "open_find", None)
+                        if not callable(open_find):
+                            return False
+                        if attr == "caption_editor":
+                            return bool(open_find(replace=False))
+                        return bool(open_find())
+                    w = getattr(w, "master", None)
+            except Exception:
+                continue
+        return False
+
+    def _hotkey_search(self, event=None):
+        """Ctrl+F: in-caption/prompt find when that panel has focus; else thumbs Search."""
+        if not self._is_app_focused():
+            return
+        if self._route_ctrl_f_to_text_find():
+            return "break"
+        if self._is_input_focused():
+            return
+        self.open_search_window()
 
     def _hotkey_rename(self, event=None):
         """F2 / F6: rename tree row if that was last clicked, else thumb / clipboard primary."""
@@ -3776,20 +3843,23 @@ class VideoThumbnailPlayer(
         """True when typing in a text field — block global hotkeys (Backspace, arrows, …).
 
         - Dialogs (Toplevel): any Entry/Text
-        - Main window: caption editor (and its inner tk.Text), so dataset captions
-          can be typed without triggering parent-dir / navigation shortcuts
+        - Main window: caption editor / prompt preview (and find bars), so Ctrl+F
+          opens in-text find instead of the thumbs Search window, and typing does
+          not trigger parent-dir / navigation shortcuts
         """
         focused = self.focus_get()
         if focused is None:
             return False
 
-        # Caption editor lives in the main window; walk masters to detect it.
-        caption = getattr(self, "caption_editor", None)
-        if caption is not None:
+        # Bottom-panel text editors live in the main window; walk masters.
+        for attr in ("caption_editor", "prompt_preview"):
+            panel = getattr(self, attr, None)
+            if panel is None:
+                continue
             try:
                 w = focused
                 while w is not None:
-                    if w is caption:
+                    if w is panel:
                         return True
                     w = getattr(w, "master", None)
             except Exception:
@@ -3834,7 +3904,9 @@ class VideoThumbnailPlayer(
             def handler(event):
                 if not self._is_app_focused():
                     return  # ignore hotkeys while user is in another application
-                if self._is_input_focused():
+                # Use the broad text-input check (not only dialogs / caption panel)
+                # so Ctrl+C/V never steal file clipboard while typing in any Entry/Text.
+                if self._has_text_input_focus():
                     return  # let the event reach Entry/Text
                 return callback(event)
             return handler
@@ -3847,6 +3919,8 @@ class VideoThumbnailPlayer(
         self.bind_all(self.hotkeys_map['bookmark_prev'], g(lambda e: self.skip_to_previous_bookmark_global()))
         self.bind_all(self.hotkeys_map['long_seek_forward'], g(lambda e: self.long_seek_forward_global()))
         self.bind_all(self.hotkeys_map['long_seek_backward'], g(lambda e: self.long_seek_backward_global()))
+        self.bind_all(self.hotkeys_map['video_frame_forward'], g(lambda e: self.frame_step_forward_global()))
+        self.bind_all(self.hotkeys_map['video_frame_backward'], g(lambda e: self.frame_step_backward_global()))
         self.bind_all(self.hotkeys_map['enter_action'], g(self._hotkey_enter_main))
 
         # --- Playlists ---
@@ -3873,7 +3947,9 @@ class VideoThumbnailPlayer(
             if seq not in _seen_paste_move:
                 _seen_paste_move.add(seq)
                 self.bind_all(seq, g(self.hotkey_files_clipboard_paste_move))
-        self.bind_all(self.hotkeys_map['search'], g(lambda event: self.open_search_window()))
+        # Search: not wrapped in g() — when Captions/Prompt text is focused,
+        # Ctrl+F opens in-panel find instead of the thumbs Search window.
+        self.bind_all(self.hotkeys_map['search'], self._hotkey_search)
         self.bind_all(self.hotkeys_map['metadata'], g(self._hotkey_metadata))
         self.bind_all(self.hotkeys_map['keywords'], g(self._hotkey_keywords))
 
@@ -4054,6 +4130,20 @@ class VideoThumbnailPlayer(
                         )
 
                     self.after(60, _reload_caption)
+                elif mode == "Prompt" and hasattr(self, "prompt_preview"):
+                    def _reload_prompt():
+                        if getattr(self, "bottom_panel_mode", None) != "Prompt":
+                            return
+                        if not getattr(self, "timeline_container", None):
+                            return
+                        if not self.timeline_container.expanded:
+                            return
+                        self.prompt_preview.on_selection(
+                            getattr(self, "selected_file_path", None),
+                            selected_paths=self._captionable_selected_paths(),
+                        )
+
+                    self.after(60, _reload_prompt)
 
     def _remount_bottom_panel_content(self):
         """Re-pack active bottom content + header chrome after expand/layout recovery."""
@@ -4082,21 +4172,7 @@ class VideoThumbnailPlayer(
                 pass
 
         try:
-            if mode == "Captions" and hasattr(self, "caption_editor"):
-                if hasattr(self, "timeline_widget"):
-                    self.timeline_widget.pack_forget()
-                self.caption_editor.pack_forget()
-                self.caption_editor.pack(fill="both", expand=True)
-                container.content_widget = self.caption_editor
-                self._set_caption_autosave_visible(True)
-            elif hasattr(self, "timeline_widget"):
-                if hasattr(self, "caption_editor"):
-                    self.caption_editor.pack_forget()
-                self.timeline_widget.pack_forget()
-                self.timeline_widget.pack(fill="both", expand=True)
-                container.content_widget = self.timeline_widget
-                self._set_caption_autosave_visible(False)
-
+            self._pack_bottom_panel_content(mode)
             # pack_propagate(False) parents often leave a newly packed child at 0 height
             # until the pane height is re-asserted after remount / mode switch.
             try:
@@ -4116,6 +4192,38 @@ class VideoThumbnailPlayer(
         except tk.TclError:
             logging.debug("[BottomPanel] remount failed", exc_info=True)
 
+    def _pack_bottom_panel_content(self, mode: str) -> None:
+        """Show the widget for ``mode`` and matching header checkbox."""
+        container = getattr(self, "timeline_container", None)
+        if container is None:
+            return
+
+        # Hide all three content widgets first
+        for attr in ("timeline_widget", "caption_editor", "prompt_preview"):
+            w = getattr(self, attr, None)
+            if w is not None:
+                try:
+                    w.pack_forget()
+                except tk.TclError:
+                    pass
+
+        if mode == "Captions" and hasattr(self, "caption_editor"):
+            self.caption_editor.pack(fill="both", expand=True)
+            container.content_widget = self.caption_editor
+            self._set_caption_autosave_visible(True)
+            self._set_prompt_autoload_visible(False)
+        elif mode == "Prompt" and hasattr(self, "prompt_preview"):
+            self.prompt_preview.pack(fill="both", expand=True)
+            container.content_widget = self.prompt_preview
+            self._set_caption_autosave_visible(False)
+            self._set_prompt_autoload_visible(True)
+            self.prompt_preview.sync_autoload_chrome()
+        elif hasattr(self, "timeline_widget"):
+            self.timeline_widget.pack(fill="both", expand=True)
+            container.content_widget = self.timeline_widget
+            self._set_caption_autosave_visible(False)
+            self._set_prompt_autoload_visible(False)
+
     def _on_caption_autosave_toggled(self):
         if hasattr(self, "save_preferences"):
             try:
@@ -4123,10 +4231,22 @@ class VideoThumbnailPlayer(
             except Exception:
                 logging.debug("[Caption] Could not save autosave pref", exc_info=True)
 
+    def _on_prompt_autoload_toggled(self):
+        if hasattr(self, "prompt_preview") and self.prompt_preview is not None:
+            try:
+                self.prompt_preview.on_autoload_toggled()
+            except Exception:
+                logging.debug("[Prompt] autoload toggle failed", exc_info=True)
+        if hasattr(self, "save_preferences"):
+            try:
+                self.save_preferences()
+            except Exception:
+                logging.debug("[Prompt] Could not save autoload pref", exc_info=True)
+
     def set_captions_mode_enabled(self, enabled=None, *, save_prefs=True, restore_mode=None):
         """
-        Opt-in Captions UI (View → Enable Captions Mode).
-        When disabled, hide Timeline/Captions switch and force Timeline content.
+        Opt-in Captions + Prompt Preview UI (View → Enable Captions and Prompt Preview).
+        When disabled, hide Timeline/Captions/Prompt switch and force Timeline content.
         """
         if enabled is None:
             var = getattr(self, "captions_mode_enabled_var", None)
@@ -4149,11 +4269,12 @@ class VideoThumbnailPlayer(
                 pass
 
         if not enabled:
-            # Leave captions if active; hide autosave checkbox
-            if getattr(self, "bottom_panel_mode", "Timeline") == "Captions":
+            # Leave Captions/Prompt if active; hide mode checkboxes
+            if getattr(self, "bottom_panel_mode", "Timeline") in ("Captions", "Prompt"):
                 self.set_bottom_panel_mode("Timeline", save_prefs=False)
             else:
                 self._set_caption_autosave_visible(False)
+                self._set_prompt_autoload_visible(False)
             if getattr(self, "timeline_container", None) and hasattr(
                 self.timeline_container, "title_label"
             ):
@@ -4163,7 +4284,7 @@ class VideoThumbnailPlayer(
                     pass
         else:
             mode = restore_mode or getattr(self, "bottom_panel_mode", "Timeline")
-            if mode not in ("Timeline", "Captions"):
+            if mode not in ("Timeline", "Captions", "Prompt"):
                 mode = "Timeline"
             self.set_bottom_panel_mode(mode, save_prefs=False)
 
@@ -4193,24 +4314,37 @@ class VideoThumbnailPlayer(
         except tk.TclError:
             pass
 
+    def _set_prompt_autoload_visible(self, visible: bool):
+        check = getattr(self, "prompt_autoload_check", None)
+        if check is None:
+            return
+        try:
+            if visible:
+                if not check.winfo_ismapped():
+                    check.pack(side="left", padx=(10, 0), pady=1)
+            else:
+                check.pack_forget()
+        except tk.TclError:
+            pass
+
     def set_bottom_panel_mode(self, mode=None, *, save_prefs=True):
         """
-        Switch the bottom panel between Timeline and Captions editor.
+        Switch the bottom panel between Timeline, Captions, and Prompt.
         ``mode`` may be passed by CTkSegmentedButton as the selected value.
         """
         if mode is None:
             mode = self.bottom_panel_mode_var.get() if hasattr(self, "bottom_panel_mode_var") else "Timeline"
-        if mode not in ("Timeline", "Captions"):
+        if mode not in ("Timeline", "Captions", "Prompt"):
             mode = "Timeline"
 
-        # Captions requires opt-in (View → Enable Captions Mode)
+        # Captions/Prompt require opt-in (View → Enable Captions and Prompt Preview)
         captions_on = True
         if hasattr(self, "captions_mode_enabled_var"):
             try:
                 captions_on = bool(self.captions_mode_enabled_var.get())
             except Exception:
                 captions_on = False
-        if mode == "Captions" and not captions_on:
+        if mode in ("Captions", "Prompt") and not captions_on:
             mode = "Timeline"
 
         prev = getattr(self, "bottom_panel_mode", "Timeline")
@@ -4232,25 +4366,21 @@ class VideoThumbnailPlayer(
             and self.timeline_container.expanded
         )
 
-        if mode == "Captions":
-            if hasattr(self, "timeline_widget"):
-                self.timeline_widget.pack_forget()
-            if hasattr(self, "caption_editor"):
-                self.caption_editor.pack(fill="both", expand=True)
-                self.timeline_container.content_widget = self.caption_editor
-                self.caption_editor.load_for_path(
-                    getattr(self, "selected_file_path", None),
-                    commit_previous=(prev == "Captions"),
-                )
-            self._set_caption_autosave_visible(True)
+        self._pack_bottom_panel_content(mode)
+
+        if mode == "Captions" and hasattr(self, "caption_editor"):
+            self.caption_editor.load_for_path(
+                getattr(self, "selected_file_path", None),
+                commit_previous=(prev == "Captions"),
+            )
+            self.ShowTWidget = False
+        elif mode == "Prompt" and hasattr(self, "prompt_preview"):
+            self.prompt_preview.on_selection(
+                getattr(self, "selected_file_path", None),
+                selected_paths=self._captionable_selected_paths(),
+            )
             self.ShowTWidget = False
         else:
-            if hasattr(self, "caption_editor"):
-                self.caption_editor.pack_forget()
-            if hasattr(self, "timeline_widget"):
-                self.timeline_widget.pack(fill="both", expand=True)
-                self.timeline_container.content_widget = self.timeline_widget
-            self._set_caption_autosave_visible(False)
             self.ShowTWidget = expanded
 
         logging.info("[BottomPanel] mode=%s ShowTWidget=%s", mode, self.ShowTWidget)
@@ -4280,15 +4410,42 @@ class VideoThumbnailPlayer(
                 logging.debug("[BottomPanel] Could not save preferences on mode switch", exc_info=True)
 
     def notify_caption_selection(self, file_path):
-        """Called when thumbnail selection changes — refresh captions panel if active."""
+        """Called when thumbnail selection changes — refresh Captions/Prompt if active."""
         if not getattr(self, "captions_mode_enabled_var", None) or not self.captions_mode_enabled_var.get():
             return
-        if getattr(self, "bottom_panel_mode", "Timeline") != "Captions":
-            return
-        if not hasattr(self, "caption_editor") or self.caption_editor is None:
-            return
-        # Load even while collapsed so expand / remount shows the right text immediately.
-        self.caption_editor.load_for_path(file_path)
+        mode = getattr(self, "bottom_panel_mode", "Timeline")
+        if mode == "Captions":
+            if not hasattr(self, "caption_editor") or self.caption_editor is None:
+                return
+            self.caption_editor.load_for_path(file_path)
+        elif mode == "Prompt":
+            if not hasattr(self, "prompt_preview") or self.prompt_preview is None:
+                return
+            selected_paths = self._captionable_selected_paths()
+            self.prompt_preview.on_selection(file_path, selected_paths=selected_paths)
+
+    def _captionable_selected_paths(self) -> list[str]:
+        """Ordered unique captionable paths from current thumbnail selection."""
+        from caption_editor_widget import is_captionable_path
+
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in getattr(self, "selected_thumbnails", None) or []:
+            try:
+                path = item[0]
+            except (TypeError, IndexError):
+                continue
+            if not is_captionable_path(path):
+                continue
+            try:
+                key = os.path.normcase(os.path.normpath(path))
+            except Exception:
+                key = path
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(path)
+        return out
 
 
     def toggle_infopanel_menu(self, save_prefs=True, *, from_view_menu=False):

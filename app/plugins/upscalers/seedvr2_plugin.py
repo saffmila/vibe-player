@@ -120,6 +120,15 @@ OOM_HELP_MESSAGE = (
     "• Use the RTX 4090 for heavy FP16 jobs if 5090 VRAM is tight\n"
     "• Close other GPU apps; turn off Keep-in-VRAM and retry"
 )
+UNSUPPORTED_DIT_MODEL_MESSAGE = (
+    "This SeedVR model format is not supported by the current runner "
+    "(INT8 ConvRot / NVFP4 / MXFP8 need ComfyUI-native ops).\n\n"
+    "Pick a different DiT model in Upscale settings:\n"
+    "• seedvr2_ema_3b_fp8_e4m3fn.safetensors  (recommended)\n"
+    "• seedvr2_ema_3b_fp16.safetensors\n"
+    "• or a .gguf model (Q8 / Q4)\n\n"
+    "Avoid filenames with int8_convrot, nvfp4, or mxfp8."
+)
 
 
 def _is_oom_text(text: str) -> bool:
@@ -137,6 +146,31 @@ def _is_oom_text(text: str) -> bool:
             "unhandled exception caught in c10",
         )
     )
+
+
+def _dit_model_unsupported_by_runner(dit_model: str) -> bool:
+    """Comfy-Org INT8/NVFP4/MXFP8 packs need native Comfy ops; numz CLI cannot load them."""
+    name = (dit_model or "").lower()
+    if not name:
+        return False
+    if name.endswith(".gguf"):
+        return False
+    return any(
+        tok in name
+        for tok in ("int8_convrot", "nvfp4", "mxfp8", "_int8.", "-int8.")
+    ) or name.endswith("_int8.safetensors")
+
+
+def _is_unsupported_dit_load_error(text: str) -> bool:
+    """Detect failed INT8/quant load that leaves meta tensors behind."""
+    low = (text or "").lower()
+    if "cannot copy out of meta tensor" in low:
+        return True
+    if "only tensors of floating point and complex dtype can require gradients" in low:
+        return True
+    if "while copying the parameter named" in low and "require gradients" in low:
+        return True
+    return False
 
 
 def _model_looks_heavy(dit_model: str) -> bool:
@@ -166,8 +200,13 @@ def _auto_video_batch(resolution: int, dit_model: str) -> int:
     return VIDEO_BATCH_SIZE_DEFAULT
 
 
-def _format_runner_failure(tail: str) -> tuple[str, str]:
+def _format_runner_failure(tail: str, *, dit_model: str | None = None) -> tuple[str, str]:
     """Return (error_code, user_message) for a failed runner log tail."""
+    if _dit_model_unsupported_by_runner(dit_model or "") or _is_unsupported_dit_load_error(tail):
+        msg = UNSUPPORTED_DIT_MODEL_MESSAGE
+        if dit_model:
+            msg = f"Selected model: {dit_model}\n\n{msg}"
+        return "unsupported_model", msg
     if _is_oom_text(tail):
         return "oom", OOM_HELP_MESSAGE
     low = (tail or "").lower()
@@ -993,6 +1032,13 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
 
         cuda_device = str(opts.get("cuda_device") or self.cuda_device or "0").strip() or "0"
         dit_model = str(opts.get("dit_model") or self.dit_model or DEFAULT_DIT_MODEL).strip() or DEFAULT_DIT_MODEL
+        if _dit_model_unsupported_by_runner(dit_model):
+            return {
+                "ok": False,
+                "output_path": None,
+                "error": "unsupported_model",
+                "message": f"Selected model: {dit_model}\n\n{UNSUPPORTED_DIT_MODEL_MESSAGE}",
+            }
 
         # ComfyUI HD video uses batch_size=33 (+ uniform). Images stay on small batches.
         # Auto when unset/0; explicit dialog values always win.
@@ -1255,8 +1301,9 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
 
         code = proc.wait()
         if code != 0:
-            tail = "\n".join(log_lines[-20:]) if log_lines else f"exit code {code}"
-            err, msg = _format_runner_failure(tail)
+            # Keep a longer tail so INT8/meta-tensor load errors are still recognizable.
+            tail = "\n".join(log_lines[-80:]) if log_lines else f"exit code {code}"
+            err, msg = _format_runner_failure(tail, dit_model=dit_model)
             return {
                 "ok": False,
                 "output_path": None,
@@ -1415,8 +1462,9 @@ class SeedVR2UpscalePlugin(UpscaleBackend):
             }
         err = result.get("error") or "runner_failed"
         msg = result.get("message") or "Persistent worker failed"
-        if _is_oom_text(msg) or "cannot be accessed from triton" in msg.lower():
-            err, msg = _format_runner_failure(msg)
+        mapped_err, mapped_msg = _format_runner_failure(msg, dit_model=dit_model)
+        if mapped_err != "runner_failed":
+            err, msg = mapped_err, mapped_msg
         return {
             "ok": False,
             "output_path": None,

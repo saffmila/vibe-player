@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import messagebox
 
+from text_find_bar import TextFindReplaceBar
 from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS
 
 # Media that can have a sibling ``.txt`` caption sidecar
@@ -218,6 +220,17 @@ class CaptionEditorWidget(ctk.CTkFrame):
         )
         self.save_button.pack(side="right")
 
+        self.find_button = ctk.CTkButton(
+            toolbar,
+            text="Find",
+            width=52,
+            height=24,
+            font=ctk.CTkFont(size=11),
+            command=lambda: self.open_find(replace=False),
+            state="disabled",
+        )
+        self.find_button.pack(side="right", padx=(0, 6))
+
         self.text = ctk.CTkTextbox(
             self,
             font=ctk.CTkFont(family="Consolas", size=13),
@@ -233,6 +246,16 @@ class CaptionEditorWidget(ctk.CTkFrame):
         self.text.bind("<Control-S>", self._on_ctrl_s)
         self.text.bind("<Control-a>", self._on_ctrl_a)
         self.text.bind("<Control-A>", self._on_ctrl_a)
+
+        self.find_bar = TextFindReplaceBar(
+            self,
+            self.text,
+            allow_replace=True,
+            scope_values=("Current", "Folder"),
+            on_after_current_exhausted=self._find_in_folder_step,
+            on_replace_all_folder=self._replace_all_in_folder,
+        )
+        self.find_bar.bind_to_textbox()
         self._set_enabled(False)
 
     # --- public API ---------------------------------------------------------
@@ -337,6 +360,8 @@ class CaptionEditorWidget(ctk.CTkFrame):
                 self.text.edit_modified(False)
             except tk.TclError:
                 pass
+            if getattr(self, "find_bar", None) is not None and self.find_bar.visible:
+                self.find_bar.refresh_highlights()
             return True
         except OSError as exc:
             logging.warning("[CaptionEditor] Failed to load %s: %s", self._caption_path, exc)
@@ -398,12 +423,299 @@ class CaptionEditorWidget(ctk.CTkFrame):
         finally:
             self._loading = False
 
+    def open_find(self, *, replace: bool = False) -> bool:
+        """Open find (or find+replace) bar — also bound to Ctrl+F / Ctrl+H."""
+        if self._caption_path is None and not self.text_is_enabled():
+            return False
+        self.find_bar.show(replace=replace)
+        return True
+
+    def text_is_enabled(self) -> bool:
+        try:
+            return str(self.text.cget("state")) != "disabled"
+        except tk.TclError:
+            return False
+
+    # --- find / replace (folder scope) --------------------------------------
+
+    def _iter_folder_caption_targets(self) -> list[tuple[str, Path]]:
+        """
+        Return (media_path, caption_path) for captionable files in the current grid.
+
+        Prefers ``controller.video_files`` order so Find Next follows the thumbnail order.
+        """
+        ctrl = self.controller
+        out: list[tuple[str, Path]] = []
+        seen: set[str] = set()
+
+        def _add(media: str) -> None:
+            if not is_captionable_path(media):
+                return
+            try:
+                key = os.path.normcase(os.path.normpath(media))
+            except Exception:
+                key = media
+            if key in seen:
+                return
+            seen.add(key)
+            out.append((media, caption_path_for_media(media)))
+
+        files = getattr(ctrl, "video_files", None) if ctrl is not None else None
+        if files:
+            for item in files:
+                try:
+                    if isinstance(item, dict):
+                        if item.get("is_folder"):
+                            continue
+                        path = item.get("path")
+                    else:
+                        path = item
+                    if path:
+                        _add(str(path))
+                except Exception:
+                    continue
+            if out:
+                return out
+
+        # Fallback: scan directory of current media / current_directory
+        folder = None
+        if self._image_path:
+            folder = os.path.dirname(self._image_path)
+        elif ctrl is not None:
+            folder = getattr(ctrl, "current_directory", None)
+        if folder and os.path.isdir(folder):
+            try:
+                names = sorted(os.listdir(folder))
+            except OSError:
+                names = []
+            for name in names:
+                _add(os.path.join(folder, name))
+        return out
+
+    def _caption_contains(self, cap_path: Path, needle: str, *, nocase: bool) -> bool:
+        try:
+            if not cap_path.is_file():
+                return False
+            text = cap_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            try:
+                text = cap_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return False
+        if nocase:
+            return needle.casefold() in text.casefold()
+        return needle in text
+
+    def _select_media_path(self, media_path: str) -> bool:
+        """Select thumbnail for ``media_path`` so the caption editor reloads it."""
+        ctrl = self.controller
+        if ctrl is None:
+            return False
+        files = getattr(ctrl, "video_files", None) or []
+        idx = -1
+        try:
+            target = os.path.normcase(os.path.normpath(media_path))
+        except Exception:
+            target = media_path
+        for i, item in enumerate(files):
+            try:
+                path = item.get("path") if isinstance(item, dict) else item
+                if not path:
+                    continue
+                if os.path.normcase(os.path.normpath(str(path))) == target:
+                    idx = i
+                    break
+            except Exception:
+                continue
+        if idx < 0:
+            return False
+        try:
+            if hasattr(ctrl, "select_thumbnail"):
+                ctrl.select_thumbnail(idx, shift=False, ctrl=False)
+                return True
+        except Exception:
+            logging.debug("[CaptionEditor] select_thumbnail failed", exc_info=True)
+        return False
+
+    def _find_in_folder_step(self, needle: str, forward: bool) -> bool:
+        """Jump to next/previous file in the folder whose caption contains ``needle``."""
+        if not needle:
+            return False
+        targets = self._iter_folder_caption_targets()
+        if not targets:
+            return False
+        nocase = True
+        try:
+            nocase = not bool(self.find_bar.case_var.get())
+        except Exception:
+            pass
+
+        # Index of current media in the list
+        cur = -1
+        if self._image_path:
+            try:
+                cur_key = os.path.normcase(os.path.normpath(self._image_path))
+            except Exception:
+                cur_key = self._image_path
+            for i, (media, _) in enumerate(targets):
+                try:
+                    if os.path.normcase(os.path.normpath(media)) == cur_key:
+                        cur = i
+                        break
+                except Exception:
+                    continue
+
+        n = len(targets)
+        if n == 0:
+            return False
+        if cur < 0:
+            order = range(n) if forward else range(n - 1, -1, -1)
+        elif forward:
+            order = [(cur + 1 + k) % n for k in range(n)]
+        else:
+            order = [(cur - 1 - k) % n for k in range(n)]
+
+        for i in order:
+            media, cap = targets[i]
+            # Skip current file — caller already exhausted it
+            if cur >= 0 and i == cur:
+                continue
+            if not self._caption_contains(cap, needle, nocase=nocase):
+                continue
+            # Commit current edits before switching
+            if not self.commit_before_leave():
+                return True  # consumed; stay put
+            if self._select_media_path(media):
+                # load_for_path is triggered by selection; also force load as fallback
+                try:
+                    if getattr(self, "_image_path", None) != media:
+                        self.load_for_path(media, commit_previous=False)
+                except Exception:
+                    pass
+                # Highlight first/last match after load
+                try:
+                    self.after(50, lambda: self.find_bar.refresh_highlights())
+                except Exception:
+                    self.find_bar.refresh_highlights()
+                self._flash_status(f"Find: {os.path.basename(media)}")
+                return True
+            # Selection failed — load directly
+            if self.load_for_path(media, commit_previous=False):
+                self.find_bar.refresh_highlights()
+                self._flash_status(f"Find: {os.path.basename(media)}")
+                return True
+        return False
+
+    def _replace_all_in_folder(self, needle: str, replacement: str) -> None:
+        if not needle:
+            return
+        targets = self._iter_folder_caption_targets()
+        nocase = True
+        try:
+            nocase = not bool(self.find_bar.case_var.get())
+        except Exception:
+            pass
+
+        hits: list[tuple[str, Path, str, int]] = []
+        pattern = (
+            re.compile(re.escape(needle), re.IGNORECASE) if nocase else None
+        )
+        for media, cap in targets:
+            try:
+                if not cap.is_file():
+                    continue
+                text = cap.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                try:
+                    text = cap.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+            text = text.replace("\r\n", "\n").replace("\r", "\n")
+            if pattern is not None:
+                new_text, n = pattern.subn(replacement, text)
+            else:
+                n = text.count(needle)
+                new_text = text.replace(needle, replacement) if n else text
+            if n:
+                hits.append((media, cap, new_text, n))
+
+        if not hits:
+            self._flash_status("Replace All: no matches in folder")
+            try:
+                self.find_bar.count_label.configure(text="0 folder")
+            except Exception:
+                pass
+            return
+
+        total_repl = sum(h[3] for h in hits)
+        try:
+            parent = self.winfo_toplevel()
+            ok = messagebox.askyesno(
+                "Replace in folder",
+                f"Replace {total_repl} occurrence(s) of\n  {needle!r}\n"
+                f"in {len(hits)} caption file(s) in this folder?\n\n"
+                f"This writes .txt sidecars directly.",
+                parent=parent,
+            )
+        except Exception:
+            ok = False
+        if not ok:
+            return
+
+        written = 0
+        errors = 0
+        current_key = None
+        if self._image_path:
+            try:
+                current_key = os.path.normcase(os.path.normpath(self._image_path))
+            except Exception:
+                current_key = self._image_path
+
+        for media, cap, new_text, _n in hits:
+            try:
+                # If this is the open caption, prefer editor buffer (keeps dirty state coherent)
+                same = False
+                if current_key is not None:
+                    try:
+                        same = (
+                            os.path.normcase(os.path.normpath(media)) == current_key
+                        )
+                    except Exception:
+                        same = media == self._image_path
+                if same:
+                    try:
+                        self.text.delete("1.0", "end")
+                        self.text.insert("1.0", new_text)
+                    except tk.TclError:
+                        pass
+                    if not self.save(silent=True):
+                        errors += 1
+                    else:
+                        written += 1
+                else:
+                    cap.write_text(new_text, encoding="utf-8", newline="\n")
+                    written += 1
+            except OSError as exc:
+                logging.warning("[CaptionEditor] Folder replace failed %s: %s", cap, exc)
+                errors += 1
+
+        msg = f"Replace All: {written} file(s), {total_repl} replacement(s)"
+        if errors:
+            msg += f" ({errors} error(s))"
+        self._flash_status(msg)
+        if self.find_bar.visible:
+            self.find_bar.refresh_highlights()
+
     # --- internals ----------------------------------------------------------
 
     def _set_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
         try:
             self.text.configure(state=state)
+        except tk.TclError:
+            pass
+        try:
+            self.find_button.configure(state="normal" if enabled else "disabled")
         except tk.TclError:
             pass
 

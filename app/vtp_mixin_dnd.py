@@ -638,7 +638,7 @@ class VtpDndMixin:
             except Exception:
                 logging.debug("[DnD] preview release before op failed", exc_info=True)
             with_captions = bool(getattr(self, "copy_move_with_captions", True))
-            if getattr(self, "dnd_confirm_dialogs", False):
+            if getattr(self, "dnd_confirm_dialogs", True):
                 self._dnd_show_dialog_and_run(
                     sources, dest, is_move, on_success, with_captions=with_captions
                 )

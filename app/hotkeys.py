@@ -101,6 +101,9 @@ DEFAULT_HOTKEYS = {
     'bookmark_prev': '<Alt-Left>',
     'long_seek_forward': '<Shift-Right>',
     'long_seek_backward': '<Shift-Left>',
+    # Frame step (VLC-style: . forward, , backward)
+    'video_frame_forward': '<period>',
+    'video_frame_backward': '<comma>',
 
     # --- Speed (Video) ---
     'video_speed_up': '<greater>',
@@ -167,7 +170,8 @@ HOTKEY_HELP_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "rate_0", "rate_1", "rate_2", "rate_3", "rate_4", "rate_5",
     )),
     ("Video / timeline (when player focused)", (
-        "video_seek_forward", "video_seek_backward", "video_volume_up", "video_volume_down",
+        "video_seek_forward", "video_seek_backward", "video_frame_forward",
+        "video_frame_backward", "video_volume_up", "video_volume_down",
         "video_mute", "video_fullscreen", "video_windowed_mode", "loop_start",
         "loop_end", "loop_toggle", "video_speed_up", "video_speed_down",
         "video_close_player", "video_generate_thumbnail", "video_capture_frame",
@@ -280,6 +284,8 @@ HOTKEY_LABELS: dict[str, str] = {
     "bookmark_prev": "Previous bookmark",
     "long_seek_forward": "Long seek forward",
     "long_seek_backward": "Long seek backward",
+    "video_frame_forward": "Next frame",
+    "video_frame_backward": "Previous frame",
     "video_speed_up": "Speed up",
     "video_speed_down": "Speed down",
     "run_plugin": "Run timeline plugin",
