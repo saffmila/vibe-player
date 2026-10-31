@@ -33,7 +33,7 @@ from gui_elements import (
     _current_file_rating,
 )
 from image_crop_hud import CropModeController
-from image_edit_guard import confirm_discard_image_edit, confirm_leave_image_edit
+from image_edit_guard import confirm_leave_image_edit
 from image_loader import load_pil_frames, load_pil_image
 from image_resize_dialog import open_resize_image_dialog
 from external_apps import append_external_apps_cascade, append_external_apps_flat_commands
@@ -1155,31 +1155,16 @@ class ImageViewerLegacy:
         """Cancel crop mode without applying (no confirm — caller must guard)."""
         self.crop.exit()
 
-    def _request_cancel_crop(self, *, close_viewer: bool = False):
-        """Ask before leaving crop/rotate (Esc, Cancel, X toggle, context menu).
-
-        When ``close_viewer`` is True (Esc), Discard exits crop and closes the
-        viewer — Esc means close, and the dialog only confirms abandoning the edit.
-        Cancel / X / context menu keep the viewer open after Discard.
-        """
+    def _request_cancel_crop(self):
+        """Leave crop/rotate without applying (FastStone-style: no confirm)."""
         if not self._crop_active():
             return
-        if not confirm_discard_image_edit(self.image_window, ["Crop / Rotate"]):
-            return
         self.exit_crop_mode()
-        if close_viewer:
-            self._do_close()
 
     def _on_escape_key(self, event=None):
-        """Escape: discard crop then close viewer; otherwise close the viewer."""
+        """Escape: exit crop if active; otherwise close the viewer."""
         if self._crop_active():
-            # Defer so this Esc KeyPress cannot hit the confirm dialog as Keep.
-            try:
-                self.image_window.after_idle(
-                    lambda: self._request_cancel_crop(close_viewer=True)
-                )
-            except Exception:
-                self._request_cancel_crop(close_viewer=True)
+            self.exit_crop_mode()
             return
         self._do_close()
 

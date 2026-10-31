@@ -1697,7 +1697,29 @@ class CropModeController:
                 self._with_native_dialogs(_save_err)
             return
 
-        # overwrite
+        # overwrite — commit the crop into the viewer first (hide overlay / show
+        # result), then ask. Declining restores the pre-crop image.
+        base_frames = [f.copy() for f in (self._base_frames or [])]
+        base_durations = list(self._base_durations or [0] * len(base_frames))
+        durations = list(getattr(v, "_anim_durations", None) or [0] * len(frames))
+        if self._base_durations:
+            durations = list(self._base_durations)
+        if len(durations) < len(frames):
+            durations.extend([100] * (len(frames) - len(durations)))
+        durations = durations[: len(frames)]
+
+        self.exit(restore=False)
+        v._apply_loaded_frames(frames, durations, reset_title=False)
+        v.update_image(center=True)
+        v._start_animation_if_needed()
+        try:
+            v.image_window.update_idletasks()
+            v.image_window.update()
+        except Exception:
+            pass
+
+        parent = self._dialog_parent()
+
         def _confirm():
             return messagebox.askyesno(
                 "Overwrite",
@@ -1706,10 +1728,25 @@ class CropModeController:
             )
 
         if not self._with_native_dialogs(_confirm):
+            if base_frames:
+                try:
+                    v._apply_loaded_frames(
+                        base_frames,
+                        base_durations[: len(base_frames)],
+                        reset_title=False,
+                    )
+                    v.update_image(center=True)
+                    v._start_animation_if_needed()
+                except Exception as e:
+                    logging.info("Crop overwrite cancel restore failed: %s", e)
+            setattr(v, "_image_dirty", False)
             return
+
         try:
             self._save_frames(frames, v.image_path)
         except Exception as e:
+            setattr(v, "_image_dirty", True)
+
             def _ow_err():
                 messagebox.showerror(
                     "Overwrite", f"Failed to save:\n{e}", parent=parent
@@ -1718,16 +1755,6 @@ class CropModeController:
             self._with_native_dialogs(_ow_err)
             return
 
-        # Install cropped frames into the viewer and leave crop mode.
-        durations = list(getattr(v, "_anim_durations", None) or [0] * len(frames))
-        if self._base_durations:
-            durations = list(self._base_durations)
-        if len(durations) < len(frames):
-            durations.extend([100] * (len(frames) - len(durations)))
-        self.exit(restore=False)
-        v._apply_loaded_frames(frames, durations[: len(frames)], reset_title=False)
-        v.update_image(center=True)
-        v._start_animation_if_needed()
         setattr(v, "_image_dirty", False)
         self._refresh_browser_thumbnail(v.image_path)
 
