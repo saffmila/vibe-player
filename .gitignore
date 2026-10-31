@@ -68,6 +68,10 @@ run_debug.bat
 # — already covered by global *.prof below
 profiling/local/
 
+# Local-only cache wipe helper for profile folder lists (not for upstream)
+profiling/clear_profile_folder_cache.bat
+profiling/clear_profile_folder_cache.py
+
 # --- Tests / Tools ---
 .pytest_cache/
 .mypy_cache/

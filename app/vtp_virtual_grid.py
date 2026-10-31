@@ -29,7 +29,9 @@ from file_operations import (
     thumbnail_cache,
     create_image_thumbnail,
     create_video_thumbnail,
+    get_video_duration_mediainfo,
 )
+from image_loader import get_pil_image_size
 from vtp_constants import VIDEO_FORMATS, IMAGE_FORMATS, preview_skip_subdir
 
 _OVERSCAN_ROWS = 3
@@ -91,6 +93,7 @@ class VtpVirtualGridMixin:
         self._vg_label_font_cache: dict[int, tkfont.Font | None] = {}
         self._vg_label_measure_cache: dict[tuple, int] = {}
         self._vg_info_state_key: tuple = ()
+        self._vg_meta_probe_gen = 0
         self._preview_status_cache: dict[tuple, str] = {}
         self._folder_preview_pending_render_ids: dict[tuple, int | None] = {}
         self._folder_preview_queue: queue.Queue = queue.Queue()
@@ -1155,10 +1158,12 @@ class VtpVirtualGridMixin:
         if item.get("_vg_info_key") == state_key and "_vg_info_parts" in item:
             return item.get("_vg_info_parts") or []
         try:
+            # Never open media files on the UI thread (PIL/mediainfo hang the mainloop).
             parts = self.joininfotexts(
                 item["path"],
                 item["name"],
                 db_entry=item.get("_vg_db_entry"),
+                allow_disk_probe=False,
             )
         except Exception:
             parts = []
@@ -1241,6 +1246,7 @@ class VtpVirtualGridMixin:
         return photo
 
     def _vg_warm_item_metadata(self) -> None:
+        """Attach DB rows + caption parts without opening media files (UI-thread safe)."""
         paths = [item.get("path") for item in self._vg_data if item.get("path")]
         entries = {}
         try:
@@ -1263,10 +1269,184 @@ class VtpVirtualGridMixin:
             except Exception:
                 item["_rating"] = 0
             try:
-                item["_vg_info_parts"] = self.joininfotexts(fp, item["name"], db_entry=entry)
+                item["_vg_info_parts"] = self.joininfotexts(
+                    fp, item["name"], db_entry=entry, allow_disk_probe=False
+                )
             except Exception:
                 item["_vg_info_parts"] = []
             item["_vg_info_key"] = self._vg_info_state_key
+
+    def _vg_collect_metadata_probe_jobs(self) -> list[dict]:
+        """Paths that still need a background PIL/mediainfo probe for captions."""
+        jobs: list[dict] = []
+        vars_map = getattr(self, "file_info_vars", {}) or {}
+        want_dims = False
+        want_dur = False
+        try:
+            want_dims = bool(vars_map.get("dimensions") and vars_map["dimensions"].get())
+        except Exception:
+            want_dims = False
+        try:
+            want_dur = bool(vars_map.get("duration") and vars_map["duration"].get())
+        except Exception:
+            want_dur = False
+        if not want_dims and not want_dur:
+            return jobs
+
+        for item in self._vg_data:
+            fp = item.get("path")
+            if not fp or item.get("is_folder"):
+                continue
+            lower = fp.lower()
+            entry = item.get("_vg_db_entry") or {}
+            need_dims = False
+            need_dur = False
+            if want_dims and lower.endswith(IMAGE_FORMATS):
+                w, h = entry.get("width"), entry.get("height")
+                if not (w and h) or self._image_db_dims_look_stale(w, h):
+                    need_dims = True
+            if want_dur and lower.endswith(VIDEO_FORMATS):
+                try:
+                    dur = float(entry.get("duration") or 0.0)
+                except (TypeError, ValueError):
+                    dur = 0.0
+                if dur <= 0:
+                    need_dur = True
+            if need_dims or need_dur:
+                jobs.append({"path": fp, "dims": need_dims, "duration": need_dur})
+        return jobs
+
+    def _vg_start_async_metadata_probe(self) -> None:
+        """Heal missing/stale duration & dimensions off the UI thread, then refresh labels."""
+        jobs = self._vg_collect_metadata_probe_jobs()
+        if not jobs:
+            return
+
+        self._vg_meta_probe_gen = int(getattr(self, "_vg_meta_probe_gen", 0)) + 1
+        probe_gen = self._vg_meta_probe_gen
+        render_id = int(getattr(self, "_render_id", 0) or 0)
+        logging.info(
+            "[VGrid] Async metadata probe: %d item(s) (gen=%s rid=%s)",
+            len(jobs),
+            probe_gen,
+            render_id,
+        )
+
+        def _worker():
+            updates: list[dict] = []
+            t0 = time.perf_counter()
+            for job in jobs:
+                if probe_gen != getattr(self, "_vg_meta_probe_gen", 0):
+                    return
+                if render_id and render_id != getattr(self, "_render_id", 0):
+                    return
+                fp = job["path"]
+                upd: dict = {"path": fp}
+                if job.get("dims"):
+                    try:
+                        w, h = get_pil_image_size(fp)
+                        upd["width"] = int(w)
+                        upd["height"] = int(h)
+                        if hasattr(self, "database") and self.database:
+                            self.database.update_file_metadata(fp, width=w, height=h)
+                    except Exception:
+                        pass
+                if job.get("duration"):
+                    try:
+                        dur = float(get_video_duration_mediainfo(fp) or 0.0)
+                    except Exception:
+                        dur = 0.0
+                    if dur > 0:
+                        upd["duration"] = dur
+                        if hasattr(self, "database") and self.database:
+                            try:
+                                self.database.update_file_metadata(fp, duration=dur)
+                            except Exception:
+                                pass
+                if len(upd) > 1:
+                    updates.append(upd)
+            logging.info(
+                "[VGrid] Async metadata probe done: %d/%d updated in %.3fs (gen=%s)",
+                len(updates),
+                len(jobs),
+                time.perf_counter() - t0,
+                probe_gen,
+            )
+            if not updates:
+                return
+            if probe_gen != getattr(self, "_vg_meta_probe_gen", 0):
+                return
+            if render_id and render_id != getattr(self, "_render_id", 0):
+                return
+            try:
+                self.after(
+                    0,
+                    lambda u=updates, g=probe_gen, r=render_id: self._vg_apply_probed_metadata(
+                        u, g, r
+                    ),
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True, name="vg-meta-probe").start()
+
+    def _vg_apply_probed_metadata(
+        self, updates: list[dict], probe_gen: int, render_id: int
+    ) -> None:
+        if probe_gen != getattr(self, "_vg_meta_probe_gen", 0):
+            return
+        if render_id and render_id != getattr(self, "_render_id", 0):
+            return
+        if not getattr(self, "_vg_active", False) or not self._vg_data:
+            return
+
+        touched: set[int] = set()
+        for upd in updates:
+            fp = upd.get("path")
+            if not fp:
+                continue
+            data_idx = self._vg_data_index_by_path.get(self._vg_norm_path(fp), -1)
+            if data_idx < 0:
+                continue
+            item = self._vg_data[data_idx]
+            entry = item.get("_vg_db_entry")
+            if entry is None:
+                entry = {}
+                item["_vg_db_entry"] = entry
+            if "width" in upd:
+                entry["width"] = upd["width"]
+            if "height" in upd:
+                entry["height"] = upd["height"]
+            if "duration" in upd:
+                entry["duration"] = upd["duration"]
+            item.pop("_vg_info_parts", None)
+            item.pop("_vg_info_key", None)
+            touched.add(data_idx)
+
+        if not touched:
+            return
+
+        self._vg_label_measure_cache.clear()
+        thumb_w = self.thumbnail_size[0]
+        for data_idx in touched:
+            item = self._vg_data[data_idx]
+            parts = self._vg_get_item_info_parts(item)
+            item["_vg_label_h_px"] = self._vg_measure_item_label_height_px(
+                item["path"],
+                item["name"],
+                item.get("is_folder", False),
+                thumb_w,
+                parts=parts,
+            )
+
+        for slot in self._vg_std_pool:
+            data_idx = int(slot.get("data_idx", -1))
+            if data_idx in touched:
+                item = self._vg_data[data_idx]
+                self._vg_fill_std_labels_frame(
+                    slot, item["path"], item["name"], item.get("is_folder", False)
+                )
+        self._vg_recompute_scroll_layout_if_label_height_changed()
 
     @staticmethod
     def _vg_wrap_text_lines(text: str, font_obj: tkfont.Font, wrap_px: int) -> list[str]:
@@ -1361,7 +1541,7 @@ class VtpVirtualGridMixin:
                 if 0 <= data_idx < len(self._vg_data):
                     parts = self._vg_get_item_info_parts(self._vg_data[data_idx])
                 else:
-                    parts = self.joininfotexts(fp, name)
+                    parts = self.joininfotexts(fp, name, allow_disk_probe=False)
             except Exception:
                 parts = []
         label_texts = tuple(text for text, _ in (parts or [])) or (name,)
@@ -1449,7 +1629,7 @@ class VtpVirtualGridMixin:
             if 0 <= data_idx < len(self._vg_data):
                 parts = self._vg_get_item_info_parts(self._vg_data[data_idx])
             else:
-                parts = self.joininfotexts(file_path, file_name)
+                parts = self.joininfotexts(file_path, file_name, allow_disk_probe=False)
         except Exception:
             parts = []
         if not parts:
@@ -2988,6 +3168,8 @@ class VtpVirtualGridMixin:
 
         self._vg_index_data()
         self._vg_warm_item_metadata()
+        # PIL/mediainfo for missing dims/duration must not run on the UI thread.
+        self._vg_start_async_metadata_probe()
 
         if hasattr(self, "scrollable_frame_window_id"):
             try:
@@ -3060,6 +3242,7 @@ class VtpVirtualGridMixin:
                      self._vg_std_pool_size, self._vg_wide_pool_size)
     def deactivate_virtual_grid(self):
         self._vg_active = False
+        self._vg_meta_probe_gen = int(getattr(self, "_vg_meta_probe_gen", 0)) + 1
         self._vg_pending_gen.clear()
         self._vg_gen_queue = []
         self._vg_gen_active = 0

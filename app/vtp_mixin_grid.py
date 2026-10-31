@@ -5536,13 +5536,39 @@ class VtpGridMixin:
             size /= 1024.0
         return f"{size:.1f} TB"
 
-    def joininfotexts(self, file_path, file_name, db_entry=None):
+    def _image_db_dims_look_stale(self, width, height) -> bool:
+        """True when stored WxH matches a thumbnail cell size (historical thumb bug)."""
+        if not (width and height):
+            return False
+        try:
+            wh = (int(width), int(height))
+        except (TypeError, ValueError):
+            return False
+        thumb_sizes = {
+            (160, 120),
+            (240, 180),
+            (320, 240),
+            (400, 300),
+            (480, 360),
+        }
+        ts = getattr(self, "thumbnail_size", None)
+        if ts:
+            try:
+                thumb_sizes.add((int(ts[0]), int(ts[1])))
+            except (TypeError, ValueError):
+                pass
+        return wh in thumb_sizes
+
+    def joininfotexts(self, file_path, file_name, db_entry=None, *, allow_disk_probe=True):
         """
         Constructs a list of informational texts about a file based on user-selected options.
         Args:
             self: The application instance.
             file_path (str): The full path to the file.
             file_name (str): The name of the file.
+            allow_disk_probe (bool): When False, never open media files / run mediainfo
+                (safe for UI thread). Missing duration/dimensions are omitted; caller
+                should heal them asynchronously.
         Returns:
             list: A list of tuples, where each tuple contains (text_to_display, color).
         """
@@ -5576,7 +5602,7 @@ class VtpGridMixin:
                 duration = float(duration) if duration is not None else 0.0
             except (TypeError, ValueError):
                 duration = 0.0
-            if duration <= 0:
+            if duration <= 0 and allow_disk_probe:
                 try:
                     duration = float(get_video_duration_mediainfo(file_path) or 0.0)
                 except Exception:
@@ -5618,33 +5644,23 @@ class VtpGridMixin:
             # Historical bug: create_image_thumbnail stored thumbnail size after
             # Image.thumbnail() mutated the PIL image. Heal those rows once.
             if lower.endswith(IMAGE_FORMATS):
-                _THUMB_SIZES = {
-                    (160, 120),
-                    (240, 180),
-                    (320, 240),
-                    (400, 300),
-                    (480, 360),
-                }
-                ts = getattr(self, "thumbnail_size", None)
-                if ts:
-                    try:
-                        _THUMB_SIZES.add((int(ts[0]), int(ts[1])))
-                    except (TypeError, ValueError):
-                        pass
-                stale = (
-                    width
-                    and height
-                    and (int(width), int(height)) in _THUMB_SIZES
-                )
+                stale = self._image_db_dims_look_stale(width, height)
                 if stale or not (width and height):
-                    try:
-                        width, height = get_pil_image_size(file_path)
-                        if hasattr(self, "database") and self.database:
-                            self.database.update_file_metadata(
-                                file_path, width=width, height=height
-                            )
-                    except Exception:
-                        pass
+                    if allow_disk_probe:
+                        try:
+                            width, height = get_pil_image_size(file_path)
+                            if hasattr(self, "database") and self.database:
+                                self.database.update_file_metadata(
+                                    file_path, width=width, height=height
+                                )
+                                if db_entry is not None:
+                                    db_entry["width"] = width
+                                    db_entry["height"] = height
+                        except Exception:
+                            width, height = None, None
+                    elif stale:
+                        # Don't show bogus thumbnail WxH; async probe will fill real size.
+                        width, height = None, None
 
             if width and height:
                 info_texts.append((f"{width}x{height}", meta_color))
