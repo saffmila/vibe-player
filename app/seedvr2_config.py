@@ -82,30 +82,46 @@ DEFAULT_DIT_MODEL = "seedvr2_ema_3b_fp8_e4m3fn.safetensors"
 
 
 def default_weights_dir() -> str:
-    base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
-    if base:
-        return str(Path(base) / "VibePlayer" / "models" / "seedvr2")
-    return str(Path.home() / ".vibeplayer" / "models" / "seedvr2")
+    """Portable: ``<VibePlayer>/models/seedvr2``; source: ``<repo>/models/seedvr2``."""
+    from app_paths import install_root
+
+    return str(install_root() / "models" / "seedvr2")
 
 
 def default_setup_runner_dir() -> str:
-    """Writable AppData location used by one-click Setup runner."""
+    """Writable runner checkout next to the app (portable) or under the repo."""
+    from app_paths import install_root
+
+    return str(install_root() / "seedvr2_runner")
+
+
+def _legacy_appdata_weights_dir() -> str | None:
     base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
-    if base:
-        return str(Path(base) / "VibePlayer" / "seedvr2_runner")
-    return str(Path.home() / ".vibeplayer" / "seedvr2_runner")
+    if not base:
+        return None
+    return str(Path(base) / "VibePlayer" / "models" / "seedvr2")
+
+
+def _legacy_appdata_runner_dir() -> str | None:
+    base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+    if not base:
+        return None
+    return str(Path(base) / "VibePlayer" / "seedvr2_runner")
 
 
 def default_runner_dir() -> str:
-    """Prefer an existing checkout (repo-local, then AppData setup dir)."""
+    """Prefer an existing checkout next to the app, then legacy AppData."""
     here = Path(__file__).resolve().parent  # app/
     candidates = [
+        Path(default_setup_runner_dir()),
         here.parent / "seedvr2_runner",
         here / "seedvr2_runner",
         Path.cwd() / "seedvr2_runner",
         Path.cwd().parent / "seedvr2_runner",
-        Path(default_setup_runner_dir()),
     ]
+    legacy = _legacy_appdata_runner_dir()
+    if legacy:
+        candidates.append(Path(legacy))
     for cand in candidates:
         if detect_runner(str(cand)):
             return str(cand.resolve())

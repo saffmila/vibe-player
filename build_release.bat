@@ -28,7 +28,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo [2/4] Buildim FULL GPU app jednim PyInstaller během...
+echo [2/5] Buildim FULL GPU app jednim PyInstaller během...
 python -m PyInstaller VibePlayer.spec --clean
 if errorlevel 1 (
     echo [ERROR] PyInstaller build selhal.
@@ -36,7 +36,15 @@ if errorlevel 1 (
 )
 
 echo.
-echo [3/4] Delim full build na BASE + AUTOTAG GPU PACK ZIP...
+echo [3/5] Overim, ze base build obsahuje AI runtime balicky (einops/kornia/...)...
+python scripts\verify_release_bundle.py --dist-root "dist\VibePlayer"
+if errorlevel 1 (
+    echo [ERROR] Bundle verify selhal — nepokracuji na ZIP.
+    goto :fail
+)
+
+echo.
+echo [4/5] Delim full build na BASE + AUTOTAG GPU PACK ZIP (bez 7-Zip multi-volume)...
 python scripts\split_release.py --dist-root "dist\VibePlayer" --out-dir "dist\releases"
 if errorlevel 1 (
     echo [ERROR] Split release selhal.
@@ -44,7 +52,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo [4/4] Deaktivuji virtualni prostredi...
+echo [5/5] Deaktivuji virtualni prostredi...
 call venv\Scripts\deactivate.bat
 
 echo.
@@ -54,6 +62,9 @@ echo Full build: dist\VibePlayer
 echo Release ZIPy:
 echo   - dist\releases\VibePlayer-base.zip
 echo   - dist\releases\VibePlayer-autotag-gpu-pack.zip
+echo     (nebo .part01.zip / .part02.zip ... — kazdy dil je normalni ZIP)
+echo   - dist\releases\VibePlayer-rife-pack.zip  (pokud je v buildu)
+echo GPU pack: rozbal vsechny ZIP dilky pres stejnou slozku VibePlayer\
 echo ==========================================
 pause
 exit /b 0

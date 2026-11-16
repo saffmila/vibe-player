@@ -542,13 +542,9 @@ class BirefnetOptionsDialog(ctk.CTkToplevel):
                     w.configure(state="disabled")
                 except Exception:
                     pass
-        if self.mode == "settings":
-            if enabled:
-                self.start_btn.configure(state="normal")
-        elif enabled and self._runtime_ready:
+        # Start stays clickable when runtime is missing so ensure/install can run.
+        if enabled:
             self.start_btn.configure(state="normal")
-        elif not self._runtime_ready:
-            self.start_btn.configure(state="disabled")
 
     def _set_advanced_controls_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
@@ -712,21 +708,17 @@ class BirefnetOptionsDialog(ctk.CTkToplevel):
             else:
                 parts.append(f"Weights: {BIREFNET_MODEL_VARIANTS[variant]['label']} not installed.")
                 parts.append(f"Folder: {wt.get('path') or default_birefnet_dir()}")
+                parts.append(
+                    f"Use Install weights… ({BIREFNET_DISK_ESTIMATE}) — download needs no GPU."
+                )
                 if rt.get("ready"):
-                    parts.append(
-                        f"Use Install weights… ({BIREFNET_DISK_ESTIMATE}) or Start will download first."
-                    )
+                    parts.append("Or press Start and weights can download first.")
 
             self.status_var.set("\n".join(parts))
 
             if not self._install_running:
                 self._install_btn.configure(state="normal")
-                if self.mode == "settings":
-                    self.start_btn.configure(state="normal")
-                else:
-                    self.start_btn.configure(
-                        state="normal" if self._runtime_ready else "disabled"
-                    )
+                self.start_btn.configure(state="normal")
         except Exception as exc:
             self._runtime_ready = False
             self._weights_ready = False
@@ -734,10 +726,7 @@ class BirefnetOptionsDialog(ctk.CTkToplevel):
             self.status_var.set(f"Status check failed:\n{exc}")
             if not self._install_running:
                 self._install_btn.configure(state="normal")
-                if self.mode == "settings":
-                    self.start_btn.configure(state="normal")
-                else:
-                    self.start_btn.configure(state="disabled")
+                self.start_btn.configure(state="normal")
 
     def _browse(self) -> None:
         if self._install_running:
@@ -755,6 +744,20 @@ class BirefnetOptionsDialog(ctk.CTkToplevel):
             return
         self.destroy()
 
+    def _ensure_runtime_via_controller(self, on_ready) -> bool:
+        """Start shared GPU ensure via host app. Returns True if ensure was started."""
+        controller = self.controller
+        if controller is None or not hasattr(controller, "ensure_app_torch_cuda"):
+            return False
+        controller.ensure_app_torch_cuda(
+            on_ready,
+            title="Remove Background",
+            parent=self,
+            purpose="Remove Background",
+            check_birefnet_python_deps=True,
+        )
+        return True
+
     def _install_weights(self) -> None:
         if self._install_running:
             return
@@ -769,18 +772,7 @@ class BirefnetOptionsDialog(ctk.CTkToplevel):
                 parent=self,
             )
             return
-        if not self._runtime_ready:
-            messagebox.showwarning(
-                "GPU pack",
-                (
-                    "PyTorch CUDA is required to download model weights.\n\n"
-                    f"{GPU_PACK_MISSING_MESSAGE}\n\n"
-                    "If weights are already on disk for this variant, use Refresh status."
-                ),
-                parent=self,
-            )
-            return
-
+        # Weights download is file-only (HF snapshot) — does not need Torch/CUDA.
         ok = messagebox.askyesno(
             "Install BiRefNet weights",
             (
@@ -788,7 +780,8 @@ class BirefnetOptionsDialog(ctk.CTkToplevel):
                 f"Source: {wt.get('download_url')}\n"
                 f"Destination: {default_birefnet_dir()}\n"
                 f"Size: about {BIREFNET_DISK_ESTIMATE}\n\n"
-                "Progress will show in this dialog."
+                "Progress will show in this dialog.\n"
+                "GPU runtime is only required later when you press Start."
             ),
             parent=self,
         )
@@ -886,9 +879,15 @@ class BirefnetOptionsDialog(ctk.CTkToplevel):
                 if not detail or detail == "Checking…":
                     self._refresh_status(deep=True)
                 if not self._runtime_ready:
+                    if self._ensure_runtime_via_controller(self._continue_start_after_runtime):
+                        return
                     messagebox.showwarning(
                         "Remove Background",
-                        (self._runtime_error or self.status_var.get() or GPU_PACK_MISSING_MESSAGE).strip(),
+                        (
+                            self._runtime_error
+                            or self.status_var.get()
+                            or GPU_PACK_MISSING_MESSAGE
+                        ).strip(),
                         parent=self,
                     )
                     return
@@ -898,6 +897,17 @@ class BirefnetOptionsDialog(ctk.CTkToplevel):
                 return
         else:
             out_dir = (self.out_dir_var.get() or "").strip()
+        self._finish_start(out_dir)
+
+    def _continue_start_after_runtime(self) -> None:
+        if not self.winfo_exists():
+            return
+        self._refresh_status(deep=True)
+        if not self._runtime_ready:
+            return
+        self._start()
+
+    def _finish_start(self, out_dir: str) -> None:
         suffix = (self.suffix_var.get() or "_nobg").strip() or "_nobg"
         bg_mode = self._bg_mode_var.get() or "transparent"
         bg_color = normalize_hex_color(self._bg_color_var.get()) or "#FFFFFF"

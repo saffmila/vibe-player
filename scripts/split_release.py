@@ -4,7 +4,8 @@ Build strategy:
 - Build once (full app with all dependencies) into dist/VibePlayer
 - Split files into:
   1) VibePlayer-base.zip (all non-heavy files)
-  2) VibePlayer-autotag-gpu-pack.zip.001/.002/... (7-Zip multi-volume archive)
+  2) VibePlayer-autotag-gpu-pack.zip (or .part01.zip, .part02.zip, …)
+     — each part is a normal ZIP Total Commander / Explorer can open
   3) VibePlayer-rife-pack.zip (optional tools/rife — only if present in dist)
 
 All archived files are stored under a common VibePlayer/ root directory inside ZIPs
@@ -14,13 +15,13 @@ so base + optional packs can be extracted into the same target folder safely.
 from __future__ import annotations
 
 import argparse
-import shutil
-import subprocess
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
 ZIP_ROOT_PREFIX = "VibePlayer/"
-GPU_7Z_VOLUME_SIZE = "1500m"
+# Soft limit per GPU ZIP part (uncompressed payload). Keeps each file under
+# typical hosting caps (e.g. GitHub ~2 GB) while staying TC-openable.
+GPU_ZIP_MAX_UNCOMPRESSED = 1500 * 1024 * 1024
 
 
 HEAVY_PREFIXES = (
@@ -94,80 +95,80 @@ def zip_files(root: Path, files: list[Path], zip_path: Path) -> int:
     return total_size
 
 
-def stage_gpu_pack_files(root: Path, files: list[Path], staging_root: Path) -> int:
-    """Copy GPU files into a temporary staging tree under VibePlayer/."""
-    if staging_root.exists():
-        shutil.rmtree(staging_root)
-    target_root = staging_root / "VibePlayer"
-    target_root.mkdir(parents=True, exist_ok=True)
-
-    total_size = 0
-    for file_path in files:
-        rel = file_path.relative_to(root)
-        dst = target_root / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(file_path, dst)
-        total_size += file_path.stat().st_size
-    return total_size
+def clear_gpu_pack_outputs(out_dir: Path) -> None:
+    """Remove previous GPU pack ZIPs (including old 7-Zip .zip.001 style)."""
+    patterns = (
+        "VibePlayer-autotag-gpu-pack.zip",
+        "VibePlayer-autotag-gpu-pack.zip.*",
+        "VibePlayer-autotag-gpu-pack.part*.zip",
+    )
+    for pattern in patterns:
+        for path in out_dir.glob(pattern):
+            if path.is_file():
+                path.unlink()
 
 
-def find_7z_binary() -> str | None:
-    """Return 7z executable path from PATH or common Windows install location."""
-    in_path = shutil.which("7z")
-    if in_path:
-        return in_path
-    common = Path("C:/Program Files/7-Zip/7z.exe")
-    if common.is_file():
-        return str(common)
-    return None
+def split_files_into_size_buckets(
+    files: list[Path],
+    max_uncompressed: int,
+) -> list[list[Path]]:
+    """Group files into buckets whose uncompressed sizes stay near max_uncompressed.
 
-
-def confirm_continue_without_7z(assume_yes: bool) -> bool:
-    """Ask user whether to continue without GPU archive when 7-Zip is missing."""
-    if assume_yes:
-        return True
-    while True:
-        choice = input(
-            "[split] 7-Zip was not found. Continue without GPU archive and keep unpacked folder? [Y/N]: "
-        ).strip().lower()
-        if choice in {"y", "yes"}:
-            return True
-        if choice in {"n", "no"}:
-            return False
-        print("[split] Please answer Y or N.")
-
-
-def create_gpu_pack_with_7z(staging_root: Path, out_dir: Path, volume_size: str) -> list[Path]:
-    """Create native multi-volume ZIP using external 7-Zip command."""
-    seven_zip = find_7z_binary()
-    if not seven_zip:
+    A single file larger than the limit still gets its own bucket (cannot split
+    one file across ZIPs without multi-volume archives).
+    """
+    if not files:
         return []
 
-    out_base = out_dir / "VibePlayer-autotag-gpu-pack.zip"
-    for existing in out_dir.glob("VibePlayer-autotag-gpu-pack.zip*"):
-        existing.unlink()
+    ordered = sorted(files, key=lambda p: p.as_posix().lower())
+    buckets: list[list[Path]] = []
+    current: list[Path] = []
+    current_size = 0
 
-    command = [
-        seven_zip,
-        "a",
-        f"-v{volume_size}",
-        str(out_base),
-        "VibePlayer",
-    ]
-    # Run 7-Zip from staging root so archive contains VibePlayer/ at root level.
-    result = subprocess.run(command, cwd=staging_root, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(
-            "7-Zip failed while creating GPU pack.\n"
-            f"Command: {' '.join(command)}\n"
-            f"stdout:\n{result.stdout}\n"
-            f"stderr:\n{result.stderr}"
-        )
+    for file_path in ordered:
+        size = file_path.stat().st_size
+        if current and current_size + size > max_uncompressed:
+            buckets.append(current)
+            current = []
+            current_size = 0
+        current.append(file_path)
+        current_size += size
 
-    part_paths = sorted(out_dir.glob("VibePlayer-autotag-gpu-pack.zip*"))
-    if not part_paths:
-        raise RuntimeError("7-Zip reported success but no GPU archive files were produced.")
-    return part_paths
+    if current:
+        buckets.append(current)
+    return buckets
+
+
+def create_gpu_pack_zips(
+    root: Path,
+    files: list[Path],
+    out_dir: Path,
+    max_uncompressed: int = GPU_ZIP_MAX_UNCOMPRESSED,
+) -> tuple[list[Path], int]:
+    """Write one or more standalone ZIP parts for the GPU pack.
+
+    Returns (part_paths, total_uncompressed_bytes).
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    clear_gpu_pack_outputs(out_dir)
+
+    if not files:
+        return [], 0
+
+    buckets = split_files_into_size_buckets(files, max_uncompressed)
+    part_paths: list[Path] = []
+    total_uncompressed = 0
+
+    multi = len(buckets) > 1
+    for index, bucket in enumerate(buckets, start=1):
+        if multi:
+            zip_path = out_dir / f"VibePlayer-autotag-gpu-pack.part{index:02d}.zip"
+        else:
+            zip_path = out_dir / "VibePlayer-autotag-gpu-pack.zip"
+        total_uncompressed += zip_files(root, bucket, zip_path)
+        part_paths.append(zip_path)
+
+    return part_paths, total_uncompressed
 
 
 def main() -> int:
@@ -175,14 +176,16 @@ def main() -> int:
     parser.add_argument("--dist-root", default="dist/VibePlayer", help="Path to full onedir build.")
     parser.add_argument("--out-dir", default="dist/releases", help="Output directory for generated ZIP files.")
     parser.add_argument(
-        "--yes-without-7z",
-        action="store_true",
-        help="Automatically continue without GPU archive when 7-Zip is missing.",
+        "--gpu-max-mb",
+        type=int,
+        default=1500,
+        help="Max uncompressed MB per GPU ZIP part (default: 1500).",
     )
     args = parser.parse_args()
 
     dist_root = Path(args.dist_root).resolve()
     out_dir = Path(args.out_dir).resolve()
+    max_uncompressed = max(1, int(args.gpu_max_mb)) * 1024 * 1024
 
     if not dist_root.is_dir():
         raise SystemExit(f"[split] Dist root not found: {dist_root}")
@@ -218,25 +221,12 @@ def main() -> int:
     elif rife_zip.exists():
         rife_zip.unlink()
 
-    staging_root = out_dir / "_gpu_pack_staging"
-    gpu_uncompressed = stage_gpu_pack_files(dist_root, gpu_pack_files, staging_root)
-    gpu_part_paths: list[Path] = []
-    fallback_unpacked_dir = out_dir / "VibePlayer-autotag-gpu-pack-unpacked"
-    if fallback_unpacked_dir.exists():
-        shutil.rmtree(fallback_unpacked_dir)
-    seven_zip = find_7z_binary()
-
-    try:
-        if seven_zip:
-            gpu_part_paths = create_gpu_pack_with_7z(staging_root, out_dir, GPU_7Z_VOLUME_SIZE)
-        else:
-            if not confirm_continue_without_7z(args.yes_without_7z):
-                raise SystemExit("[split] Build cancelled by user (7-Zip missing).")
-            shutil.copytree(staging_root / "VibePlayer", fallback_unpacked_dir / "VibePlayer")
-    except RuntimeError as exc:
-        raise SystemExit(f"[split] ERROR: {exc}") from exc
-    finally:
-        shutil.rmtree(staging_root, ignore_errors=True)
+    gpu_part_paths, gpu_uncompressed = create_gpu_pack_zips(
+        dist_root,
+        gpu_pack_files,
+        out_dir,
+        max_uncompressed=max_uncompressed,
+    )
 
     print(f"[split] Dist root: {dist_root}")
     print(f"[split] Total files scanned: {len(all_files)}")
@@ -251,18 +241,15 @@ def main() -> int:
     else:
         print("[split] RIFE pack skipped (tools/rife not in dist — optional).")
     if gpu_part_paths:
-        print("[split] GPU 7-Zip multi-volume parts:")
+        label = "GPU ZIP" if len(gpu_part_paths) == 1 else "GPU ZIP parts (extract all over the same VibePlayer/ folder)"
+        print(f"[split] {label}:")
         for path in gpu_part_paths:
-            print(f"[split]   - {path}")
+            print(f"[split]   - {path} ({path.stat().st_size / (1024 * 1024):.2f} MB)")
     else:
-        print("[split] GPU archive not created via 7-Zip.")
-        print(f"[split] Prepared unpacked fallback folder: {fallback_unpacked_dir / 'VibePlayer'}")
-        print("[split] Please compress this folder manually if needed.")
+        print("[split] GPU pack skipped (no heavy files).")
     print(f"[split] Base uncompressed size: {base_uncompressed / (1024 * 1024):.2f} MB")
     print(f"[split] GPU uncompressed size: {gpu_uncompressed / (1024 * 1024):.2f} MB")
-    print(f"[split] GPU 7-Zip volume size target: {GPU_7Z_VOLUME_SIZE}")
-    for path in gpu_part_paths:
-        print(f"[split] GPU part size: {path.name} = {path.stat().st_size / (1024 * 1024):.2f} MB")
+    print(f"[split] GPU ZIP max uncompressed per part: {max_uncompressed / (1024 * 1024):.0f} MB")
 
     return 0
 

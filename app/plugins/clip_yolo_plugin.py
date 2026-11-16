@@ -14,7 +14,12 @@ from generate_tags_ilektra import run_tagging_pipeline
 from app_settings import TaggingSettings
 
 
-GPU_PACK_MISSING_MESSAGE = "Autotag GPU Pack is not installed"
+GPU_PACK_MISSING_MESSAGE = (
+    "PyTorch CUDA (GPU pack) is not available. "
+    "Portable: extract VibePlayer-autotag-gpu-pack*.zip over VibePlayer/ "
+    "(all parts if split) and restart. "
+    "Dev: install CUDA PyTorch into the app venv."
+)
 
 
 def _is_gpu_pack_missing_error(exc: Exception) -> bool:
@@ -56,7 +61,7 @@ class ClipYoloPlugin(TaggingPlugin):
                 return {
                     "tags": [],
                     "error": "gpu_pack_missing",
-                    "message": GPU_PACK_MISSING_MESSAGE,
+                    "message": f"{GPU_PACK_MISSING_MESSAGE}\n\nDetails: {e}",
                 }
             print(f"[ClipYoloPlugin] Tagging failed for {file_path}: {e}")
             return {"tags": [], "error": None}

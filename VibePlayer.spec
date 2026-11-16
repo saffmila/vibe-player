@@ -2,7 +2,11 @@
 
 import os
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import (
+    collect_all,
+    collect_data_files,
+    collect_submodules,
+)
 
 try:
     _ROOT = Path(__file__).resolve().parent
@@ -39,6 +43,36 @@ _datas = [
 # (e.g. bpe_simple_vocab_16e6.txt.gz), which is not a Python module.
 _datas += collect_data_files("open_clip")
 
+# Dynamically imported AI deps (BiRefNet trust_remote_code + open_clip extras).
+# Without these, portable builds prompt for pip installs that cannot work frozen.
+# BiRefNet remote modeling (ZhengPeng7/BiRefNet birefnet.py) imports:
+#   einops, kornia.filters, timm, torch, torchvision, transformers, numpy
+#
+# kornia/einops MUST ship as on-disk .py (collect_all), not only PYZ:
+# TorchScript/kornia calls inspect.getsource() and fails with
+# "Can't get source for … make sure original .py files are available."
+_AI_SOURCE_ON_DISK_PACKAGES = (
+    "kornia",
+    "einops",
+)
+_AI_RUNTIME_PACKAGES = (
+    "kornia_rs",       # binary helper imported by kornia
+    "ftfy",            # open_clip tokenizer
+    "dill",            # open_clip / serialization
+    "huggingface_hub", # BiRefNet Install weights / transformers downloads
+)
+
+_ai_hiddenimports = []
+_ai_binaries = []
+for _pkg in _AI_SOURCE_ON_DISK_PACKAGES:
+    _pkg_datas, _pkg_bins, _pkg_hidden = collect_all(_pkg)
+    _datas += _pkg_datas
+    _ai_binaries += _pkg_bins
+    _ai_hiddenimports += _pkg_hidden
+for _pkg in _AI_RUNTIME_PACKAGES:
+    _datas += collect_data_files(_pkg)
+    _ai_hiddenimports += collect_submodules(_pkg)
+
 # Volitelne: local modely pribal jen pokud fyzicky existuji
 # a je explicitne zapnuty opt-in pres VP_INCLUDE_LOCAL_MODELS=1.
 if _INCLUDE_LOCAL_MODELS and _MODELS_DIR.is_dir():
@@ -47,7 +81,7 @@ if _INCLUDE_LOCAL_MODELS and _MODELS_DIR.is_dir():
 a = Analysis(
     ['app\\main.py'],
     pathex=[],
-    binaries=[],
+    binaries=_ai_binaries,
     datas=_datas,
     # Sem se píšou moduly, které PyInstaller sám nenašel.
     # seedvr2_progress is only imported from plugins/ (datas), so Analysis
@@ -65,7 +99,7 @@ a = Analysis(
         'rife_setup',
         'rife_pipeline',
         'rife_dialog',
-    ], 
+    ] + _ai_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

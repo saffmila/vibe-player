@@ -25,7 +25,6 @@ from birefnet_config import (
     python_deps_status,
     resolve_model_id,
     resolve_model_variant,
-    runtime_status,
 )
 
 ProgressCb = Callable[[int, int, str], None]
@@ -43,12 +42,6 @@ BIREFNET_TORCH_PACKAGES: tuple[str, ...] = (
 )
 BIREFNET_TORCH_DISK_ESTIMATE = "~2–3 GB"
 BIREFNET_TORCH_TIME_HINT = "several minutes"
-
-
-def _ensure_birefnet_deps() -> None:
-    deps = python_deps_status()
-    if not deps.get("ready"):
-        raise RuntimeError(deps.get("message") or "Missing BiRefNet Python dependencies.")
 
 
 def resolve_birefnet_pip_python() -> str | None:
@@ -216,8 +209,10 @@ def install_birefnet_python_deps(
         return {
             "ok": False,
             "message": (
-                "Cannot install packages automatically in this build.\n"
-                f"Install manually: pip install {' '.join(missing)}"
+                "Cannot install packages automatically in this portable build.\n"
+                f"Missing: {', '.join(missing)}.\n\n"
+                "einops/kornia must be bundled in the base app (rebuild/re-download).\n"
+                "Do not pip-install into the frozen app."
             ),
             "missing": missing,
         }
@@ -272,7 +267,8 @@ def install_birefnet_torch_cuda(
             "ok": False,
             "message": (
                 "Cannot install PyTorch automatically in this build.\n"
-                "Portable users: extract the Autotag GPU pack over VibePlayer/.\n"
+                "Portable: extract VibePlayer-autotag-gpu-pack*.zip over VibePlayer/ "
+                "(all parts if split), then restart.\n"
                 "Dev: pip install -r requirements.txt"
             ),
             "restart_required": False,
@@ -414,12 +410,11 @@ def download_recommended_weights(
     """
     Pull a BiRefNet variant into ``models/birefnet/``.
 
+    Uses ``huggingface_hub.snapshot_download`` only — no Torch/kornia required.
+    GPU runtime is checked later when actually running Remove Background.
+
     Returns the resolved snapshot directory containing ``config.json``.
     """
-    rt = runtime_status(deep=True)
-    if not rt.get("ready"):
-        raise RuntimeError(rt.get("message") or "GPU runtime not ready.")
-
     variant = resolve_model_variant(model_variant)
     model_id = resolve_model_id(variant)
     label = BIREFNET_MODEL_VARIANTS[variant]["label"]
@@ -435,7 +430,6 @@ def download_recommended_weights(
     if _stopped(should_stop):
         raise InterruptedError("Download cancelled.")
 
-    _ensure_birefnet_deps()
     _emit(
         progress_cb,
         0,
@@ -443,15 +437,20 @@ def download_recommended_weights(
         f"Downloading {label} ({BIREFNET_DISK_ESTIMATE})…",
     )
 
-    from transformers import AutoModelForImageSegmentation
+    try:
+        from huggingface_hub import snapshot_download
+    except Exception as exc:
+        raise RuntimeError(
+            "huggingface_hub is required to download BiRefNet weights.\n"
+            f"Details: {exc}"
+        ) from exc
 
     if _stopped(should_stop):
         raise InterruptedError("Download cancelled.")
 
     try:
-        AutoModelForImageSegmentation.from_pretrained(
-            model_id,
-            trust_remote_code=True,
+        snapshot_download(
+            repo_id=model_id,
             cache_dir=str(root),
         )
     except Exception as exc:
