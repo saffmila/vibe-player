@@ -21,6 +21,115 @@ from vtp_constants import IMAGE_FORMATS
 class VtpBirefnetMixin:
     """Context-menu driven BiRefNet background removal for still images."""
 
+    def ensure_app_torch_cuda(
+        self,
+        on_ready: Callable[[], None],
+        *,
+        title: str = "GPU runtime",
+        parent=None,
+        purpose: str = "This feature",
+        check_birefnet_python_deps: bool = False,
+    ) -> None:
+        """
+        Ensure app-process PyTorch CUDA is ready (Autotag / Remove Background).
+
+        Frozen/portable: explain extracting the Autotag GPU pack (no pip).
+        Dev: offer existing pip installers. Calls ``on_ready`` when usable.
+        """
+        from birefnet_config import (
+            GPU_PACK_EXTRACT_HINT,
+            GPU_PACK_MISSING_MESSAGE,
+            python_deps_status,
+            runtime_status,
+        )
+
+        owner = parent if parent is not None else self
+
+        # Torch first — kornia often fails only because Torch/CUDA DLLs failed.
+        rt = runtime_status(deep=True, require_birefnet_deps=False)
+        if not rt.get("ready"):
+            err = rt.get("error") or ""
+            detail = (rt.get("message") or GPU_PACK_MISSING_MESSAGE).strip()
+            if getattr(sys, "frozen", False) and err in (
+                "gpu_pack_missing",
+                "cuda_unavailable",
+                "runtime_error",
+            ):
+                messagebox.showwarning(
+                    title,
+                    f"{purpose} needs PyTorch CUDA.\n\n{detail}\n\n{GPU_PACK_EXTRACT_HINT}",
+                    parent=owner,
+                )
+                return
+
+            if err in ("cuda_unavailable", "gpu_pack_missing", "runtime_error"):
+                self.offer_install_birefnet_torch_cuda(
+                    lambda: self.ensure_app_torch_cuda(
+                        on_ready,
+                        title=title,
+                        parent=parent,
+                        purpose=purpose,
+                        check_birefnet_python_deps=check_birefnet_python_deps,
+                    ),
+                    title=title,
+                    parent=owner,
+                    purpose=purpose,
+                )
+                return
+
+            messagebox.showwarning(
+                title,
+                detail or "GPU runtime is not ready.",
+                parent=owner,
+            )
+            return
+
+        if check_birefnet_python_deps:
+            deps = python_deps_status()
+            if not deps.get("ready"):
+                if deps.get("error") == "deps_import_error":
+                    # Do NOT show the post-pip "Restart / PyTorch installed" dialog here.
+                    # That dialog is only for a successful Torch wheel swap in-process.
+                    messagebox.showwarning(
+                        title,
+                        deps.get("message")
+                        or "BiRefNet helper packages failed to import.",
+                        parent=owner,
+                    )
+                    return
+                missing = list(deps.get("missing") or [])
+                # Portable/frozen cannot pip-install into the bundle — packages
+                # must ship with the base build (see VibePlayer.spec).
+                if getattr(sys, "frozen", False):
+                    joined = ", ".join(missing) if missing else "einops, kornia"
+                    messagebox.showwarning(
+                        title,
+                        (
+                            f"{purpose} is missing bundled packages: {joined}.\n\n"
+                            "This portable build is incomplete. Re-download / rebuild "
+                            "the app so einops and kornia are included in the base ZIP.\n"
+                            "There is nothing to install manually with pip."
+                        ),
+                        parent=owner,
+                    )
+                    return
+                self.offer_install_birefnet_python_deps(
+                    missing,
+                    lambda: self.ensure_app_torch_cuda(
+                        on_ready,
+                        title=title,
+                        parent=parent,
+                        purpose=purpose,
+                        check_birefnet_python_deps=check_birefnet_python_deps,
+                    ),
+                    title=title,
+                    parent=owner,
+                    purpose=purpose,
+                )
+                return
+
+        on_ready()
+
     def ensure_birefnet_ready(
         self,
         on_ready: Callable[[], None],
@@ -28,70 +137,13 @@ class VtpBirefnetMixin:
         title: str = "Batch Convert",
         parent=None,
     ) -> None:
-        """
-        Make sure BiRefNet deps + CUDA torch are ready, offering auto-install.
-
-        Calls ``on_ready`` when the runtime is usable. Install dialogs warn about
-        download size/time and support Cancel.
-        """
-        from birefnet_config import python_deps_status, runtime_status
-
-        owner = parent if parent is not None else self
-
-        deps = python_deps_status()
-        if not deps.get("ready"):
-            if deps.get("error") == "deps_import_error":
-                # Wheels are present but Torch/kornia cannot load in this process
-                # (typical right after a CUDA wheel swap on Windows).
-                self._offer_restart_after_torch_install(
-                    deps.get("message") or "",
-                    title=title,
-                )
-                return
-            self.offer_install_birefnet_python_deps(
-                list(deps.get("missing") or []),
-                lambda: self.ensure_birefnet_ready(
-                    on_ready, title=title, parent=parent
-                ),
-                title=title,
-                parent=owner,
-            )
-            return
-
-        rt = runtime_status(deep=True)
-        if rt.get("ready"):
-            on_ready()
-            return
-
-        err = rt.get("error") or ""
-        if getattr(sys, "frozen", False) and err in (
-            "gpu_pack_missing",
-            "cuda_unavailable",
-            "runtime_error",
-        ):
-            messagebox.showwarning(
-                title,
-                rt.get("message")
-                or "Autotag GPU Pack is not installed.\n"
-                "Extract the pack over VibePlayer/ and restart.",
-                parent=owner,
-            )
-            return
-
-        if err in ("cuda_unavailable", "gpu_pack_missing", "runtime_error"):
-            self.offer_install_birefnet_torch_cuda(
-                lambda: self.ensure_birefnet_ready(
-                    on_ready, title=title, parent=parent
-                ),
-                title=title,
-                parent=owner,
-            )
-            return
-
-        messagebox.showwarning(
-            title,
-            rt.get("message") or "GPU runtime is not ready.",
-            parent=owner,
+        """BiRefNet-ready check: python deps + shared app PyTorch CUDA ensure."""
+        self.ensure_app_torch_cuda(
+            on_ready,
+            title=title,
+            parent=parent,
+            purpose="Remove Background",
+            check_birefnet_python_deps=True,
         )
 
     def offer_install_birefnet_python_deps(
@@ -101,6 +153,7 @@ class VtpBirefnetMixin:
         *,
         title: str = "Batch Convert",
         parent=None,
+        purpose: str = "This feature",
     ) -> None:
         """Ask to pip-install missing BiRefNet deps, then call ``on_success``."""
         pkgs = [p for p in (missing or []) if p]
@@ -110,6 +163,7 @@ class VtpBirefnetMixin:
 
         owner = parent if parent is not None else self
         joined = ", ".join(pkgs)
+        headline = f"{purpose} needs extra Python packages."
 
         def _install() -> None:
             from birefnet_weights_setup import install_birefnet_python_deps
@@ -133,7 +187,7 @@ class VtpBirefnetMixin:
         if hasattr(self, "universal_dialog"):
             self.universal_dialog(
                 title="Install packages?",
-                headline="Background removal needs extra Python packages.",
+                headline=headline,
                 message=message,
                 confirm_callback=_install,
                 confirm_text="Install",
@@ -146,7 +200,7 @@ class VtpBirefnetMixin:
             return
         if messagebox.askyesno(
             "Install packages?",
-            "Background removal needs extra Python packages.\n\n" + message,
+            f"{headline}\n\n{message}",
             parent=owner,
         ):
             _install()
@@ -157,6 +211,7 @@ class VtpBirefnetMixin:
         *,
         title: str = "Batch Convert",
         parent=None,
+        purpose: str = "This feature",
     ) -> None:
         """Ask to install CUDA PyTorch, with size/time warning + Cancel."""
         from birefnet_weights_setup import (
@@ -166,6 +221,7 @@ class VtpBirefnetMixin:
         )
 
         owner = parent if parent is not None else self
+        headline = f"{purpose} needs PyTorch with CUDA."
 
         def _install() -> None:
             self._run_birefnet_pip_install_job(
@@ -188,7 +244,7 @@ class VtpBirefnetMixin:
         if hasattr(self, "universal_dialog"):
             self.universal_dialog(
                 title="Install PyTorch CUDA?",
-                headline="Background removal needs PyTorch with CUDA.",
+                headline=headline,
                 message=message,
                 confirm_callback=_install,
                 confirm_text="Install",
@@ -201,7 +257,7 @@ class VtpBirefnetMixin:
             return
         if messagebox.askyesno(
             "Install PyTorch CUDA?",
-            "Background removal needs PyTorch with CUDA.\n\n" + message,
+            f"{headline}\n\n{message}",
             parent=owner,
         ):
             _install()
@@ -434,7 +490,8 @@ class VtpBirefnetMixin:
         if not status.get("ready"):
             self._notify_birefnet_issue_once(
                 status.get("error") or "gpu_pack_missing",
-                status.get("message") or "Autotag GPU Pack is not installed.",
+                status.get("message")
+                or "PyTorch CUDA (GPU pack) is not available.",
             )
             return
 

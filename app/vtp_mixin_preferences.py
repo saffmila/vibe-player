@@ -25,7 +25,76 @@ _VTP_INSTALL_ROOT = Path(__file__).resolve().parent.parent
 
 
 class VtpPreferencesMixin:
-  
+
+    def _normalize_thumbnail_cache_path(self, loaded_path: str) -> str:
+        """Keep cache inside the install folder; migrate the old sibling-folder bug."""
+        try:
+            from app_paths import default_thumbnail_cache_dir, install_root
+
+            portable = default_thumbnail_cache_dir().resolve()
+            root = install_root().resolve()
+            loaded = Path(loaded_path).expanduser()
+            try:
+                resolved = loaded.resolve()
+            except OSError:
+                resolved = loaded
+
+            # Old portable bug: ``<parent>/thumbnail_cache`` next to VibePlayer/.
+            if resolved == root.parent / "thumbnail_cache":
+                logging.info(
+                    "Migrating thumbnail cache path from sibling folder to %s",
+                    portable,
+                )
+                return str(portable)
+
+            # Relative "thumbnail_cache" or path already under install root → portable.
+            if not loaded.is_absolute() or loaded.name == "thumbnail_cache" and (
+                resolved == portable or resolved.parent == root
+            ):
+                return str(portable)
+
+            return str(resolved if loaded.is_absolute() else portable)
+        except Exception:
+            logging.debug("thumbnail cache path normalize failed", exc_info=True)
+            return loaded_path
+
+    def _normalize_seedvr_data_path(self, loaded_path: str, *, kind: str) -> str:
+        """Map empty/legacy AppData SeedVR paths onto the portable install root."""
+        try:
+            from seedvr2_config import (
+                _legacy_appdata_runner_dir,
+                _legacy_appdata_weights_dir,
+                default_setup_runner_dir,
+                default_weights_dir,
+            )
+
+            text = (loaded_path or "").strip()
+            default = (
+                default_weights_dir() if kind == "weights" else default_setup_runner_dir()
+            )
+            # Weights always need a concrete folder; empty runner keeps auto-detect.
+            if not text:
+                return default if kind == "weights" else ""
+
+            legacy = (
+                _legacy_appdata_weights_dir()
+                if kind == "weights"
+                else _legacy_appdata_runner_dir()
+            )
+            try:
+                resolved = str(Path(text).expanduser().resolve())
+            except OSError:
+                resolved = text
+            if legacy and resolved.lower() == str(Path(legacy).resolve()).lower():
+                logging.info(
+                    "Migrating SeedVR %s path from AppData to %s", kind, default
+                )
+                return default
+            return text
+        except Exception:
+            logging.debug("SeedVR path normalize failed", exc_info=True)
+            return loaded_path or ""
+
     def open_preferences_window(self):
         create_preferences_window(self)
 
@@ -261,7 +330,9 @@ class VtpPreferencesMixin:
                     # If it's just "thumbnail_cache", we keep the absolute path calculated during init.
                 loaded_path = settings.get("thumbnail_cache_path")
                 if loaded_path and loaded_path != "thumbnail_cache":
-                    self.thumbnail_cache_path = loaded_path
+                    self.thumbnail_cache_path = self._normalize_thumbnail_cache_path(
+                        loaded_path
+                    )
                 self.auto_play = settings.get("auto_play", self.auto_play)
                 self.play_broken_videos = bool(
                     settings.get("play_broken_videos", getattr(self, "play_broken_videos", True))
@@ -517,15 +588,14 @@ class VtpPreferencesMixin:
                 self.image_viewer_open_fullscreen = bool(
                     settings.get("image_viewer_open_fullscreen", True)
                 )
-                self.seedvr2_weights_dir = str(settings.get("seedvr2_weights_dir") or "").strip()
-                if not self.seedvr2_weights_dir:
-                    try:
-                        from seedvr2_config import default_weights_dir
-
-                        self.seedvr2_weights_dir = default_weights_dir()
-                    except Exception:
-                        self.seedvr2_weights_dir = ""
-                self.seedvr2_runner_dir = str(settings.get("seedvr2_runner_dir") or "").strip()
+                self.seedvr2_weights_dir = self._normalize_seedvr_data_path(
+                    str(settings.get("seedvr2_weights_dir") or "").strip(),
+                    kind="weights",
+                )
+                self.seedvr2_runner_dir = self._normalize_seedvr_data_path(
+                    str(settings.get("seedvr2_runner_dir") or "").strip(),
+                    kind="runner",
+                )
                 self.seedvr2_python = str(settings.get("seedvr2_python") or "").strip()
                 self.seedvr2_cuda_device = str(settings.get("seedvr2_cuda_device") or "0").strip() or "0"
                 self.birefnet_cuda_device = (

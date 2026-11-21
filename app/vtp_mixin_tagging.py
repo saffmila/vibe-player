@@ -23,6 +23,19 @@ class VtpTaggingMixin:
             self._ai_init_hint_shown = True
             self.after(0, lambda: self.status_bar.set_action_message("Initializing AI models (first run may take a moment)..."))
 
+    def _ensure_autotag_runtime(self, on_ready) -> None:
+        """Shared PyTorch CUDA preflight used by all Autotag entry points."""
+        ensure = getattr(self, "ensure_app_torch_cuda", None)
+        if ensure is None:
+            on_ready()
+            return
+        ensure(
+            on_ready,
+            title="Autotag",
+            purpose="Autotag",
+            check_birefnet_python_deps=False,
+        )
+
     def _notify_gpu_pack_missing_once(self, message: str):
             """Show a one-time warning when optional autotag GPU pack is missing."""
             if getattr(self, "_gpu_pack_missing_shown", False):
@@ -35,19 +48,32 @@ class VtpTaggingMixin:
     def tag_single_image(self, file_path, plugin, update_ui=True):
             """
             Tags a single image file, updates the database, and refreshes the UI.
-            Includes error handling to prevent thread crashes during AI processing.
+
+            Returns an error code string (e.g. ``gpu_pack_missing``) or ``None`` on
+            success / soft empty tags. Includes error handling to prevent thread crashes.
             """
             if not os.path.exists(file_path):
                 logging.error(f"[AutoTag] File not found: {file_path}")
-                return
+                return "file_not_found"
 
             try:
                 # Running the AI model logic
                 result = plugin.run(file_path)
                 tags = result.get("tags", [])
-                if result.get("error") == "gpu_pack_missing":
-                    self._notify_gpu_pack_missing_once(result.get("message", "Autotag GPU Pack is not installed"))
-                    return
+                err = result.get("error")
+                if err == "gpu_pack_missing":
+                    self._notify_gpu_pack_missing_once(
+                        result.get("message")
+                        or "PyTorch CUDA (GPU pack) is not available."
+                    )
+                    return "gpu_pack_missing"
+                if err:
+                    logging.error(
+                        "[AutoTag] Plugin error for %s: %s",
+                        os.path.basename(file_path),
+                        result.get("message") or err,
+                    )
+                    return str(err)
 
                 if tags:
                     cleaned = ", ".join(tag.strip() for tag in tags if tag.strip())
@@ -60,9 +86,11 @@ class VtpTaggingMixin:
                     logging.info("[OK] %s: %s", os.path.basename(file_path), tags)
                 else:
                     logging.info("No tags returned for %s", file_path)
+                return None
             
             except Exception as e:
                 logging.error(f"[AutoTag] Critical error during tagging {file_path}: {e}")
+                return "error"
 
 
     def auto_tag_with_plugin_from_file(self, file_path):
@@ -92,35 +120,58 @@ class VtpTaggingMixin:
                 self.after(0, lambda: self.status_bar.set_action_message(f"Tagging: {os.path.basename(file_path)}"))
                 self._show_ai_initialization_hint()
 
-                self.tag_single_image(file_path, plugin, update_ui=True)
+                err = self.tag_single_image(file_path, plugin, update_ui=True)
 
                 # Cleanup UI
                 self.after(0, self.status_bar.clear_action_message)
                 self.after(0, self.status_bar.disable_stop)
                 self.after(0, lambda: self.status_bar.set_progress(0))
+                if err == "gpu_pack_missing":
+                    self.after(
+                        0,
+                        lambda: self.status_bar.set_action_message(
+                            "Autotag blocked: GPU pack / PyTorch CUDA missing."
+                        ),
+                    )
+                    return
+                if err:
+                    self.after(
+                        0,
+                        lambda: messagebox.showerror(
+                            "Autotag",
+                            f"Tagging failed for {os.path.basename(file_path)}.",
+                        ),
+                    )
+                    return
                 self.after(0, lambda: messagebox.showinfo("Done", f"Tagged {os.path.basename(file_path)}"))
 
-            threading.Thread(target=tag_one, daemon=True).start()
+            def _start() -> None:
+                threading.Thread(target=tag_one, daemon=True).start()
+
+            self._ensure_autotag_runtime(_start)
 
 
     def auto_tag_video_with_plugin(self, video_path, num_thumbs=3, run_in_thread=True):
         """
         Runs the image autotagging plugin on N video thumbnails.
         Updates the UI status bar dynamically strictly following UI guidelines.
+
+        Returns ``gpu_pack_missing`` when the GPU runtime is unavailable (sync path).
         """
         plugin_name = self.get_plugin_name_for_engine()
         plugin = self.plugin_manager.get_plugin(plugin_name)
         if not plugin:
             messagebox.showerror("Error", f"Plugin '{plugin_name}' not found.")
-            return
+            return None
 
         thumbs_raw = self.timeline_manager.get_timeline_thumbnails(video_path, num_thumbs)
         if not thumbs_raw:
             messagebox.showinfo("Info", "No thumbnails found for this video.")
-            return
+            return None
 
         def tag_worker():
             all_tags = set()
+            runtime_error = None
             self._show_ai_initialization_hint()
             
             # --- UI UPDATE: Standard prefix according to manual ---
@@ -141,7 +192,11 @@ class VtpTaggingMixin:
                     result = plugin.run(thumb_path)
                     tags = result.get("tags", [])
                     if result.get("error") == "gpu_pack_missing":
-                        self._notify_gpu_pack_missing_once(result.get("message", "Autotag GPU Pack is not installed"))
+                        runtime_error = "gpu_pack_missing"
+                        self._notify_gpu_pack_missing_once(
+                            result.get("message")
+                            or "PyTorch CUDA (GPU pack) is not available."
+                        )
                         break
                     if tags:
                         all_tags.update(tag.strip() for tag in tags if tag.strip())
@@ -152,8 +207,15 @@ class VtpTaggingMixin:
                 except Exception as e:
                     logging.error(f"[AutoTag] Plugin error on {thumb_path}: {e}")
 
-            # Finalize only if not aborted
-            if not getattr(self, "stop_requested", False):
+            # Finalize only if not aborted / not blocked by missing GPU pack
+            if runtime_error == "gpu_pack_missing":
+                self.after(
+                    0,
+                    lambda: self.status_bar.set_action_message(
+                        "Autotag blocked: GPU pack / PyTorch CUDA missing."
+                    ),
+                )
+            elif not getattr(self, "stop_requested", False):
                 keywords = ", ".join(sorted(all_tags))
                 if keywords:
                     self.database.update_keywords(video_path, keywords)
@@ -171,10 +233,16 @@ class VtpTaggingMixin:
                 self.after(3000, self.status_bar.clear_action_message)
                 self.after(0, self.status_bar.disable_stop)
 
+            return runtime_error
+
         if run_in_thread:
-            threading.Thread(target=tag_worker, daemon=True).start()
-        else:
-            tag_worker()
+            def _start() -> None:
+                threading.Thread(target=tag_worker, daemon=True).start()
+
+            self._ensure_autotag_runtime(_start)
+            return None
+
+        return tag_worker()
 
 
     def auto_tag_with_plugin_from_folder(self, folder_path):
@@ -212,16 +280,20 @@ class VtpTaggingMixin:
 
         def tag_worker():
             idx = 0
+            runtime_blocked = False
             for path in image_paths:
                 if self.stop_requested: break
                 idx += 1
                 status_text = f"Tagging image {idx}/{total}   {os.path.basename(path)}"
                 self.after(0, lambda txt=status_text: self.status_bar.set_action_message(txt))
                 self.after(0, lambda val=idx/total: self.status_bar.set_progress(val))
-                self.tag_single_image(path, plugin)
+                err = self.tag_single_image(path, plugin)
+                if err == "gpu_pack_missing":
+                    runtime_blocked = True
+                    break
 
             for path in video_paths:
-                if self.stop_requested: break
+                if self.stop_requested or runtime_blocked: break
                 idx += 1
                 status_text = f"Tagging video {idx}/{total}   {os.path.basename(path)}"
                 self.after(0, lambda txt=status_text: self.status_bar.set_action_message(txt))
@@ -231,21 +303,37 @@ class VtpTaggingMixin:
                 if hasattr(plugin, 'number_of_passes'): plugin.number_of_passes = 1
                 
                 # We run this synchronously inside this thread
-                self.auto_tag_video_with_plugin(path, run_in_thread=False)
+                video_err = self.auto_tag_video_with_plugin(path, run_in_thread=False)
+                if video_err == "gpu_pack_missing":
+                    runtime_blocked = True
                 
                 if hasattr(plugin, 'number_of_passes'): plugin.number_of_passes = orig_passes
+                if runtime_blocked:
+                    break
+
+            self.after(0, self.status_bar.clear_action_message)
+            self.after(0, lambda: self.status_bar.set_progress(0))
+            self.after(0, self.status_bar.disable_stop)
+            if runtime_blocked:
+                self.after(
+                    0,
+                    lambda: self.status_bar.set_action_message(
+                        "Autotag blocked: GPU pack / PyTorch CUDA missing."
+                    ),
+                )
+                return
 
             # --- FIX: MessageBox MUST be called via self.after ---
             final_msg = f"{plugin_name} tagged {idx} files."
             if self.stop_requested:
                 final_msg = f"Stopped! Tagged {idx} files."
                 
-            self.after(0, self.status_bar.clear_action_message)
-            self.after(0, lambda: self.status_bar.set_progress(0))
             self.after(0, lambda: messagebox.showinfo("Done", final_msg))
-            self.after(0, self.status_bar.disable_stop)
 
-        threading.Thread(target=tag_worker, daemon=True).start()
+        def _start() -> None:
+            threading.Thread(target=tag_worker, daemon=True).start()
+
+        self._ensure_autotag_runtime(_start)
         
 
     def get_plugin_name_for_engine(self):
@@ -255,4 +343,3 @@ class VtpTaggingMixin:
             "YOLO": "clip_yolo_plugin",
             "VIT":  "clip_yolo_plugin"
         }.get(engine, "clip_yolo_plugin")
-

@@ -217,15 +217,24 @@ signal.signal(signal.SIGINT, handle_signal)
 
 def _resolve_paths():
     """
-    Resolve install paths relative to this file.
+    Resolve install paths for icons/assets and writable cache.
+
     Returns:
-        app_dir: .../vlc_player/app
-        install_root: .../vlc_player
-        cache_dir: .../vlc_player/thumbnail_cache
+        app_dir: ``app/`` in source; portable root when frozen
+        install_root: repo root in source; portable root when frozen
+        cache_dir: ``<install_root>/thumbnail_cache`` (inside the app folder)
     """
-    app_dir = Path(__file__).resolve().parent
-    install_root = app_dir.parent
-    cache_dir = install_root / "thumbnail_cache"
+    from app_paths import default_thumbnail_cache_dir, install_root as portable_root
+
+    root = portable_root()
+    if getattr(sys, "frozen", False):
+        # Flat onedir: assets/icons live next to VibePlayer.exe.
+        app_dir = root
+        install_root = root
+    else:
+        app_dir = Path(__file__).resolve().parent
+        install_root = root
+    cache_dir = default_thumbnail_cache_dir()
     return app_dir, install_root, cache_dir
 
 
@@ -1133,7 +1142,8 @@ class VideoThumbnailPlayer(
         def batch_worker():
             # --- UI UPDATE: Standard prefix ---
             self.after(0, lambda: self.status_bar.set_action_message("Processing selected files..."))
-            
+            runtime_blocked = False
+
             for idx, file_path in enumerate(selected_paths, start=1):
                 if getattr(self, "stop_requested", False):
                     logging.info("STOP requested — exiting batch autotag")
@@ -1149,33 +1159,45 @@ class VideoThumbnailPlayer(
                 try:
                     if ext in VIDEO_FORMATS:
                         # CRITICAL: Call video function synchronously (run_in_thread=False)
-                        self.auto_tag_video_with_plugin(file_path, run_in_thread=False)
-                        
+                        video_err = self.auto_tag_video_with_plugin(file_path, run_in_thread=False)
+                        if video_err == "gpu_pack_missing":
+                            runtime_blocked = True
+                            break
+
                     elif ext in IMAGE_FORMATS:
-                        result = plugin.run(file_path)
-                        tags = result.get("tags", [])
-                        if tags:
-                            final_tags = ", ".join(tags)
-                            self.database.update_keywords(file_path, final_tags)
-                            # Update UI immediately for this thumbnail
-                            self.after(0, lambda p=file_path: self.refresh_single_thumbnail(p, True))
-                            logging.info("[OK] %s: %s", os.path.basename(file_path), final_tags)
+                        err = self.tag_single_image(file_path, plugin, update_ui=True)
+                        if err == "gpu_pack_missing":
+                            runtime_blocked = True
+                            break
                     else:
                         logging.warning(f"File type {ext} not supported: {file_path}")
                         
                 except Exception as e:
                     logging.error(f"[AutoTag] Error processing {file_path}: {e}")
 
-            # Finalize only if not aborted
-            if not getattr(self, "stop_requested", False):
+            # Finalize only if not aborted / not blocked by missing GPU pack
+            if runtime_blocked:
+                self.after(
+                    0,
+                    lambda: self.status_bar.set_action_message(
+                        "Autotag blocked: GPU pack / PyTorch CUDA missing."
+                    ),
+                )
+            elif not getattr(self, "stop_requested", False):
                 self.after(0, lambda: self.status_bar.set_action_message("Tagging completely finished!"))
                 
             # Clean up UI
             self.after(3000, self.status_bar.clear_action_message)
             self.after(0, self.status_bar.disable_stop)
 
-        # Start one master thread for the whole batch
-        threading.Thread(target=batch_worker, daemon=True).start()
+        def _start() -> None:
+            threading.Thread(target=batch_worker, daemon=True).start()
+
+        ensure = getattr(self, "_ensure_autotag_runtime", None)
+        if ensure is not None:
+            ensure(_start)
+        else:
+            _start()
 
     def auto_tag_with_plugin(self, plugin_name):
         # Lazy import tagging engine (only when needed)

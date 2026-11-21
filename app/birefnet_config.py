@@ -34,7 +34,17 @@ BIREFNET_MODEL_VARIANTS: dict[str, dict[str, str]] = {
 
 DEFAULT_MODEL_VARIANT = "general"
 
-GPU_PACK_MISSING_MESSAGE = "Autotag GPU Pack is not installed (PyTorch CUDA required)."
+GPU_PACK_MISSING_MESSAGE = (
+    "PyTorch CUDA (GPU pack) is not available.\n\n"
+    "Portable: extract VibePlayer-autotag-gpu-pack*.zip over your VibePlayer/ "
+    "folder (all parts if split), then restart Vibe Player.\n"
+    "Dev: install CUDA PyTorch into the app venv (Install will be offered)."
+)
+GPU_PACK_EXTRACT_HINT = (
+    "Extract VibePlayer-autotag-gpu-pack*.zip over your VibePlayer/ folder "
+    "(all parts if split) so torch/, nvidia/, etc. sit next to VibePlayer.exe, "
+    "then restart the app."
+)
 WEIGHTS_MISSING_MESSAGE = (
     "BiRefNet weights are not installed.\n\n"
     f"Download from {BIREFNET_HF_URL}\n"
@@ -45,13 +55,13 @@ _IMAGE_EXTS = frozenset(ext.lower() for ext in IMAGE_FORMATS)
 
 
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parent.parent
+    from app_paths import install_root
+
+    return install_root()
 
 
 def default_birefnet_dir() -> Path:
-    """User-writable model cache (portable + dev)."""
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent / "models" / "birefnet"
+    """User-writable model cache (portable + dev) under the install root."""
     return _repo_root() / "models" / "birefnet"
 
 
@@ -163,15 +173,22 @@ def python_deps_status() -> dict[str, Any]:
     return {"ready": True, "error": None, "message": None, "missing": []}
 
 
-def runtime_status(*, deep: bool = False) -> dict[str, Any]:
+def runtime_status(
+    *,
+    deep: bool = False,
+    require_birefnet_deps: bool = True,
+) -> dict[str, Any]:
     """
     Check PyTorch CUDA availability (GPU pack).
 
     ``deep=True`` also imports torch and probes ``cuda.is_available()``.
+    ``require_birefnet_deps`` gates einops/kornia (Remove Background only).
+    Autotag should pass ``require_birefnet_deps=False``.
     """
-    deps = python_deps_status()
-    if not deps.get("ready"):
-        return deps
+    if require_birefnet_deps:
+        deps = python_deps_status()
+        if not deps.get("ready"):
+            return deps
 
     try:
         import torch  # noqa: F401
@@ -180,7 +197,7 @@ def runtime_status(*, deep: bool = False) -> dict[str, Any]:
             return {
                 "ready": False,
                 "error": "gpu_pack_missing",
-                "message": GPU_PACK_MISSING_MESSAGE,
+                "message": f"{GPU_PACK_MISSING_MESSAGE}\n\nDetails: {exc}",
             }
         return {
             "ready": False,
@@ -206,7 +223,7 @@ def runtime_status(*, deep: bool = False) -> dict[str, Any]:
                         "Your GPU is fine — reinstall PyTorch with CUDA wheels:\n"
                         "  pip install -r requirements.txt\n"
                         "(or run install.bat in a fresh venv).\n\n"
-                        "Portable users: extract the Autotag GPU pack over VibePlayer/."
+                        f"Portable users: {GPU_PACK_EXTRACT_HINT}"
                     ),
                 }
             return {
@@ -232,7 +249,7 @@ def runtime_status(*, deep: bool = False) -> dict[str, Any]:
             return {
                 "ready": False,
                 "error": "gpu_pack_missing",
-                "message": GPU_PACK_MISSING_MESSAGE,
+                "message": f"{GPU_PACK_MISSING_MESSAGE}\n\nDetails: {exc}",
             }
         return {
             "ready": False,
