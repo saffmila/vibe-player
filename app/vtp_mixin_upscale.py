@@ -197,6 +197,208 @@ class VtpUpscaleMixin:
             controller=self,
         )
 
+    def list_spandrel_favorite_presets(self) -> list[dict]:
+        from spandrel_favorites import normalize_presets
+
+        return normalize_presets(getattr(self, "spandrel_favorite_presets", None))
+
+    def run_fast_upscale_favorite(
+        self, preset_name: str, clicked_path: str | None = None
+    ) -> None:
+        """1-click Spandrel upscale using a saved favorite preset."""
+        from spandrel_favorites import find_preset, preset_to_options
+
+        paths = self.selected_paths_for_fast_upscale(clicked_path)
+        if not paths:
+            messagebox.showinfo(
+                "Fast Upscale",
+                "No images selected.\n\nSelect one or more image thumbnails first.",
+            )
+            return
+        preset = find_preset(self.list_spandrel_favorite_presets(), preset_name)
+        if not preset:
+            messagebox.showwarning(
+                "Favorites",
+                f"Preset “{preset_name}” was not found.",
+            )
+            return
+        out_dir = os.path.dirname(paths[0]) if paths else os.getcwd()
+        cuda = str(getattr(self, "spandrel_cuda_device", "0") or "0")
+        fallback_dir = str(getattr(self, "spandrel_models_dir", "") or "").strip()
+        try:
+            tile_cap = int(getattr(self, "spandrel_max_tile", 0) or 0)
+        except (TypeError, ValueError):
+            tile_cap = 0
+        options = preset_to_options(
+            preset,
+            output_dir=out_dir,
+            cuda_device=cuda,
+            tile_cap=tile_cap if tile_cap in (256, 512, 768, 1024) else 0,
+        )
+        if not options.get("models_dir") and fallback_dir:
+            options["models_dir"] = fallback_dir
+        self.start_fast_upscale_batch(paths, options)
+
+    def remove_spandrel_favorite_preset(self, preset_name: str) -> None:
+        from spandrel_favorites import remove_preset
+
+        name = str(preset_name or "").strip()
+        if not name:
+            return
+        if not messagebox.askyesno(
+            "Favorites",
+            f"Remove favorite preset “{name}”?",
+        ):
+            return
+        self.spandrel_favorite_presets = remove_preset(
+            getattr(self, "spandrel_favorite_presets", None), name
+        )
+
+    def list_topaz_favorite_presets(self) -> list[dict]:
+        from topaz_favorites import normalize_presets
+
+        return normalize_presets(getattr(self, "topaz_favorite_presets", None))
+
+    def run_topaz_upscale_favorite(
+        self, preset_name: str, clicked_path: str | None = None
+    ) -> None:
+        """1-click Topaz Photo AI upscale using a saved favorite preset."""
+        from topaz_favorites import find_preset, preset_to_options
+
+        paths = self.selected_paths_for_fast_upscale(clicked_path)
+        if not paths:
+            messagebox.showinfo(
+                "Photo AI",
+                "No images selected.\n\nSelect one or more image thumbnails first.",
+            )
+            return
+        preset = find_preset(self.list_topaz_favorite_presets(), preset_name)
+        if not preset:
+            messagebox.showwarning(
+                "Favorites",
+                f"Preset “{preset_name}” was not found.",
+            )
+            return
+        try:
+            from topaz_config import runtime_status as topaz_runtime_status
+
+            if not topaz_runtime_status().get("ready"):
+                messagebox.showinfo(
+                    "Photo AI",
+                    "Topaz Photo AI (tpai.exe) was not found on this PC.",
+                )
+                return
+        except Exception:
+            pass
+        out_dir = os.path.dirname(paths[0]) if paths else os.getcwd()
+        options = preset_to_options(preset, output_dir=out_dir)
+        self.start_fast_upscale_batch(paths, options)
+
+    def remove_topaz_favorite_preset(self, preset_name: str) -> None:
+        from topaz_favorites import remove_preset
+
+        name = str(preset_name or "").strip()
+        if not name:
+            return
+        if not messagebox.askyesno(
+            "Favorites",
+            f"Remove Photo AI favorite “{name}”?",
+        ):
+            return
+        self.topaz_favorite_presets = remove_preset(
+            getattr(self, "topaz_favorite_presets", None), name
+        )
+
+    def add_upscale_favorites_to_menu(
+        self,
+        upscale_menu,
+        clicked_path: str | None = None,
+        *,
+        backends: tuple[str, ...] | list[str] | str = ("spandrel", "topaz"),
+    ):
+        """Append favorite presets under one separator, with Remove… last.
+
+        Dialog openers (Fast Upscale…, Photo AI…) stay above that separator.
+        """
+        import tkinter as tk
+
+        if isinstance(backends, str):
+            wanted = {backends.strip().lower()}
+        else:
+            wanted = {str(b or "").strip().lower() for b in backends}
+        wanted.discard("")
+
+        sp: list = []
+        tp: list = []
+        if "spandrel" in wanted or "fast" in wanted:
+            try:
+                sp = list(self.list_spandrel_favorite_presets() or [])
+            except Exception:
+                sp = []
+        if "topaz" in wanted or "photoai" in wanted or "photo_ai" in wanted:
+            try:
+                tp = list(self.list_topaz_favorite_presets() or [])
+            except Exception:
+                tp = []
+        sp_names = [
+            str(p.get("name") or "").strip()
+            for p in sp
+            if str(p.get("name") or "").strip()
+        ]
+        tp_names = [
+            str(p.get("name") or "").strip()
+            for p in tp
+            if str(p.get("name") or "").strip()
+        ]
+        if not sp_names and not tp_names:
+            return
+
+        upscale_menu.add_separator()
+        if sp_names and hasattr(self, "run_fast_upscale_favorite"):
+            from spandrel_favorites import preset_menu_label
+
+            for preset in sp:
+                pname = str(preset.get("name") or "").strip()
+                if not pname:
+                    continue
+                upscale_menu.add_command(
+                    label=preset_menu_label(preset),
+                    command=lambda n=pname, p=clicked_path: self.run_fast_upscale_favorite(
+                        n, p
+                    ),
+                )
+        if tp_names and hasattr(self, "run_topaz_upscale_favorite"):
+            for pname in tp_names:
+                upscale_menu.add_command(
+                    label=pname,
+                    command=lambda n=pname, p=clicked_path: self.run_topaz_upscale_favorite(
+                        n, p
+                    ),
+                )
+
+        rem = tk.Menu(upscale_menu, tearoff=0)
+        if sp_names and hasattr(self, "remove_spandrel_favorite_preset"):
+            from spandrel_favorites import preset_menu_label
+
+            for preset in sp:
+                pname = str(preset.get("name") or "").strip()
+                if not pname:
+                    continue
+                rem.add_command(
+                    label=preset_menu_label(preset),
+                    command=lambda n=pname: self.remove_spandrel_favorite_preset(n),
+                )
+        if tp_names and hasattr(self, "remove_topaz_favorite_preset"):
+            if sp_names:
+                rem.add_separator()
+            for pname in tp_names:
+                rem.add_command(
+                    label=pname,
+                    command=lambda n=pname: self.remove_topaz_favorite_preset(n),
+                )
+        if rem.index("end") is not None:
+            upscale_menu.add_cascade(label="Remove…", menu=rem)
+
     def open_topaz_upscale_dialog(self, clicked_path: str | None = None):
         """Open Topaz Photo AI upscale options for selected images."""
         paths = self.selected_paths_for_fast_upscale(clicked_path)
@@ -265,8 +467,24 @@ class VtpUpscaleMixin:
         self._fast_upscale_progress_dialog = progress
         self._fast_upscale_batch_running = True
         self.stop_requested = False
+
+        def _request_fast_upscale_stop():
+            setattr(self, "stop_requested", True)
+            # Hard-kill Spandrel/Topaz child so CUDA stops immediately.
+            try:
+                from spandrel_worker_host import abort_spandrel_worker
+
+                abort_spandrel_worker()
+            except Exception:
+                logging.debug("[FastUpscale] Spandrel abort failed", exc_info=True)
+
         try:
-            self.status_bar.set_stop_callback(lambda: setattr(self, "stop_requested", True))
+            self.status_bar.set_stop_callback(_request_fast_upscale_stop)
+        except Exception:
+            pass
+        try:
+            if hasattr(progress, "set_cancel_callback"):
+                progress.set_cancel_callback(_request_fast_upscale_stop)
         except Exception:
             pass
 
@@ -398,6 +616,20 @@ class VtpUpscaleMixin:
                     if result.get("ok"):
                         done += 1
                         last_out = result.get("output_path") or dest
+                        # Record last full-frame time for Spandrel model shopping.
+                        if backend_id == "spandrel":
+                            try:
+                                mkey = str(base_opts.get("model") or "").strip()
+                                if mkey:
+                                    meta = dict(
+                                        getattr(self, "spandrel_model_meta", None) or {}
+                                    )
+                                    entry = dict(meta.get(mkey) or {})
+                                    entry["full_s"] = round(float(elapsed), 2)
+                                    meta[mkey] = entry
+                                    self.spandrel_model_meta = meta
+                            except Exception:
+                                pass
                         logging.info(
                             "[FastUpscale/%s] OK %s → %s (%.1fs)",
                             backend_id,
@@ -433,6 +665,12 @@ class VtpUpscaleMixin:
                     self.after(0, lambda: self.status_bar.set_stop_callback(None))
                 except Exception:
                     pass
+                try:
+                    from spandrel_worker_host import abort_spandrel_worker
+
+                    abort_spandrel_worker()
+                except Exception:
+                    pass
                 parts = [f"Fast Upscale ({plugin_name}): {done}/{total}"]
                 if skipped:
                     parts.append(f"{skipped} skipped")
@@ -443,6 +681,7 @@ class VtpUpscaleMixin:
                 summary = ", ".join(parts)
                 if last_out:
                     summary += f"\nLast: {last_out}"
+
                 def _finish_ui(s=summary, d=done, out=last_out):
                     try:
                         if progress is not None and progress.winfo_exists():

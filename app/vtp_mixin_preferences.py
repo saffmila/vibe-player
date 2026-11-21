@@ -670,15 +670,77 @@ class VtpPreferencesMixin:
                 except Exception:
                     self.spandrel_custom_scale = 3.0
                 self.spandrel_tiling = bool(settings.get("spandrel_tiling", False))
+                self.spandrel_advanced_open = bool(
+                    settings.get("spandrel_advanced_open", False)
+                )
+                self.spandrel_show_preview = bool(
+                    settings.get("spandrel_show_preview", False)
+                )
                 try:
                     self.spandrel_tile_size = max(
                         256, min(2048, int(settings.get("spandrel_tile_size") or 512))
                     )
                 except Exception:
                     self.spandrel_tile_size = 512
+                if "spandrel_max_tile" in settings:
+                    try:
+                        _cap = int(settings.get("spandrel_max_tile") or 0)
+                    except Exception:
+                        _cap = 0
+                elif settings.get("spandrel_tiling"):
+                    _cap = self.spandrel_tile_size
+                else:
+                    _cap = 0
+                self.spandrel_max_tile = _cap if _cap in (256, 512, 768, 1024) else 0
                 self.spandrel_cuda_device = (
                     str(settings.get("spandrel_cuda_device") or "0").strip() or "0"
                 )
+                _fmt = str(
+                    settings.get("spandrel_output_format") or "png"
+                ).strip().lower()
+                if _fmt in ("jpeg",):
+                    _fmt = "jpg"
+                self.spandrel_output_format = (
+                    _fmt if _fmt in ("png", "jpg", "tiff", "webp") else "png"
+                )
+                raw_meta = settings.get("spandrel_model_meta") or {}
+                if isinstance(raw_meta, dict):
+                    cleaned = {}
+                    for mk, mv in raw_meta.items():
+                        if not mk or not isinstance(mv, dict):
+                            continue
+                        entry = {}
+                        try:
+                            entry["rating"] = max(
+                                0, min(5, int(mv.get("rating", 0) or 0))
+                            )
+                        except Exception:
+                            entry["rating"] = 0
+                        for fld in ("preview_s", "full_s"):
+                            try:
+                                sec = float(mv.get(fld) or 0)
+                                if sec > 0:
+                                    entry[fld] = round(sec, 2)
+                            except Exception:
+                                pass
+                        cleaned[str(mk)] = entry
+                    self.spandrel_model_meta = cleaned
+                else:
+                    self.spandrel_model_meta = {}
+                _sort = str(
+                    settings.get("spandrel_model_sort") or "Name"
+                ).strip()
+                self.spandrel_model_sort = (
+                    _sort if _sort in ("Name", "Rating", "Speed") else "Name"
+                )
+                try:
+                    from spandrel_favorites import normalize_presets
+
+                    self.spandrel_favorite_presets = normalize_presets(
+                        settings.get("spandrel_favorite_presets")
+                    )
+                except Exception:
+                    self.spandrel_favorite_presets = []
                 try:
                     self.topaz_scale = max(
                         1, min(6, int(settings.get("topaz_scale") or 4))
@@ -689,6 +751,20 @@ class VtpPreferencesMixin:
                     str(settings.get("topaz_model") or "High Fidelity V2").strip()
                     or "High Fidelity V2"
                 )
+                _tfmt = str(settings.get("topaz_output_format") or "png").strip().lower()
+                if _tfmt in ("jpeg",):
+                    _tfmt = "jpg"
+                self.topaz_output_format = (
+                    _tfmt if _tfmt in ("png", "jpg", "tiff", "webp") else "png"
+                )
+                try:
+                    from topaz_favorites import normalize_presets as _norm_topaz_fav
+
+                    self.topaz_favorite_presets = _norm_topaz_fav(
+                        settings.get("topaz_favorite_presets")
+                    )
+                except Exception:
+                    self.topaz_favorite_presets = []
                 self.fast_upscale_suffix = str(
                     settings.get("fast_upscale_suffix") or ""
                 ).strip()

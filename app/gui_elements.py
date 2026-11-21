@@ -568,6 +568,7 @@ class FileOpProgressDialog(ctk.CTkToplevel):
         except Exception:
             pass
         self._cancelled = False
+        self._on_cancel_cb = None
         self._total = max(1, int(total))
         self._action_label = action_label
         self._phase = "idle"
@@ -684,13 +685,30 @@ class FileOpProgressDialog(ctk.CTkToplevel):
 
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
 
+    def set_cancel_callback(self, callback) -> None:
+        """Optional hook fired immediately when the user hits Cancel (hard kill)."""
+        self._on_cancel_cb = callback
+
     def _on_cancel(self):
+        if self._cancelled:
+            return
         self._cancelled = True
-        self.detail_var.set("Canceling after current item…")
+        self.detail_var.set("Canceling… stopping GPU worker")
+        try:
+            if self._indeterminate:
+                self.progress.stop()
+        except Exception:
+            pass
         try:
             self.cancel_btn.configure(state="disabled")
         except Exception:
             pass
+        cb = self._on_cancel_cb
+        if cb is not None:
+            try:
+                cb()
+            except Exception:
+                pass
 
     @property
     def cancelled(self) -> bool:
@@ -845,7 +863,9 @@ class FileOpProgressDialog(ctk.CTkToplevel):
             else:
                 self.status_var.set(f"{prefix} {min(cur, tot)} / {tot}")
 
-            if detail:
+            # Keep "Stopping…" text once cancel is requested (worker CBs would
+            # otherwise overwrite it with tile/pass progress).
+            if detail and not self._cancelled:
                 self.detail_var.set(detail)
 
             if ff is not None and ff > 0:
@@ -853,7 +873,8 @@ class FileOpProgressDialog(ctk.CTkToplevel):
             if not self._indeterminate:
                 self.progress.set(overall)
 
-            self._update_eta_label(overall, self._phase)
+            if not self._cancelled:
+                self._update_eta_label(overall, self._phase)
         except Exception:
             pass
 
@@ -1779,6 +1800,14 @@ def build_edit_menu(app):
         command=_topaz_upscale,
         state=("normal" if _topaz_ready else "disabled"),
     )
+    # Favorites sit under one separator; Remove… is the last item.
+    if hasattr(app, "add_upscale_favorites_to_menu"):
+        try:
+            app.add_upscale_favorites_to_menu(
+                upscale_menu, backends=("spandrel", "topaz")
+            )
+        except Exception:
+            pass
     edit_menu.add_cascade(label="Upscale", menu=upscale_menu)
     edit_menu.add_command(label="RIFE Interpolate…", command=_rife)
     edit_menu.add_command(label="Remove Background…", command=_remove_bg)
@@ -3947,11 +3976,55 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
             getattr(app, "spandrel_custom_scale", 3) or 3
         ),
         "spandrel_tiling": bool(getattr(app, "spandrel_tiling", False)),
+        "spandrel_advanced_open": bool(getattr(app, "spandrel_advanced_open", False)),
+        "spandrel_show_preview": bool(getattr(app, "spandrel_show_preview", False)),
         "spandrel_tile_size": int(getattr(app, "spandrel_tile_size", 512) or 512),
+        "spandrel_max_tile": (
+            (lambda n: n if n in (0, 256, 512, 768, 1024) else 0)(
+                int(getattr(app, "spandrel_max_tile", 0) or 0)
+            )
+            if str(getattr(app, "spandrel_max_tile", 0) or "0").lstrip("-").isdigit()
+            else 0
+        ),
         "spandrel_cuda_device": str(getattr(app, "spandrel_cuda_device", "0") or "0"),
+        "spandrel_output_format": (
+            lambda f: (
+                "jpg"
+                if f in ("jpg", "jpeg")
+                else f if f in ("png", "tiff", "webp") else "png"
+            )
+        )(str(getattr(app, "spandrel_output_format", "png") or "png").strip().lower()),
+        "spandrel_model_meta": (
+            getattr(app, "spandrel_model_meta", None)
+            if isinstance(getattr(app, "spandrel_model_meta", None), dict)
+            else {}
+        ),
+        "spandrel_model_sort": (
+            str(getattr(app, "spandrel_model_sort", "Name") or "Name").strip()
+            if str(getattr(app, "spandrel_model_sort", "Name") or "Name").strip()
+            in ("Name", "Rating", "Speed")
+            else "Name"
+        ),
+        "spandrel_favorite_presets": (
+            list(getattr(app, "spandrel_favorite_presets", None) or [])
+            if isinstance(getattr(app, "spandrel_favorite_presets", None), list)
+            else []
+        ),
         "topaz_scale": int(getattr(app, "topaz_scale", 4) or 4),
         "topaz_model": str(
             getattr(app, "topaz_model", "High Fidelity V2") or "High Fidelity V2"
+        ),
+        "topaz_output_format": (
+            lambda f: (
+                "jpg"
+                if f in ("jpg", "jpeg")
+                else f if f in ("png", "tiff", "webp") else "png"
+            )
+        )(str(getattr(app, "topaz_output_format", "png") or "png").strip().lower()),
+        "topaz_favorite_presets": (
+            list(getattr(app, "topaz_favorite_presets", None) or [])
+            if isinstance(getattr(app, "topaz_favorite_presets", None), list)
+            else []
         ),
         "fast_upscale_suffix": str(getattr(app, "fast_upscale_suffix", "") or ""),
         "topaz_suffix": str(getattr(app, "topaz_suffix", "") or ""),

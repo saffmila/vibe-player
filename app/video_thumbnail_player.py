@@ -4707,6 +4707,8 @@ class VideoThumbnailPlayer(
             jobs.append("Remove Background")
         if getattr(self, "_upscale_batch_running", False):
             jobs.append("Upscale")
+        if getattr(self, "_fast_upscale_batch_running", False):
+            jobs.append("Fast Upscale")
         if getattr(self, "_rife_batch_running", False):
             jobs.append("RIFE")
         return jobs
@@ -4792,6 +4794,16 @@ class VideoThumbnailPlayer(
         save_recent_directories(self.settings_file, self.recent_directories)
         save_folder_favorites(getattr(self, "folder_favorites", []), FAVORITES_FILE)
         self.save_preferences()  # unified save
+        try:
+            setattr(self, "stop_requested", True)
+        except Exception:
+            pass
+        try:
+            from spandrel_worker_host import shutdown_spandrel_worker_host
+
+            shutdown_spandrel_worker_host()
+        except Exception:
+            logging.debug("[Spandrel] worker shutdown on close failed", exc_info=True)
         try:
             from seedvr2_worker_host import shutdown_seedvr2_worker_host
 

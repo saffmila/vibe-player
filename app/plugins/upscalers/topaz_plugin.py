@@ -39,18 +39,24 @@ class TopazPhotoAiPlugin(UpscaleBackend):
         return {
             "scale": DEFAULT_TOPAZ_SCALE,
             "model": DEFAULT_TOPAZ_MODEL,
-            "suffix": "_topaz",
+            "suffix": "",  # empty → model label stem
             "output_format": "png",
             "quality": 95,
             "exe": "",
         }
 
     def suggested_output_path(self, input_path: str, options: dict[str, Any] | None = None) -> str:
+        from topaz_favorites import model_stem_suffix
+
         opts = {**self.default_options(), **(options or {})}
         explicit = opts.get("output_path")
         if isinstance(explicit, str) and explicit.strip():
             return os.path.abspath(explicit.strip())
-        suffix = str(opts.get("suffix") or "_topaz")
+        raw_suffix = opts.get("suffix")
+        if raw_suffix is None or str(raw_suffix).strip() == "":
+            suffix = model_stem_suffix(opts.get("model"))
+        else:
+            suffix = str(raw_suffix)
         out_dir = opts.get("output_dir") or os.path.dirname(input_path)
         stem, _ext = os.path.splitext(os.path.basename(input_path))
         fmt = str(opts.get("output_format") or "png").lower().lstrip(".")
@@ -58,6 +64,8 @@ class TopazPhotoAiPlugin(UpscaleBackend):
             ext = ".jpg"
         elif fmt in ("tif", "tiff"):
             ext = ".tiff"
+        elif fmt == "webp":
+            ext = ".webp"
         else:
             ext = ".png"
         return os.path.join(out_dir, f"{stem}{suffix}{ext}")

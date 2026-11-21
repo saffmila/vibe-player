@@ -4881,6 +4881,13 @@ class VtpGridMixin:
                 command=lambda: self.open_topaz_upscale_dialog(file_path),
                 state=("normal" if topaz_ready else "disabled"),
             )
+        if hasattr(self, "add_upscale_favorites_to_menu"):
+            try:
+                self.add_upscale_favorites_to_menu(
+                    upscale_menu, file_path, backends=("spandrel", "topaz")
+                )
+            except Exception:
+                pass
         if upscale_menu.index("end") is not None:
             menu.add_cascade(label="Upscale", menu=upscale_menu)
         if hasattr(self, "open_rife_dialog"):

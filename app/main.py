@@ -8,7 +8,7 @@ or the full ``VideoThumbnailPlayer`` app — heavy imports happen only on the fu
 
 import sys
 
-# Frozen splash helper: second process runs only Tk+PIL, then exits (see ``video_thumbnail_player``).
+# Frozen helpers: second process, then exit (splash / Spandrel job worker).
 if __name__ == "__main__" and getattr(sys, "frozen", False):
     for _i, _arg in enumerate(sys.argv):
         if _arg == "--vibe-splash" and _i + 1 < len(sys.argv):
@@ -16,6 +16,10 @@ if __name__ == "__main__" and getattr(sys, "frozen", False):
 
             run_splash(sys.argv[_i + 1])
             raise SystemExit(0)
+        if _arg == "--vibe-spandrel-job" and _i + 1 < len(sys.argv):
+            from spandrel_worker import main as _spandrel_worker_main
+
+            raise SystemExit(_spandrel_worker_main(sys.argv[_i:]))
 
 from logging_setup import setup_logging
 from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS

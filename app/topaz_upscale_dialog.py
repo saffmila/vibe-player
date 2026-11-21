@@ -5,7 +5,7 @@ topaz_upscale_dialog.py — Compact Topaz Photo AI CLI upscale options.
 from __future__ import annotations
 
 import os
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 
 import customtkinter as ctk
 
@@ -16,12 +16,24 @@ from topaz_config import (
     TOPAZ_UPSCALE_MODELS,
     runtime_status as topaz_runtime_status,
 )
+from topaz_favorites import (
+    model_stem_suffix,
+    normalize_presets,
+    upsert_preset,
+)
 
 _STATUS_BG = ("gray86", "#1e1e1e")
 _DIALOG_W = PROMO_STRIP_DIALOG_W
 _DIALOG_H = 420
 _SCALE_LABELS = ("2×", "4×", "6×")
 _SCALE_VALUES = {"2×": 2, "4×": 4, "6×": 6}
+_FORMAT_LABELS = ("PNG", "JPEG", "TIFF", "WebP")
+_FORMAT_TO_EXT = {
+    "PNG": "png",
+    "JPEG": "jpg",
+    "TIFF": "tiff",
+    "WebP": "webp",
+}
 
 
 class TopazUpscaleDialog(ctk.CTkToplevel):
@@ -77,6 +89,19 @@ class TopazUpscaleDialog(ctk.CTkToplevel):
             value=str(getattr(controller, "topaz_suffix", "") or "").strip()
             if controller
             else ""
+        )
+        fmt = "PNG"
+        if controller is not None:
+            saved_fmt = str(
+                getattr(controller, "topaz_output_format", "png") or "png"
+            ).strip().lower()
+            for label, ext in _FORMAT_TO_EXT.items():
+                if saved_fmt in (ext, label.lower(), "jpeg" if ext == "jpg" else ext):
+                    fmt = label
+                    break
+        self.format_var = ctk.StringVar(value=fmt)
+        self._favorites = normalize_presets(
+            getattr(controller, "topaz_favorite_presets", None) if controller else None
         )
         self.status_var = ctk.StringVar(value="Checking…")
 
@@ -164,10 +189,32 @@ class TopazUpscaleDialog(ctk.CTkToplevel):
         )
         ctk.CTkLabel(
             suf_row,
-            text="(empty = _topaz)",
+            text="(empty = model name)",
             text_color="#888",
             font=ctk.CTkFont(size=11),
         ).pack(side="left", padx=(8, 0))
+
+        fmt_row = ctk.CTkFrame(body, fg_color="transparent")
+        fmt_row.pack(fill="x", pady=4)
+        ctk.CTkLabel(fmt_row, text="Format:", width=110, anchor="w").pack(side="left")
+        ctk.CTkOptionMenu(
+            fmt_row,
+            variable=self.format_var,
+            values=list(_FORMAT_LABELS),
+            height=28,
+            width=110,
+        ).pack(side="left")
+
+        fav_row = ctk.CTkFrame(body, fg_color="transparent")
+        fav_row.pack(fill="x", pady=(10, 0))
+        ctk.CTkButton(
+            fav_row,
+            text="Save as favorite preset…",
+            height=28,
+            fg_color="gray30",
+            hover_color="gray25",
+            command=self._save_favorite_preset,
+        ).pack(side="left")
 
         self.lift()
         self.focus_force()
@@ -219,6 +266,50 @@ class TopazUpscaleDialog(ctk.CTkToplevel):
         self.status_var.set("\n".join(parts))
         self.start_btn.configure(state="normal" if self._ready else "disabled")
 
+    def _save_favorite_preset(self) -> None:
+        model = (self.topaz_model_var.get() or "").strip()
+        if not model:
+            return
+        scale = _SCALE_VALUES.get(self.scale_var.get(), 4)
+        default_name = f"{model} {scale}×"
+        name = simpledialog.askstring(
+            "Favorite preset",
+            "Preset name (model + scale + format):",
+            initialvalue=default_name,
+            parent=self,
+        )
+        if name is None:
+            return
+        name = name.strip()
+        if not name:
+            return
+        existing = {p.get("name") for p in self._favorites}
+        if name in existing:
+            if not messagebox.askyesno(
+                "Favorite preset",
+                f"Replace existing preset “{name}”?",
+                parent=self,
+            ):
+                return
+        fmt = _FORMAT_TO_EXT.get(self.format_var.get(), "png")
+        preset = {
+            "name": name,
+            "model": model,
+            "scale": scale,
+            "output_format": fmt,
+        }
+        self._favorites = upsert_preset(self._favorites, preset)
+        if self.controller is not None:
+            try:
+                setattr(self.controller, "topaz_favorite_presets", list(self._favorites))
+            except Exception:
+                pass
+        messagebox.showinfo(
+            "Favorite preset",
+            f"Saved “{name}”.\n\nUse Upscale → “{name}” on an image for 1-click upscale.",
+            parent=self,
+        )
+
     def _start(self) -> None:
         if not self._ready:
             return
@@ -231,22 +322,29 @@ class TopazUpscaleDialog(ctk.CTkToplevel):
             )
             return
 
-        suffix = (self.suffix_var.get() or "").strip()
+        model = (self.topaz_model_var.get() or "").strip()
+        suffix = (self.suffix_var.get() or "").strip() or model_stem_suffix(model)
+        out_fmt = _FORMAT_TO_EXT.get(self.format_var.get(), "png")
         options = {
             "backend_id": "topaz",
             "output_dir": out_dir,
             "scale": _SCALE_VALUES.get(self.scale_var.get(), 4),
-            "model": self.topaz_model_var.get(),
-            "suffix": suffix or "_topaz",
-            "output_format": "png",
+            "model": model,
+            "suffix": suffix,
+            "output_format": out_fmt,
         }
 
         if self.controller is not None:
             try:
                 setattr(self.controller, "topaz_scale", options["scale"])
                 setattr(self.controller, "topaz_model", options["model"])
-                if suffix:
-                    setattr(self.controller, "topaz_suffix", suffix)
+                setattr(self.controller, "topaz_output_format", out_fmt)
+                setattr(self.controller, "topaz_favorite_presets", list(self._favorites))
+                setattr(
+                    self.controller,
+                    "topaz_suffix",
+                    (self.suffix_var.get() or "").strip(),
+                )
             except Exception:
                 pass
 

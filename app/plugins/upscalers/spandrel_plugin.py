@@ -19,7 +19,7 @@ from spandrel_config import (
     supports_image,
     weights_status,
 )
-from spandrel_pipeline import unload_model, upscale_image_file
+from spandrel_worker_host import get_spandrel_worker_host
 
 
 class SpandrelUpscalePlugin(UpscaleBackend):
@@ -44,11 +44,13 @@ class SpandrelUpscalePlugin(UpscaleBackend):
         return {
             "model": first,
             "models_dir": str(default_upscale_dir()),
-            "tile_size": 0,  # 0 = off (full-frame pass)
+            "tile_size": 0,  # used only when auto_tile is off
+            "auto_tile": True,
+            "tile_cap": 0,  # 0 = no ceiling; positive = max tile edge
             "overlap": 32,
             "cuda_device": "0",
             "target_scale": None,  # None = model native scale
-            "suffix": "_spandrel",
+            "suffix": "",  # empty → model filename stem (see model_stem_suffix)
             "output_format": "png",
             "unload_after": True,
         }
@@ -58,7 +60,13 @@ class SpandrelUpscalePlugin(UpscaleBackend):
         explicit = opts.get("output_path")
         if isinstance(explicit, str) and explicit.strip():
             return os.path.abspath(explicit.strip())
-        suffix = str(opts.get("suffix") or "_spandrel")
+        from spandrel_favorites import model_stem_suffix
+
+        raw_suffix = opts.get("suffix")
+        if raw_suffix is None or str(raw_suffix).strip() == "":
+            suffix = model_stem_suffix(opts.get("model"))
+        else:
+            suffix = str(raw_suffix)
         out_dir = opts.get("output_dir") or os.path.dirname(input_path)
         stem, _ext = os.path.splitext(os.path.basename(input_path))
         fmt = str(opts.get("output_format") or "png").lower().lstrip(".")
@@ -66,6 +74,8 @@ class SpandrelUpscalePlugin(UpscaleBackend):
             ext = ".jpg"
         elif fmt in ("tif", "tiff"):
             ext = ".tiff"
+        elif fmt == "webp":
+            ext = ".webp"
         else:
             ext = ".png"
         return os.path.join(out_dir, f"{stem}{suffix}{ext}")
@@ -116,21 +126,40 @@ class SpandrelUpscalePlugin(UpscaleBackend):
             }
 
         output_path = self.suggested_output_path(input_path, opts)
-        result = upscale_image_file(
-            input_path,
-            output_path,
-            model=str(resolved),
-            tile_size=int(opts.get("tile_size") or 512),
-            overlap=int(opts.get("overlap") or 32),
-            cuda_device=opts.get("cuda_device"),
-            target_scale=opts.get("target_scale"),
-            unload_after=bool(opts.get("unload_after", True)),
+        # Preserve explicit 0 (= tiling off). ``x or 512`` wrongly forced tiles.
+        raw_tile = opts.get("tile_size", 512)
+        try:
+            tile_size = int(raw_tile) if raw_tile is not None else 512
+        except (TypeError, ValueError):
+            tile_size = 512
+        raw_overlap = opts.get("overlap", 32)
+        try:
+            overlap = int(raw_overlap) if raw_overlap is not None else 32
+        except (TypeError, ValueError):
+            overlap = 32
+        auto_tile = bool(opts.get("auto_tile", True))
+        try:
+            tile_cap = int(opts.get("tile_cap") or 0)
+        except (TypeError, ValueError):
+            tile_cap = 0
+        # Child process so Cancel / app exit can hard-kill CUDA immediately.
+        job = {
+            "input_path": input_path,
+            "output_path": output_path,
+            "model": str(resolved),
+            "tile_size": tile_size,
+            "auto_tile": auto_tile,
+            "tile_cap": tile_cap,
+            "overlap": overlap,
+            "cuda_device": opts.get("cuda_device"),
+            "target_scale": opts.get("target_scale"),
+            "unload_after": bool(opts.get("unload_after", True)),
+        }
+        return get_spandrel_worker_host().run_job(
+            job,
             progress_cb=progress_cb,
             should_stop=should_stop,
         )
-        if opts.get("unload_after"):
-            unload_model()
-        return result
 
 
 plugin_class = SpandrelUpscalePlugin
