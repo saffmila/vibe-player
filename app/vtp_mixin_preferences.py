@@ -648,6 +648,51 @@ class VtpPreferencesMixin:
                     except Exception:
                         self.seedvr2_dit_model = "seedvr2_ema_3b_fp8_e4m3fn.safetensors"
                 self.seedvr2_keep_vram = bool(settings.get("seedvr2_keep_vram", False))
+                _fu = str(settings.get("fast_upscale_backend") or "spandrel").strip().lower()
+                self.fast_upscale_backend = (
+                    _fu if _fu in ("spandrel", "topaz") else "spandrel"
+                )
+                self.spandrel_model = str(settings.get("spandrel_model") or "").strip()
+                self.spandrel_models_dir = str(
+                    settings.get("spandrel_models_dir") or ""
+                ).strip()
+                self.spandrel_model_filter = str(
+                    settings.get("spandrel_model_filter") or ""
+                ).strip()
+                _sm = str(settings.get("spandrel_scale_mode") or "Model").strip()
+                self.spandrel_scale_mode = (
+                    _sm if _sm in ("Model", "2×", "4×", "Custom") else "Model"
+                )
+                try:
+                    self.spandrel_custom_scale = float(
+                        settings.get("spandrel_custom_scale") or 3
+                    )
+                except Exception:
+                    self.spandrel_custom_scale = 3.0
+                self.spandrel_tiling = bool(settings.get("spandrel_tiling", False))
+                try:
+                    self.spandrel_tile_size = max(
+                        256, min(2048, int(settings.get("spandrel_tile_size") or 512))
+                    )
+                except Exception:
+                    self.spandrel_tile_size = 512
+                self.spandrel_cuda_device = (
+                    str(settings.get("spandrel_cuda_device") or "0").strip() or "0"
+                )
+                try:
+                    self.topaz_scale = max(
+                        1, min(6, int(settings.get("topaz_scale") or 4))
+                    )
+                except Exception:
+                    self.topaz_scale = 4
+                self.topaz_model = (
+                    str(settings.get("topaz_model") or "High Fidelity V2").strip()
+                    or "High Fidelity V2"
+                )
+                self.fast_upscale_suffix = str(
+                    settings.get("fast_upscale_suffix") or ""
+                ).strip()
+                self.topaz_suffix = str(settings.get("topaz_suffix") or "").strip()
                 apply_file_info_display(self, settings.get("file_info_display"))
                 # Splitter positions (fractions 0-1)
                 self._saved_main_sash_fraction = settings.get("splitter_main_fraction")

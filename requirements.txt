@@ -40,6 +40,9 @@ certifi>=2024.0.0
 einops
 kornia
 
+# Single-pass SR (RealPLKSR / SPAN / DAT / ESRGAN / …) — no Basicsr
+spandrel>=0.4.1
+
 # Optional: YOLOv8 support
 ultralytics
 scipy

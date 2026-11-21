@@ -9,7 +9,9 @@ import time
 from tkinter import messagebox
 
 from gui_elements import get_conflict_rename_path, open_conflict_dialog, open_file_op_progress_dialog
+from fast_upscale_dialog import FastUpscaleDialog
 from rife_dialog import RifeOptionsDialog
+from topaz_upscale_dialog import TopazUpscaleDialog
 from upscale_dialog import UpscaleOptionsDialog
 from vtp_constants import IMAGE_FORMATS, VIDEO_FORMATS
 
@@ -49,6 +51,10 @@ class VtpUpscaleMixin:
             title = "SeedVR 2 model"
         elif error_code in ("rife_pack_missing", "rife_model_missing"):
             title = "RIFE pack"
+        elif error_code in ("spandrel_missing", "weights_missing"):
+            title = "Spandrel upscale"
+        elif error_code in ("topaz_missing", "topaz_login"):
+            title = "Topaz Photo AI"
         self.after(0, lambda: messagebox.showwarning(title, text))
 
     def selected_paths_for_upscale(self, clicked_path: str | None = None) -> list[str]:
@@ -93,12 +99,13 @@ class VtpUpscaleMixin:
             return
 
         backends = self.list_available_upscale_backends()
-        # RIFE is frame interpolation — it has its own dialog ("RIFE Interpolate…").
-        # The Upscale dialog is SeedVR/DAT-oriented and must not list RIFE.
+        # RIFE / BiRefNet / Spandrel / Topaz have their own dialogs.
+        # This Upscale dialog stays SeedVR-oriented.
         backends = [
             b
             for b in backends
-            if getattr(b, "id", "") not in ("rife", "birefnet")
+            if getattr(b, "id", "")
+            not in ("rife", "birefnet", "spandrel", "topaz")
         ]
         if not backends:
             messagebox.showerror(
@@ -156,6 +163,323 @@ class VtpUpscaleMixin:
             on_confirm=self.start_rife_batch,
             controller=self,
         )
+
+    def selected_paths_for_fast_upscale(self, clicked_path: str | None = None) -> list[str]:
+        """Images only for Spandrel / Topaz fast upscale."""
+        selected_paths: list[str] = []
+        if hasattr(self, "selected_thumbnails") and self.selected_thumbnails:
+            selected_paths = [
+                item[0]
+                for item in self.selected_thumbnails
+                if item and item[0] and not os.path.isdir(item[0])
+            ]
+        if not selected_paths and clicked_path and not os.path.isdir(clicked_path):
+            selected_paths = [clicked_path]
+        return [
+            p
+            for p in selected_paths
+            if os.path.splitext(p)[1].lower() in IMAGE_FORMATS
+        ]
+
+    def open_fast_upscale_dialog(self, clicked_path: str | None = None):
+        """Open Spandrel fast upscale options for selected images."""
+        paths = self.selected_paths_for_fast_upscale(clicked_path)
+        if not paths:
+            messagebox.showinfo(
+                "Fast Upscale",
+                "No images selected.\n\nSelect one or more image thumbnails first.",
+            )
+            return
+        FastUpscaleDialog(
+            self,
+            paths=paths,
+            on_confirm=self.start_fast_upscale_batch,
+            controller=self,
+        )
+
+    def open_topaz_upscale_dialog(self, clicked_path: str | None = None):
+        """Open Topaz Photo AI upscale options for selected images."""
+        paths = self.selected_paths_for_fast_upscale(clicked_path)
+        if not paths:
+            messagebox.showinfo(
+                "Photo AI",
+                "No images selected.\n\nSelect one or more image thumbnails first.",
+            )
+            return
+        try:
+            from topaz_config import runtime_status as topaz_runtime_status
+
+            if not topaz_runtime_status().get("ready"):
+                messagebox.showinfo(
+                    "Photo AI",
+                    "Topaz Photo AI (tpai.exe) was not found on this PC.",
+                )
+                return
+        except Exception:
+            pass
+        TopazUpscaleDialog(
+            self,
+            paths=paths,
+            on_confirm=self.start_fast_upscale_batch,
+            controller=self,
+        )
+
+    def start_fast_upscale_batch(self, paths: list[str], options: dict):
+        """Run Spandrel or Topaz upscale on a background thread."""
+        if getattr(self, "_fast_upscale_batch_running", False):
+            messagebox.showinfo("Fast Upscale", "A fast upscale job is already running.")
+            return
+
+        paths = [p for p in (paths or []) if p and os.path.isfile(p)]
+        if not paths:
+            messagebox.showinfo("Fast Upscale", "No valid images to upscale.")
+            return
+
+        opts = dict(options or {})
+        backend_id = str(opts.pop("backend_id", None) or "spandrel").strip() or "spandrel"
+        pm = getattr(self, "plugin_manager", None)
+        plugin = pm.get_upscale_plugin(backend_id) if pm else None
+        if not plugin:
+            messagebox.showerror(
+                "Fast Upscale",
+                f"Upscale backend '{backend_id}' not loaded. Check app.log.",
+            )
+            return
+
+        for attr in list(vars(self)):
+            if attr.startswith("_upscale_issue_shown_"):
+                try:
+                    delattr(self, attr)
+                except Exception:
+                    setattr(self, attr, False)
+
+        total = len(paths)
+        progress = open_file_op_progress_dialog(
+            self,
+            title="Fast Upscale",
+            total=total,
+            action_label="Upscaling",
+            topmost=False,
+            show_preview=False,
+        )
+        self._fast_upscale_progress_dialog = progress
+        self._fast_upscale_batch_running = True
+        self.stop_requested = False
+        try:
+            self.status_bar.set_stop_callback(lambda: setattr(self, "stop_requested", True))
+        except Exception:
+            pass
+
+        conflict_policy: dict = {"action": None, "apply_all": False}
+
+        def _should_stop() -> bool:
+            if getattr(self, "stop_requested", False):
+                return True
+            dlg = getattr(self, "_fast_upscale_progress_dialog", None)
+            return bool(dlg and getattr(dlg, "cancelled", False))
+
+        def _resolve_conflict(output_path: str, src_path: str) -> str | None:
+            if not output_path:
+                return None
+            try:
+                same = os.path.normcase(os.path.abspath(output_path)) == os.path.normcase(
+                    os.path.abspath(src_path)
+                )
+            except Exception:
+                same = False
+            if same or not os.path.exists(output_path):
+                return output_path
+
+            action = conflict_policy.get("action")
+            if action in ("replace", "rename", "skip") and conflict_policy.get("apply_all"):
+                if action == "replace":
+                    return output_path
+                if action == "rename":
+                    return get_conflict_rename_path(output_path)
+                return None
+
+            holder: dict = {}
+            done = threading.Event()
+
+            def _ask():
+                try:
+                    if progress is not None:
+                        progress.grab_release()
+                except Exception:
+                    pass
+                try:
+                    act, apply_all = open_conflict_dialog(
+                        self, os.path.basename(output_path)
+                    )
+                    holder["action"] = act
+                    holder["apply_all"] = apply_all
+                finally:
+                    try:
+                        if progress.winfo_exists():
+                            progress.grab_set()
+                            progress.lift()
+                    except Exception:
+                        pass
+                    done.set()
+
+            self.after(0, _ask)
+            done.wait()
+            action = holder.get("action") or "cancel"
+            apply_all = bool(holder.get("apply_all"))
+            if apply_all and action in ("replace", "rename", "skip"):
+                conflict_policy["action"] = action
+                conflict_policy["apply_all"] = True
+            if action == "replace":
+                return output_path
+            if action == "rename":
+                return get_conflict_rename_path(output_path)
+            if action == "skip":
+                return None
+            raise InterruptedError("Canceled at conflict dialog")
+
+        def worker():
+            self.after(0, self.status_bar.enable_stop)
+            plugin_name = getattr(plugin, "name", backend_id)
+            self.after(
+                0,
+                lambda: self.status_bar.set_action_message(
+                    f"Upscaling with {plugin_name}…"
+                ),
+            )
+            done = 0
+            failed = 0
+            skipped = 0
+            aborted = False
+            last_out = None
+            try:
+                base_opts = {
+                    **(plugin.default_options() if hasattr(plugin, "default_options") else {}),
+                    **opts,
+                }
+                for idx, file_path in enumerate(paths, start=1):
+                    if _should_stop():
+                        aborted = True
+                        break
+                    base = os.path.basename(file_path)
+                    self._upscale_progress_update(
+                        progress, idx - 1, total, detail=base, phase="upscale"
+                    )
+                    try:
+                        suggested = plugin.suggested_output_path(file_path, base_opts)
+                        dest = _resolve_conflict(suggested, file_path)
+                    except InterruptedError:
+                        aborted = True
+                        break
+                    except Exception as exc:
+                        failed += 1
+                        self._notify_upscale_issue_once("runtime_error", str(exc))
+                        continue
+                    if dest is None:
+                        skipped += 1
+                        continue
+
+                    def _cb(pct, msg, _base=base, _idx=idx):
+                        self._upscale_progress_update(
+                            progress,
+                            _idx - 1,
+                            total,
+                            detail=f"{_base} — {msg} ({pct:.0f}%)",
+                            phase="upscale",
+                        )
+
+                    t0 = time.perf_counter()
+                    result = plugin.process(
+                        file_path,
+                        options={**base_opts, "output_path": dest},
+                        progress_cb=_cb,
+                        should_stop=_should_stop,
+                    )
+                    elapsed = time.perf_counter() - t0
+                    if result.get("ok"):
+                        done += 1
+                        last_out = result.get("output_path") or dest
+                        logging.info(
+                            "[FastUpscale/%s] OK %s → %s (%.1fs)",
+                            backend_id,
+                            file_path,
+                            last_out,
+                            elapsed,
+                        )
+                    else:
+                        failed += 1
+                        err = result.get("error")
+                        msg = result.get("message") or "Upscale failed."
+                        if err == "aborted":
+                            aborted = True
+                            break
+                        self._notify_upscale_issue_once(err, msg)
+                        if err in (
+                            "gpu_pack_missing",
+                            "spandrel_missing",
+                            "topaz_missing",
+                            "topaz_login",
+                            "weights_missing",
+                        ):
+                            aborted = True
+                            break
+                    self._upscale_progress_update(
+                        progress, idx, total, detail=base, phase="upscale"
+                    )
+            finally:
+                self._fast_upscale_batch_running = False
+                self._fast_upscale_progress_dialog = None
+                try:
+                    self.after(0, self.status_bar.disable_stop)
+                    self.after(0, lambda: self.status_bar.set_stop_callback(None))
+                except Exception:
+                    pass
+                parts = [f"Fast Upscale ({plugin_name}): {done}/{total}"]
+                if skipped:
+                    parts.append(f"{skipped} skipped")
+                if failed:
+                    parts.append(f"{failed} failed")
+                if aborted:
+                    parts.append("canceled")
+                summary = ", ".join(parts)
+                if last_out:
+                    summary += f"\nLast: {last_out}"
+                def _finish_ui(s=summary, d=done, out=last_out):
+                    try:
+                        if progress is not None and progress.winfo_exists():
+                            if hasattr(progress, "close"):
+                                progress.close()
+                            else:
+                                progress.destroy()
+                    except Exception:
+                        pass
+                    try:
+                        self.status_bar.set_action_message(s)
+                    except Exception:
+                        pass
+                    try:
+                        messagebox.showinfo("Fast Upscale", s)
+                    except Exception:
+                        pass
+                    if d and out:
+                        try:
+                            cur = getattr(self, "current_directory", None)
+                            if cur and hasattr(self, "display_thumbnails"):
+                                out_dir = os.path.dirname(out)
+                                if os.path.normcase(
+                                    os.path.normpath(cur)
+                                ) == os.path.normcase(os.path.normpath(out_dir)):
+                                    self.display_thumbnails(
+                                        cur, force_refresh=True, preserve_scroll=True
+                                    )
+                        except Exception:
+                            logging.debug(
+                                "[FastUpscale] thumbnail refresh skipped",
+                                exc_info=True,
+                            )
+
+                self.after(0, _finish_ui)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def start_rife_batch(self, paths: list[str], options: dict):
         """Run RIFE interpolation on a background thread."""

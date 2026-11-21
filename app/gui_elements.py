@@ -1598,6 +1598,18 @@ def build_edit_menu(app):
         else:
             messagebox.showinfo("Upscale", "Upscale is not available.")
 
+    def _fast_upscale():
+        if hasattr(app, "open_fast_upscale_dialog"):
+            app.open_fast_upscale_dialog()
+        else:
+            messagebox.showinfo("Fast Upscale", "Fast Upscale is not available.")
+
+    def _topaz_upscale():
+        if hasattr(app, "open_topaz_upscale_dialog"):
+            app.open_topaz_upscale_dialog()
+        else:
+            messagebox.showinfo("Photo AI", "Photo AI upscale is not available.")
+
     def _rife():
         if hasattr(app, "open_rife_dialog"):
             app.open_rife_dialog()
@@ -1752,7 +1764,22 @@ def build_edit_menu(app):
     edit_menu.add_separator()
 
     # --- AI ---
-    edit_menu.add_command(label="Upscale… (SeedVR 2)", command=_upscale)
+    upscale_menu = tk.Menu(edit_menu, tearoff=0)
+    upscale_menu.add_command(label="SeedVR 2…", command=_upscale)
+    upscale_menu.add_command(label="Fast Upscale…", command=_fast_upscale)
+    _topaz_ready = False
+    try:
+        from topaz_config import runtime_status as _topaz_rt
+
+        _topaz_ready = bool(_topaz_rt().get("ready"))
+    except Exception:
+        _topaz_ready = False
+    upscale_menu.add_command(
+        label="Photo AI…",
+        command=_topaz_upscale,
+        state=("normal" if _topaz_ready else "disabled"),
+    )
+    edit_menu.add_cascade(label="Upscale", menu=upscale_menu)
     edit_menu.add_command(label="RIFE Interpolate…", command=_rife)
     edit_menu.add_command(label="Remove Background…", command=_remove_bg)
     edit_menu.add_separator()
@@ -3902,6 +3929,32 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
         "birefnet_bg_color": str(getattr(app, "birefnet_bg_color", "#FFFFFF") or "#FFFFFF"),
         "seedvr2_dit_model": getattr(app, "seedvr2_dit_model", "") or DEFAULT_DIT_MODEL,
         "seedvr2_keep_vram": bool(getattr(app, "seedvr2_keep_vram", False)),
+        "fast_upscale_backend": (
+            "topaz"
+            if str(getattr(app, "fast_upscale_backend", "spandrel") or "")
+            .strip()
+            .lower()
+            == "topaz"
+            else "spandrel"
+        ),
+        "spandrel_model": str(getattr(app, "spandrel_model", "") or ""),
+        "spandrel_models_dir": str(getattr(app, "spandrel_models_dir", "") or ""),
+        "spandrel_model_filter": str(getattr(app, "spandrel_model_filter", "") or ""),
+        "spandrel_scale_mode": str(
+            getattr(app, "spandrel_scale_mode", "Model") or "Model"
+        ),
+        "spandrel_custom_scale": float(
+            getattr(app, "spandrel_custom_scale", 3) or 3
+        ),
+        "spandrel_tiling": bool(getattr(app, "spandrel_tiling", False)),
+        "spandrel_tile_size": int(getattr(app, "spandrel_tile_size", 512) or 512),
+        "spandrel_cuda_device": str(getattr(app, "spandrel_cuda_device", "0") or "0"),
+        "topaz_scale": int(getattr(app, "topaz_scale", 4) or 4),
+        "topaz_model": str(
+            getattr(app, "topaz_model", "High Fidelity V2") or "High Fidelity V2"
+        ),
+        "fast_upscale_suffix": str(getattr(app, "fast_upscale_suffix", "") or ""),
+        "topaz_suffix": str(getattr(app, "topaz_suffix", "") or ""),
         "file_info_display": collect_file_info_display(app),
     }
     # Save splitter positions (fractions 0-1) when panes are visible

@@ -30,7 +30,17 @@ except ImportError:
         UpscaleBackend = None  # type: ignore[misc, assignment]
 
 
-_LAZY_NAME_MARKERS = ("clip", "yolo", "seedvr", "upscale", "dat", "rife", "birefnet")
+_LAZY_NAME_MARKERS = (
+    "clip",
+    "yolo",
+    "seedvr",
+    "upscale",
+    "dat",
+    "rife",
+    "birefnet",
+    "spandrel",
+    "topaz",
+)
 
 
 class PluginManager:

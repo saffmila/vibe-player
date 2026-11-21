@@ -4857,11 +4857,32 @@ class VtpGridMixin:
             # command=lambda: self.auto_tag_with_plugin_from_file(file_path)
             command=lambda: self.auto_tag_selected_items(file_path)
         )
+        upscale_menu = tk.Menu(menu, tearoff=0)
         if hasattr(self, "open_upscale_dialog"):
-            menu.add_command(
-                label="Upscale… (SeedVR 2)",
+            upscale_menu.add_command(
+                label="SeedVR 2…",
                 command=lambda: self.open_upscale_dialog(file_path),
             )
+        if hasattr(self, "open_fast_upscale_dialog"):
+            upscale_menu.add_command(
+                label="Fast Upscale…",
+                command=lambda: self.open_fast_upscale_dialog(file_path),
+            )
+        topaz_ready = False
+        try:
+            from topaz_config import runtime_status as _topaz_status
+
+            topaz_ready = bool(_topaz_status().get("ready"))
+        except Exception:
+            topaz_ready = False
+        if hasattr(self, "open_topaz_upscale_dialog"):
+            upscale_menu.add_command(
+                label="Photo AI…",
+                command=lambda: self.open_topaz_upscale_dialog(file_path),
+                state=("normal" if topaz_ready else "disabled"),
+            )
+        if upscale_menu.index("end") is not None:
+            menu.add_cascade(label="Upscale", menu=upscale_menu)
         if hasattr(self, "open_rife_dialog"):
             menu.add_command(
                 label="RIFE Interpolate…",
