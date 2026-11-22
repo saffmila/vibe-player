@@ -246,10 +246,10 @@ class ImageViewerLegacy:
             self.screen_width = 1280
             self.screen_height = 720   
 
-        # Vytvoření okna
+        # Vytvoření okna. Withdraw hned — jinak Tk okno namapuje v defaultní
+        # velikosti (černý canvas, 1×1 placeholder) a až po decode skočí do fullscreenu.
         self.image_window = tk.Toplevel(self.parent)
-        self.image_window.lift()
-        self.image_window.focus_force()
+        self.image_window.withdraw()
         self.image_window.attributes('-topmost', True)
         self.image_window.title(self.image_name)
 
@@ -287,8 +287,11 @@ class ImageViewerLegacy:
         self._perf_open_t0 = time.perf_counter() if _IMAGE_VIEWER_PERF else 0.0
 
         # Placeholder until async decode finishes (keeps UI responsive on large JPGs).
+        # Resize must not read this 1×1 stand-in — see ``_pixels_ready``.
         self.original_image = PILImage.new("RGB", (1, 1), "black")
         self.image = self.original_image
+        self._pixels_ready = False
+        self._pending_resize_dialog = False
         # Never upload full-res PhotoImage here — 8K DJI (~8064×4536) would flash
         # a huge bitmap before the first scaled paint and can stall Tk for seconds.
         self.photo = ImageTk.PhotoImage(PILImage.new("RGB", (1, 1), "black"))
@@ -493,6 +496,10 @@ class ImageViewerLegacy:
             )
         self._schedule_neighbor_prefetch()
         self._overlay_after_id = self.image_window.after(100, self._refresh_overlays)
+        # Fullscreen waits for a real canvas size before the first paint.
+        # Opening Resize before that paints the dialog over a black frame.
+        if not getattr(self, "_settle_open_fit", False):
+            self._flush_pending_resize_dialog()
 
     def _monitor_at(self, x, y):
         """Return the monitor containing screen point (x, y), or the primary."""
@@ -536,6 +543,7 @@ class ImageViewerLegacy:
 
         iw, ih = self.original_image.size
         if iw < 1 or ih < 1:
+            self._reveal_image_window()
             return
 
         if iw <= max_w and ih <= max_h:
@@ -564,12 +572,7 @@ class ImageViewerLegacy:
             self._view_fit_mode = "best_fit"
             self.image_window.overrideredirect(True)
             self.image_window.geometry(f"{mon_w}x{mon_h}+{mon_x}+{mon_y}")
-            try:
-                self.image_window.deiconify()
-                self.image_window.lift()
-                self.image_window.focus_force()
-            except tk.TclError:
-                pass
+            self._reveal_image_window()
             # Wait for Configure to settle — painting before the canvas has its final
             # Tk size puts the image in the top-left at the wrong zoom (esp. HiDPI / 8K).
             self._settle_open_fit = True
@@ -580,6 +583,7 @@ class ImageViewerLegacy:
         x = mon_x + max(0, (mon_w - client_w) // 2)
         y = mon_y + max(0, (mon_h - client_h) // 2)
         self.image_window.geometry(f"{client_w}x{client_h}+{x}+{y}")
+        self._reveal_image_window()
         self.image_window.update_idletasks()
 
         cw = max(1, self.canvas.winfo_width())
@@ -599,6 +603,15 @@ class ImageViewerLegacy:
         self._view_fit_mode = win_mode
         self.image_window.geometry(geom)
         self.update_image(center=True, high_quality=True)
+
+    def _reveal_image_window(self):
+        """Map the viewer only after geometry is final (avoids the small black flash)."""
+        try:
+            self.image_window.deiconify()
+            self.image_window.lift()
+            self.image_window.focus_force()
+        except tk.TclError:
+            pass
 
     def _schedule_open_fit_settle(self, delay_ms=50):
         """Debounce initial best-fit until canvas Configure events stop."""
@@ -639,6 +652,7 @@ class ImageViewerLegacy:
         self._settle_open_fit = False
         t_paint = time.perf_counter() if _IMAGE_VIEWER_PERF else 0.0
         self.best_fit(high_quality=True)
+        self._flush_pending_resize_dialog()
         if _IMAGE_VIEWER_PERF:
             paint_ms = (time.perf_counter() - t_paint) * 1000.0
             total_ms = (time.perf_counter() - getattr(self, "_perf_open_t0", t_paint)) * 1000.0
@@ -687,6 +701,7 @@ class ImageViewerLegacy:
         self._anim_index = 0
         self.image = self._anim_frames[0]
         self.original_image = self._anim_frames[0]
+        self._pixels_ready = True
         # Defer mip pyramid until after first paint — ~300ms on large stills.
         self._invalidate_mips()
         if reset_title:
@@ -1089,6 +1104,7 @@ class ImageViewerLegacy:
 
     def _do_close(self):
         """Match Pyglet viewer API for controller / fast-open code paths."""
+        self._pending_resize_dialog = False
         if getattr(self, "crop", None) is not None and self.crop.active:
             self.crop.exit()
         self._running = False
@@ -1262,8 +1278,25 @@ class ImageViewerLegacy:
         self._abandon_image_edits()
         return True
 
+    def _flush_pending_resize_dialog(self):
+        """Open Resize once the real frame has replaced the 1×1 placeholder."""
+        if not getattr(self, "_pending_resize_dialog", False):
+            return
+        if not getattr(self, "_pixels_ready", False):
+            return
+        if not getattr(self, "_running", False):
+            self._pending_resize_dialog = False
+            return
+        self.open_resize_dialog()
+
     def open_resize_dialog(self):
         """Show the Resize Image modal for the current image."""
+        if not getattr(self, "_pixels_ready", False):
+            # Grid RMB opens this before async decode finishes. A fixed delay
+            # still races large JPEGs and the dialog then reports 1×1.
+            self._pending_resize_dialog = True
+            return
+        self._pending_resize_dialog = False
         if self._crop_active():
             self.exit_crop_mode()
         if self._resize_dialog_open():
@@ -1408,6 +1441,9 @@ class ImageViewerLegacy:
 
         self._nav_load_gen = int(getattr(self, "_nav_load_gen", 0)) + 1
         gen = self._nav_load_gen
+        self._pixels_ready = False
+        # Navigation abandons a resize that has not opened yet.
+        self._pending_resize_dialog = False
 
         cached = self._decode_cache_get(path)
         if cached is not None:
@@ -1500,6 +1536,7 @@ class ImageViewerLegacy:
             self._start_animation_if_needed()
             self._schedule_neighbor_prefetch()
             self.draw_info_hud()
+            self._flush_pending_resize_dialog()
         except Exception as e:
             logging.error(f"Failed to load image {name}: {e}")
             if not image_file_exists(path):

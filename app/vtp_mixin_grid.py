@@ -2929,7 +2929,12 @@ class VtpGridMixin:
                 if callable(open_dlg):
                     open_dlg()
 
-        self.after(delay_ms, _start_edit)
+        # Resize waits inside the viewer until decode replaces the 1×1 placeholder.
+        # A fixed delay still lost the race on large JPEGs and showed 1×1 px.
+        if action == "resize":
+            self.after(0, _start_edit)
+        else:
+            self.after(delay_ms, _start_edit)
 
     def selected_image_paths_for_edit(self, primary_path):
         """Image paths for crop/resize from multi-select (selection order).
