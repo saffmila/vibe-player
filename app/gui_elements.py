@@ -4000,7 +4000,7 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
         ),
         "spandrel_tiling": bool(getattr(app, "spandrel_tiling", False)),
         "spandrel_advanced_open": bool(getattr(app, "spandrel_advanced_open", False)),
-        "spandrel_show_preview": bool(getattr(app, "spandrel_show_preview", False)),
+        "spandrel_show_preview": bool(getattr(app, "spandrel_show_preview", True)),
         "spandrel_tile_size": int(getattr(app, "spandrel_tile_size", 512) or 512),
         "spandrel_max_tile": (
             (lambda n: n if n in (0, 256, 512, 768, 1024) else 0)(

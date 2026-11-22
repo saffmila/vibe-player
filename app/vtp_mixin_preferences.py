@@ -674,7 +674,7 @@ class VtpPreferencesMixin:
                     settings.get("spandrel_advanced_open", False)
                 )
                 self.spandrel_show_preview = bool(
-                    settings.get("spandrel_show_preview", False)
+                    settings.get("spandrel_show_preview", True)
                 )
                 try:
                     self.spandrel_tile_size = max(

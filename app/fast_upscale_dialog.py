@@ -269,9 +269,9 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             if controller
             else ""
         )
-        show_prev = False
+        show_prev = True
         if controller is not None:
-            show_prev = bool(getattr(controller, "spandrel_show_preview", False))
+            show_prev = bool(getattr(controller, "spandrel_show_preview", True))
         self.show_preview_var = ctk.BooleanVar(value=show_prev)
         fmt = "JPEG"
         if controller is not None:
