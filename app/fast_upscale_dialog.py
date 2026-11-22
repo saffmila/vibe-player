@@ -337,21 +337,8 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         body.pack(fill="x", expand=False, padx=16, pady=(8, 4))
         self._body = body
 
-        # Shown only when Spandrel is missing or the folder has no models.
-        self._alert_var = ctk.StringVar(value="")
-        self._alert_wrap = ctk.CTkFrame(body, fg_color="transparent")
-        ctk.CTkLabel(
-            self._alert_wrap,
-            textvariable=self._alert_var,
-            wraplength=_DIALOG_W - 64,
-            justify="left",
-            text_color="#e0b060",
-            anchor="w",
-            font=ctk.CTkFont(size=11),
-        ).pack(fill="x")
-
-        # Spandrel pip + Refresh — shown on alert / Advanced. Path + Install models
-        # stay on the main page (see models_row below) so they are never clipped.
+        # Spandrel pip + Refresh — main page when setup is broken, Advanced when OK.
+        # Path + Install models stay on the main page (models_row) so they are never clipped.
         self._tools = ctk.CTkFrame(body, fg_color="transparent")
         self._install_btn = ctk.CTkButton(
             self._tools,
@@ -434,7 +421,19 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             text_color="#b0b0b0",
             anchor="w",
             font=ctk.CTkFont(size=11),
-        ).pack(fill="x", padx=10, pady=8)
+        ).pack(fill="x", padx=10, pady=(8, 4))
+        # Yellow setup alert lives inside the status box (not below it).
+        self._alert_var = ctk.StringVar(value="")
+        self._alert_wrap = ctk.CTkFrame(self._status_box, fg_color="transparent")
+        ctk.CTkLabel(
+            self._alert_wrap,
+            textvariable=self._alert_var,
+            wraplength=_DIALOG_W - 60,
+            justify="left",
+            text_color="#e0b060",
+            anchor="w",
+            font=ctk.CTkFont(size=11),
+        ).pack(fill="x")
 
         # Simple view: preset + scale + format. Model filenames under Advanced.
         preset_row = ctk.CTkFrame(body, fg_color="transparent")
@@ -716,7 +715,7 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             anchor="w",
         ).pack(side="left")
 
-        # Install / Pick folder / Refresh — Advanced when healthy, alert when not.
+        # Install / Refresh — Advanced when healthy; under status box when not.
         self._engine_tools_host = ctk.CTkFrame(
             self._advanced_block, fg_color="transparent"
         )
@@ -2576,11 +2575,9 @@ class FastUpscaleDialog(ctk.CTkToplevel):
 
         parts = [f"{n} image(s)", "Engine: Spandrel"]
         if not self._runtime_ok:
-            parts.append("⚠ " + (rt.get("message") or "Runtime not ready."))
             parts.append("Use Install spandrel… (same as BiRefNet pip into app venv).")
             self._alert_var.set(rt.get("message") or "Spandrel is not installed.")
         elif not self._all_models:
-            parts.append(wt.get("message") or "No models found.")
             parts.append("Use Install models… for built-in presets (~260 MB).")
             self._alert_var.set(wt.get("message") or "No models in this folder.")
         else:
@@ -2595,28 +2592,31 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             self.after(30, self._fit_and_center)
 
     def _sync_engine_chrome(self) -> None:
-        """Keep Install / folder tools on the main page only while setup is broken."""
+        """Keep Install / Refresh on the main page only while setup is broken."""
         if not getattr(self, "_status_checked", False):
             return
         healthy = bool(self._runtime_ok) and bool(self._all_models)
+        alert_text = (self._alert_var.get() or "").strip()
         try:
             self._tools.pack_forget()
         except Exception:
             pass
+        try:
+            self._alert_wrap.pack_forget()
+        except Exception:
+            pass
+        if alert_text:
+            self._alert_wrap.pack(fill="x", padx=10, pady=(0, 8))
         if healthy:
-            try:
-                self._alert_wrap.pack_forget()
-            except Exception:
-                pass
             self._tools.pack(in_=self._engine_tools_host, fill="x")
             return
-        if not self._alert_wrap.winfo_ismapped():
-            anchor = getattr(self, "_preset_row", None)
-            if anchor is not None:
-                self._alert_wrap.pack(fill="x", pady=(0, 6), before=anchor)
-            else:
-                self._alert_wrap.pack(fill="x", pady=(0, 6))
-        self._tools.pack(in_=self._alert_wrap, fill="x", pady=(6, 0))
+        # Setup broken: keep Install/Refresh under the status box (main page).
+        self._tools.pack(
+            in_=self._engine_block,
+            fill="x",
+            after=self._status_box,
+            pady=(0, 8),
+        )
 
     def _start(self) -> None:
         if self._install_running or not self._ready:
