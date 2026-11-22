@@ -216,3 +216,47 @@ def weights_status(*, exe_override: str | None = None) -> dict[str, Any]:
         "exe": status.get("exe"),
         "version": status.get("version"),
     }
+
+
+def topaz_options_from_controller(controller: Any | None) -> dict[str, Any]:
+    """Snapshot of Photo AI prefs stored on the main window (or defaults)."""
+
+    def _get(name: str, default: Any) -> Any:
+        if controller is None:
+            return default
+        return getattr(controller, name, default)
+
+    try:
+        scale = max(1, min(6, int(_get("topaz_scale", DEFAULT_TOPAZ_SCALE) or DEFAULT_TOPAZ_SCALE)))
+    except (TypeError, ValueError):
+        scale = DEFAULT_TOPAZ_SCALE
+    model = str(_get("topaz_model", DEFAULT_TOPAZ_MODEL) or DEFAULT_TOPAZ_MODEL).strip()
+    if not model:
+        model = DEFAULT_TOPAZ_MODEL
+    out_fmt = str(_get("topaz_output_format", "png") or "png").lower().lstrip(".")
+    if out_fmt == "jpeg":
+        out_fmt = "jpg"
+    if out_fmt not in ("png", "jpg", "tiff", "webp"):
+        out_fmt = "png"
+    return {
+        "backend_id": "topaz",
+        "scale": scale,
+        "model": model,
+        "suffix": str(_get("topaz_suffix", "") or "").strip(),
+        "output_format": out_fmt,
+        "quality": 95,
+        "exe": "",
+    }
+
+
+def format_topaz_summary(options: dict[str, Any] | None) -> str:
+    """One-line summary for Batch Convert (model · scale)."""
+    opts = options or {}
+    model = str(opts.get("model") or DEFAULT_TOPAZ_MODEL).strip() or DEFAULT_TOPAZ_MODEL
+    if len(model) > 28:
+        model = model[:16] + "…" + model[-10:]
+    try:
+        scale = max(1, min(6, int(opts.get("scale") or DEFAULT_TOPAZ_SCALE)))
+    except (TypeError, ValueError):
+        scale = DEFAULT_TOPAZ_SCALE
+    return f"{model} · {scale}×"

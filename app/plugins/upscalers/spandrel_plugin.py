@@ -51,7 +51,9 @@ class SpandrelUpscalePlugin(UpscaleBackend):
             "cuda_device": "0",
             "target_scale": None,  # None = model native scale
             "suffix": "",  # empty → model filename stem (see model_stem_suffix)
-            "output_format": "png",
+            "output_format": "jpg",
+            "jpeg_quality": 92,
+            "png_compress": 3,
             "unload_after": True,
         }
 
@@ -69,7 +71,7 @@ class SpandrelUpscalePlugin(UpscaleBackend):
             suffix = str(raw_suffix)
         out_dir = opts.get("output_dir") or os.path.dirname(input_path)
         stem, _ext = os.path.splitext(os.path.basename(input_path))
-        fmt = str(opts.get("output_format") or "png").lower().lstrip(".")
+        fmt = str(opts.get("output_format") or "jpg").lower().lstrip(".")
         if fmt in ("jpg", "jpeg"):
             ext = ".jpg"
         elif fmt in ("tif", "tiff"):
@@ -143,6 +145,18 @@ class SpandrelUpscalePlugin(UpscaleBackend):
         except (TypeError, ValueError):
             tile_cap = 0
         # Child process so Cancel / app exit can hard-kill CUDA immediately.
+        try:
+            jpeg_quality = int(
+                opts.get("jpeg_quality") if opts.get("jpeg_quality") is not None else 92
+            )
+        except (TypeError, ValueError):
+            jpeg_quality = 92
+        try:
+            png_compress = int(
+                opts.get("png_compress") if opts.get("png_compress") is not None else 3
+            )
+        except (TypeError, ValueError):
+            png_compress = 3
         job = {
             "input_path": input_path,
             "output_path": output_path,
@@ -154,6 +168,8 @@ class SpandrelUpscalePlugin(UpscaleBackend):
             "cuda_device": opts.get("cuda_device"),
             "target_scale": opts.get("target_scale"),
             "unload_after": bool(opts.get("unload_after", True)),
+            "jpeg_quality": max(1, min(100, jpeg_quality)),
+            "png_compress": max(0, min(9, png_compress)),
         }
         return get_spandrel_worker_host().run_job(
             job,

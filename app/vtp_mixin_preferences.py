@@ -696,13 +696,30 @@ class VtpPreferencesMixin:
                     str(settings.get("spandrel_cuda_device") or "0").strip() or "0"
                 )
                 _fmt = str(
-                    settings.get("spandrel_output_format") or "png"
+                    settings.get("spandrel_output_format") or "jpg"
                 ).strip().lower()
                 if _fmt in ("jpeg",):
                     _fmt = "jpg"
                 self.spandrel_output_format = (
-                    _fmt if _fmt in ("png", "jpg", "tiff", "webp") else "png"
+                    _fmt if _fmt in ("png", "jpg", "tiff", "webp") else "jpg"
                 )
+                try:
+                    self.spandrel_output_quality = max(
+                        1,
+                        min(
+                            100,
+                            int(settings.get("spandrel_output_quality") or 92),
+                        ),
+                    )
+                except (TypeError, ValueError):
+                    self.spandrel_output_quality = 92
+                try:
+                    self.spandrel_png_compress = max(
+                        0,
+                        min(9, int(settings.get("spandrel_png_compress") or 3)),
+                    )
+                except (TypeError, ValueError):
+                    self.spandrel_png_compress = 3
                 raw_meta = settings.get("spandrel_model_meta") or {}
                 if isinstance(raw_meta, dict):
                     cleaned = {}
@@ -734,9 +751,9 @@ class VtpPreferencesMixin:
                     _sort if _sort in ("Name", "Rating", "Speed") else "Name"
                 )
                 try:
-                    from spandrel_favorites import normalize_presets
+                    from spandrel_favorites import ensure_builtin_presets
 
-                    self.spandrel_favorite_presets = normalize_presets(
+                    self.spandrel_favorite_presets = ensure_builtin_presets(
                         settings.get("spandrel_favorite_presets")
                     )
                 except Exception:

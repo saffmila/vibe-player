@@ -805,3 +805,60 @@ def ensure_bytedance_ckpts_link(
     except OSError as exc:
         logging.error("[SeedVR2] Could not place checkpoint into ckpts/: %s", exc)
         return None
+
+
+def seedvr2_options_from_settings() -> dict:
+    """Build SeedVR process options from persisted Upscale defaults.
+
+    Scale is not persisted in settings (SeedVR dialog defaults to 2× each open),
+    so batch convert uses the same default.
+    """
+    cfg = load_seedvr2_settings()
+    mode = str(cfg.get(KEY_PRESCALE_MODE) or PRESCALE_MODE_OFF)
+    custom = cfg.get(KEY_PRESCALE_CUSTOM)
+    return {
+        "backend_id": "seedvr2",
+        "scale": 2,
+        "cuda_device": str(cfg.get(KEY_CUDA_DEVICE) or "0").strip() or "0",
+        "dit_model": str(cfg.get(KEY_DIT_MODEL) or DEFAULT_DIT_MODEL).strip()
+        or DEFAULT_DIT_MODEL,
+        "keep_vram": bool(cfg.get(KEY_KEEP_VRAM)),
+        "vae_tiled": bool(cfg.get(KEY_VAE_TILED, True)),
+        "output_format": (
+            OUTPUT_FORMAT_JPEG
+            if str(cfg.get(KEY_OUTPUT_FORMAT) or "").lower()
+            in (OUTPUT_FORMAT_JPEG, "jpeg")
+            else OUTPUT_FORMAT_PNG
+        ),
+        "prescale_mode": mode,
+        "prescale_custom": custom,
+        "prescale_long_edge": resolve_prescale_long_edge(mode, custom),
+        "vae_encode_tile_size": int(
+            cfg.get(KEY_VAE_ENCODE_TILE) or VAE_ENCODE_TILE_DEFAULT
+        ),
+        "vae_decode_tile_size": int(
+            cfg.get(KEY_VAE_DECODE_TILE) or VAE_DECODE_TILE_DEFAULT
+        ),
+        "chunk_preview": False,  # batch convert: no live preview window
+        "suffix": "",  # batch owns the destination filename
+    }
+
+
+def format_seedvr2_summary(options: dict | None) -> str:
+    """One-line summary for Batch Convert (model · scale · GPU)."""
+    opts = options or {}
+    model = str(opts.get("dit_model") or DEFAULT_DIT_MODEL).strip() or DEFAULT_DIT_MODEL
+    model_name = Path(model.replace("\\", "/")).name or model
+    if len(model_name) > 36:
+        model_name = model_name[:18] + "…" + model_name[-14:]
+    try:
+        scale = max(1, int(opts.get("scale") or 2))
+    except (TypeError, ValueError):
+        scale = 2
+    gpu = str(opts.get("cuda_device") or "0").strip() or "0"
+    mode = str(opts.get("prescale_mode") or PRESCALE_MODE_OFF).strip().lower()
+    parts = [model_name, f"{scale}×"]
+    if mode and mode != PRESCALE_MODE_OFF:
+        parts.append(f"prescale {mode}")
+    parts.append(f"GPU {gpu}")
+    return " · ".join(parts)

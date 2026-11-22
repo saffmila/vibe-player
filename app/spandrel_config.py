@@ -264,3 +264,121 @@ def weights_status(*, models_dir: str | Path | None = None) -> dict[str, Any]:
         "models": models,
         "count": len(models),
     }
+
+
+_SCALE_MODE_TO_TARGET = {"2×": 2.0, "4×": 4.0, "2x": 2.0, "4x": 4.0}
+
+
+def _target_scale_from_controller(controller: Any | None) -> float | None:
+    """Resolve Spandrel target scale from saved Upscale defaults."""
+    if controller is None:
+        return None
+
+    def _get(name: str, default: Any) -> Any:
+        return getattr(controller, name, default)
+
+    mode = str(_get("spandrel_scale_mode", "Model") or "Model").strip()
+    if mode == "Model":
+        return None
+    if mode in _SCALE_MODE_TO_TARGET:
+        return _SCALE_MODE_TO_TARGET[mode]
+    if mode == "Custom":
+        try:
+            value = float(_get("spandrel_custom_scale", 3) or 3)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+    return None
+
+
+def spandrel_options_from_controller(controller: Any | None) -> dict[str, Any]:
+    """Snapshot of Fast Upscale prefs stored on the main window (or defaults)."""
+
+    def _get(name: str, default: Any) -> Any:
+        if controller is None:
+            return default
+        return getattr(controller, name, default)
+
+    models_dir = str(_get("spandrel_models_dir", "") or "").strip()
+    model = str(_get("spandrel_model", "") or "").strip()
+    if model.startswith("("):
+        model = ""
+
+    try:
+        tile_cap = int(_get("spandrel_max_tile", 0) or 0)
+    except (TypeError, ValueError):
+        tile_cap = 0
+    if tile_cap not in (256, 512, 768, 1024):
+        tile_cap = 0
+
+    out_fmt = str(_get("spandrel_output_format", "jpg") or "jpg").lower().lstrip(".")
+    if out_fmt == "jpeg":
+        out_fmt = "jpg"
+    if out_fmt not in ("png", "jpg", "tiff", "webp"):
+        out_fmt = "jpg"
+
+    try:
+        jpeg_quality = max(1, min(100, int(_get("spandrel_output_quality", 92) or 92)))
+    except (TypeError, ValueError):
+        jpeg_quality = 92
+    try:
+        png_compress = max(0, min(9, int(_get("spandrel_png_compress", 3) or 3)))
+    except (TypeError, ValueError):
+        png_compress = 3
+
+    scale_mode = str(_get("spandrel_scale_mode", "Model") or "Model").strip() or "Model"
+    return {
+        "backend_id": "spandrel",
+        "model": model,
+        "models_dir": models_dir or str(default_upscale_dir()),
+        "auto_tile": True,
+        "tile_cap": tile_cap,
+        "tile_size": 0,
+        "overlap": 32,
+        "cuda_device": str(_get("spandrel_cuda_device", "0") or "0").strip() or "0",
+        "scale_mode": scale_mode,
+        "target_scale": _target_scale_from_controller(controller),
+        "suffix": str(_get("fast_upscale_suffix", "") or "").strip(),
+        "output_format": out_fmt,
+        "jpeg_quality": jpeg_quality,
+        "png_compress": png_compress,
+        "unload_after": True,
+    }
+
+
+def format_spandrel_summary(
+    options: dict[str, Any] | None, *, include_format: bool = True
+) -> str:
+    """One-line summary for Batch Convert (model · scale · [format] · GPU)."""
+    opts = options or {}
+    model = str(opts.get("model") or "").strip()
+    if not model:
+        return "No default model — set one in Upscale… (Save as default)"
+    model_name = Path(model.replace("\\", "/")).name or model
+    if len(model_name) > 36:
+        model_name = model_name[:18] + "…" + model_name[-14:]
+
+    mode = str(opts.get("scale_mode") or "Model").strip() or "Model"
+    target = opts.get("target_scale")
+    if mode == "Model" or target is None:
+        scale = "Model scale"
+    else:
+        try:
+            scale = f"{float(target):g}×"
+        except (TypeError, ValueError):
+            scale = mode
+
+    parts = [model_name, scale]
+    if include_format:
+        fmt = str(opts.get("output_format") or "jpg").lower().lstrip(".")
+        fmt_label = {
+            "png": "PNG",
+            "jpg": "JPEG",
+            "jpeg": "JPEG",
+            "tiff": "TIFF",
+            "webp": "WebP",
+        }.get(fmt, fmt.upper() or "JPEG")
+        parts.append(fmt_label)
+    gpu = str(opts.get("cuda_device") or "0").strip() or "0"
+    parts.append(f"GPU {gpu}")
+    return " · ".join(parts)

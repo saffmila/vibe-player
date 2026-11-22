@@ -49,6 +49,7 @@ from batch_processing_dialog import (
     build_output_path,
     open_batch_process_dialog,
     process_one_image,
+    upscale_name_suffix_for_job,
 )
 from video_operations import VideoPlayer
 from video_convert import open_convert_video_dialog
@@ -3474,7 +3475,19 @@ class VtpGridMixin:
         png_compress = int(job.get("png_compress") if job.get("png_compress") is not None else 6)
         ask_before_overwrite = bool(job.get("ask_before_overwrite", True))
         remove_background = bool(job.get("remove_background"))
+        fast_upscale = bool(job.get("fast_upscale"))
+        seedvr_upscale = bool(job.get("seedvr_upscale"))
+        topaz_upscale = bool(job.get("topaz_upscale"))
+        # One upscaler only — UI is radio, this is a hard guard.
+        if fast_upscale:
+            seedvr_upscale = False
+            topaz_upscale = False
+        elif seedvr_upscale:
+            topaz_upscale = False
         birefnet_options = dict(job.get("birefnet_options") or {})
+        spandrel_options = dict(job.get("spandrel_options") or {})
+        seedvr_options = dict(job.get("seedvr_options") or {})
+        topaz_options = dict(job.get("topaz_options") or {})
         if remove_background and not birefnet_options:
             try:
                 from birefnet_config import birefnet_options_from_controller
@@ -3482,6 +3495,27 @@ class VtpGridMixin:
                 birefnet_options = birefnet_options_from_controller(self)
             except Exception:
                 birefnet_options = {}
+        if fast_upscale and not spandrel_options.get("model"):
+            try:
+                from spandrel_config import spandrel_options_from_controller
+
+                spandrel_options = spandrel_options_from_controller(self)
+            except Exception:
+                spandrel_options = {}
+        if seedvr_upscale and not seedvr_options:
+            try:
+                from seedvr2_config import seedvr2_options_from_settings
+
+                seedvr_options = seedvr2_options_from_settings()
+            except Exception:
+                seedvr_options = {}
+        if topaz_upscale and not topaz_options.get("model"):
+            try:
+                from topaz_config import topaz_options_from_controller
+
+                topaz_options = topaz_options_from_controller(self)
+            except Exception:
+                topaz_options = {}
 
         if remove_background:
             from birefnet_config import runtime_status
@@ -3493,6 +3527,113 @@ class VtpGridMixin:
                 )
                 return
             out_ext = ".png"
+
+        if fast_upscale:
+            from spandrel_config import runtime_status as spandrel_runtime_status
+
+            rt = spandrel_runtime_status(deep=True)
+            if not rt.get("ready") and not rt.get("cpu_fallback"):
+                messagebox.showwarning(
+                    "Batch Convert",
+                    rt.get("message") or "Spandrel / PyTorch runtime is not ready.",
+                )
+                return
+            if not str(spandrel_options.get("model") or "").strip():
+                messagebox.showinfo(
+                    "Batch Convert",
+                    "Fast upscale needs a default model.\n\n"
+                    "Open Upscale…, pick a model, then Save as default.",
+                )
+                return
+            # Keep Spandrel output format aligned with the batch destination.
+            fmt_key = str(out_ext or ".jpg").lstrip(".").lower()
+            if fmt_key == "jpeg":
+                fmt_key = "jpg"
+            spandrel_options["output_format"] = fmt_key or "jpg"
+            spandrel_options["jpeg_quality"] = int(quality)
+            spandrel_options["png_compress"] = int(png_compress)
+
+        if topaz_upscale:
+            from topaz_config import runtime_status as topaz_runtime_status
+
+            if not topaz_runtime_status().get("ready"):
+                messagebox.showwarning(
+                    "Batch Convert",
+                    "Topaz Photo AI (tpai.exe) was not found on this PC.",
+                )
+                return
+            fmt_key = str(out_ext or ".png").lstrip(".").lower()
+            if fmt_key == "jpeg":
+                fmt_key = "jpg"
+            if fmt_key in ("png", "jpg", "tiff", "webp"):
+                topaz_options["output_format"] = fmt_key
+            else:
+                topaz_options["output_format"] = "png"
+            topaz_options["quality"] = int(quality)
+
+        spandrel_plugin = None
+        seedvr_plugin = None
+        topaz_plugin = None
+        pm = getattr(self, "plugin_manager", None)
+        if fast_upscale:
+            spandrel_plugin = pm.get_upscale_plugin("spandrel") if pm else None
+            if spandrel_plugin is None:
+                messagebox.showerror(
+                    "Batch Convert",
+                    "Spandrel upscale backend is not loaded. Check app.log.",
+                )
+                return
+        if topaz_upscale:
+            topaz_plugin = pm.get_upscale_plugin("topaz") if pm else None
+            if topaz_plugin is None:
+                messagebox.showerror(
+                    "Batch Convert",
+                    "Topaz Photo AI backend is not loaded. Check app.log.",
+                )
+                return
+        if seedvr_upscale:
+            seedvr_plugin = pm.get_upscale_plugin("seedvr2") if pm else None
+            if seedvr_plugin is None:
+                messagebox.showerror(
+                    "Batch Convert",
+                    "SeedVR 2 upscale backend is not loaded. Check app.log.",
+                )
+                return
+            rt = seedvr_plugin.runtime_status(deep=True)
+            if not rt.get("ready"):
+                messagebox.showwarning(
+                    "Batch Convert",
+                    rt.get("message") or "SeedVR 2 runtime is not ready.",
+                )
+                return
+            weights = (
+                seedvr_plugin.weights_status()
+                if hasattr(seedvr_plugin, "weights_status")
+                else {"ready": True}
+            )
+            if not weights.get("ready"):
+                messagebox.showwarning(
+                    "Batch Convert",
+                    weights.get("message") or "SeedVR 2 weights are missing.",
+                )
+                return
+            if hasattr(seedvr_plugin, "runner_status"):
+                runner = seedvr_plugin.runner_status()
+                if not runner.get("ready"):
+                    messagebox.showwarning(
+                        "Batch Convert",
+                        runner.get("message") or "SeedVR 2 runner is not ready.",
+                    )
+                    return
+
+        upscale_name_suffix = upscale_name_suffix_for_job(
+            fast_upscale=fast_upscale,
+            spandrel_options=spandrel_options,
+            seedvr_upscale=seedvr_upscale,
+            seedvr_options=seedvr_options,
+            topaz_upscale=topaz_upscale,
+            topaz_options=topaz_options,
+        )
 
         self._batch_convert_running = True
         progress = open_file_op_progress_dialog(
@@ -3508,8 +3649,11 @@ class VtpGridMixin:
             aborted = False
             done_count = 0
             _unload_birefnet = remove_background
+            _unload_spandrel = fast_upscale
+            _unload_seedvr = seedvr_upscale
             conflict_lock = threading.Lock()
             state_lock = threading.Lock()
+            # topaz_plugin / options captured from outer scope
 
             def _bump_progress(name: str) -> None:
                 nonlocal done_count
@@ -3521,102 +3665,269 @@ class VtpGridMixin:
                     lambda n=n, name=name: progress.set_progress(n, detail=name),
                 )
 
-            def _convert_file(src: str, dest: str) -> str:
-                """Apply transforms / optional BiRefNet; return final dest path."""
-                if remove_background:
-                    from birefnet_pipeline import remove_background_from_file
+            def _should_stop() -> bool:
+                return bool(progress.cancelled)
 
-                    has_ops = any(
-                        [
-                            rotate_op,
-                            flip_h,
-                            flip_v,
-                            crop_settings,
-                            resize_settings,
-                            canvas_settings,
-                        ]
+            def _make_temp(suffix: str, near: str) -> str:
+                import tempfile
+
+                fd, tmp_path = tempfile.mkstemp(
+                    suffix=suffix, dir=os.path.dirname(near) or None
+                )
+                os.close(fd)
+                return tmp_path
+
+            def _run_birefnet(src_path: str, dest_path: str) -> str:
+                from birefnet_pipeline import remove_background_from_file
+
+                bg_kwargs = {
+                    "bg_mode": str(
+                        birefnet_options.get("bg_mode") or "transparent"
+                    ),
+                    "bg_color": birefnet_options.get("bg_color"),
+                    "cuda_device": birefnet_options.get("cuda_device"),
+                    "model_variant": birefnet_options.get("model_variant"),
+                    "mask_threshold": int(
+                        birefnet_options.get("mask_threshold") or 0
+                    ),
+                    "mask_feather": int(
+                        birefnet_options.get("mask_feather") or 0
+                    ),
+                    "mask_morph": int(birefnet_options.get("mask_morph") or 0),
+                    "should_stop": _should_stop,
+                }
+                result = remove_background_from_file(
+                    src_path,
+                    dest_path,
+                    **bg_kwargs,
+                )
+                if _should_stop():
+                    raise InterruptedError("Batch convert cancelled")
+                if not result.get("ok"):
+                    raise RuntimeError(
+                        result.get("message") or "Background removal failed."
                     )
+                return result.get("output_path") or dest_path
 
-                    def _should_stop_bg() -> bool:
-                        return bool(progress.cancelled)
+            def _run_spandrel(src_path: str, dest_path: str) -> str:
+                opts = {
+                    **spandrel_options,
+                    "output_path": dest_path,
+                    "unload_after": False,
+                }
+                result = spandrel_plugin.process(
+                    src_path,
+                    options=opts,
+                    progress_cb=None,
+                    should_stop=_should_stop,
+                )
+                if _should_stop() or result.get("error") == "aborted":
+                    raise InterruptedError("Batch convert cancelled")
+                if not result.get("ok"):
+                    raise RuntimeError(
+                        result.get("message") or "Fast upscale failed."
+                    )
+                return result.get("output_path") or dest_path
 
-                    bg_kwargs = {
-                        "bg_mode": str(
-                            birefnet_options.get("bg_mode") or "transparent"
-                        ),
-                        "bg_color": birefnet_options.get("bg_color"),
-                        "cuda_device": birefnet_options.get("cuda_device"),
-                        "model_variant": birefnet_options.get("model_variant"),
-                        "mask_threshold": int(
-                            birefnet_options.get("mask_threshold") or 0
-                        ),
-                        "mask_feather": int(
-                            birefnet_options.get("mask_feather") or 0
-                        ),
-                        "mask_morph": int(birefnet_options.get("mask_morph") or 0),
-                        "should_stop": _should_stop_bg,
+            def _run_seedvr(src_path: str, dest_path: str) -> str:
+                """SeedVR → PNG (native), then re-encode to batch format/quality."""
+                dest_ext = os.path.splitext(dest_path)[1].lower()
+                # SeedVR image output is png|jpg only. Use PNG intermediate so
+                # batch Format / Quality / WebP / BMP still apply.
+                if dest_ext == ".png":
+                    write_path = dest_path
+                    cleanup = None
+                else:
+                    write_path = _make_temp(".png", dest_path)
+                    cleanup = write_path
+                try:
+                    opts = {
+                        **seedvr_options,
+                        "output_path": write_path,
+                        "output_format": "png",
+                        "suffix": "",
+                        "chunk_preview": False,
                     }
-
-                    if has_ops:
-                        import tempfile
-
-                        fd, tmp_path = tempfile.mkstemp(
-                            suffix=".png", dir=os.path.dirname(dest) or None
-                        )
-                        os.close(fd)
-                        try:
-                            process_one_image(
-                                src,
-                                tmp_path,
-                                rotate_op=rotate_op,
-                                flip_h=flip_h,
-                                flip_v=flip_v,
-                                crop_settings=crop_settings,
-                                resize_settings=resize_settings,
-                                canvas_settings=canvas_settings,
-                                quality=quality,
-                                png_compress=png_compress,
-                            )
-                            result = remove_background_from_file(
-                                tmp_path,
-                                dest,
-                                **bg_kwargs,
-                            )
-                        finally:
-                            try:
-                                os.remove(tmp_path)
-                            except OSError:
-                                pass
-                    else:
-                        result = remove_background_from_file(
-                            src,
-                            dest,
-                            **bg_kwargs,
-                        )
-
-                    if progress.cancelled:
+                    result = seedvr_plugin.process(
+                        src_path,
+                        options=opts,
+                        progress_cb=None,
+                        should_stop=_should_stop,
+                    )
+                    if _should_stop() or result.get("error") == "aborted":
                         raise InterruptedError("Batch convert cancelled")
                     if not result.get("ok"):
                         raise RuntimeError(
-                            result.get("message") or "Background removal failed."
+                            result.get("message") or "SeedVR upscale failed."
                         )
-                    if result.get("output_path"):
-                        return result["output_path"]
-                    return dest
+                    out = result.get("output_path") or write_path
+                    if dest_ext == ".png":
+                        return out
+                    process_one_image(
+                        out,
+                        dest_path,
+                        rotate_op=None,
+                        flip_h=False,
+                        flip_v=False,
+                        crop_settings=None,
+                        resize_settings=None,
+                        canvas_settings=None,
+                        quality=quality,
+                        png_compress=png_compress,
+                    )
+                    return dest_path
+                finally:
+                    if cleanup:
+                        try:
+                            if os.path.isfile(cleanup):
+                                os.remove(cleanup)
+                        except OSError:
+                            pass
 
-                process_one_image(
-                    src,
-                    dest,
-                    rotate_op=rotate_op,
-                    flip_h=flip_h,
-                    flip_v=flip_v,
-                    crop_settings=crop_settings,
-                    resize_settings=resize_settings,
-                    canvas_settings=canvas_settings,
-                    quality=quality,
-                    png_compress=png_compress,
+            def _run_topaz(src_path: str, dest_path: str) -> str:
+                """Topaz Photo AI; BMP gets PNG intermediate then re-encode."""
+                dest_ext = os.path.splitext(dest_path)[1].lower()
+                native = dest_ext in (".png", ".jpg", ".jpeg", ".tiff", ".tif", ".webp")
+                if native:
+                    write_path = dest_path
+                    cleanup = None
+                    fmt = dest_ext.lstrip(".").lower()
+                    if fmt in ("jpeg",):
+                        fmt = "jpg"
+                    if fmt in ("tif",):
+                        fmt = "tiff"
+                else:
+                    write_path = _make_temp(".png", dest_path)
+                    cleanup = write_path
+                    fmt = "png"
+                try:
+                    opts = {
+                        **topaz_options,
+                        "output_path": write_path,
+                        "output_format": fmt,
+                        "suffix": "",
+                        "quality": int(quality),
+                    }
+                    result = topaz_plugin.process(
+                        src_path,
+                        options=opts,
+                        progress_cb=None,
+                        should_stop=_should_stop,
+                    )
+                    if _should_stop() or result.get("error") == "aborted":
+                        raise InterruptedError("Batch convert cancelled")
+                    if not result.get("ok"):
+                        raise RuntimeError(
+                            result.get("message") or "Photo AI upscale failed."
+                        )
+                    out = result.get("output_path") or write_path
+                    if native:
+                        return out
+                    process_one_image(
+                        out,
+                        dest_path,
+                        rotate_op=None,
+                        flip_h=False,
+                        flip_v=False,
+                        crop_settings=None,
+                        resize_settings=None,
+                        canvas_settings=None,
+                        quality=quality,
+                        png_compress=png_compress,
+                    )
+                    return dest_path
+                finally:
+                    if cleanup:
+                        try:
+                            if os.path.isfile(cleanup):
+                                os.remove(cleanup)
+                        except OSError:
+                            pass
+
+            def _convert_file(src: str, dest: str) -> str:
+                """Apply transforms / optional BiRefNet / upscale; return final path."""
+                has_ops = any(
+                    [
+                        rotate_op,
+                        flip_h,
+                        flip_v,
+                        crop_settings,
+                        resize_settings,
+                        canvas_settings,
+                    ]
                 )
-                return dest
+                needs_upscale = fast_upscale or seedvr_upscale or topaz_upscale
+                needs_ai = remove_background or needs_upscale
+                temps: list[str] = []
+                work = src
+                try:
+                    if has_ops and needs_ai:
+                        tmp = _make_temp(
+                            ".png" if remove_background else out_ext, dest
+                        )
+                        temps.append(tmp)
+                        process_one_image(
+                            work,
+                            tmp,
+                            rotate_op=rotate_op,
+                            flip_h=flip_h,
+                            flip_v=flip_v,
+                            crop_settings=crop_settings,
+                            resize_settings=resize_settings,
+                            canvas_settings=canvas_settings,
+                            quality=quality,
+                            png_compress=png_compress,
+                        )
+                        work = tmp
+                    elif has_ops and not needs_ai:
+                        process_one_image(
+                            src,
+                            dest,
+                            rotate_op=rotate_op,
+                            flip_h=flip_h,
+                            flip_v=flip_v,
+                            crop_settings=crop_settings,
+                            resize_settings=resize_settings,
+                            canvas_settings=canvas_settings,
+                            quality=quality,
+                            png_compress=png_compress,
+                        )
+                        return dest
+                    elif not needs_ai:
+                        process_one_image(
+                            src,
+                            dest,
+                            rotate_op=None,
+                            flip_h=False,
+                            flip_v=False,
+                            crop_settings=None,
+                            resize_settings=None,
+                            canvas_settings=None,
+                            quality=quality,
+                            png_compress=png_compress,
+                        )
+                        return dest
+
+                    if remove_background:
+                        if needs_upscale:
+                            tmp = _make_temp(".png", dest)
+                            temps.append(tmp)
+                            work = _run_birefnet(work, tmp)
+                        else:
+                            return _run_birefnet(work, dest)
+
+                    if fast_upscale:
+                        return _run_spandrel(work, dest)
+                    if seedvr_upscale:
+                        return _run_seedvr(work, dest)
+                    return _run_topaz(work, dest)
+                finally:
+                    for tmp in temps:
+                        try:
+                            if tmp and os.path.isfile(tmp):
+                                os.remove(tmp)
+                        except OSError:
+                            pass
 
             def _process_one(index: int, src: str):
                 """One file: resolve conflict then convert. Returns status tuple."""
@@ -3635,6 +3946,7 @@ class VtpGridMixin:
                             output_dir=output_dir,
                             rename_enabled=rename_enabled,
                             rename_pattern=rename_pattern,
+                            name_suffix=upscale_name_suffix,
                         )
                         dest = self._resolve_batch_convert_conflict(
                             suggested,
@@ -3667,9 +3979,15 @@ class VtpGridMixin:
                     return ("error", name, f"{name}: {e}")
 
             try:
-                # BiRefNet shares one GPU model — keep sequential. Plain convert
-                # benefits from parallel Pillow encode (zlib releases the GIL).
-                if remove_background or len(paths) <= 1:
+                # BiRefNet / Spandrel / SeedVR / Topaz — keep sequential.
+                # Plain convert benefits from parallel Pillow encode (GIL-friendly).
+                if (
+                    remove_background
+                    or fast_upscale
+                    or seedvr_upscale
+                    or topaz_upscale
+                    or len(paths) <= 1
+                ):
                     workers = 1
                 else:
                     cpu = os.cpu_count() or 4
@@ -3747,6 +4065,20 @@ class VtpGridMixin:
                         from birefnet_pipeline import unload_model
 
                         unload_model()
+                    except Exception:
+                        pass
+                if _unload_spandrel:
+                    try:
+                        from spandrel_worker_host import abort_spandrel_worker
+
+                        abort_spandrel_worker()
+                    except Exception:
+                        pass
+                if _unload_seedvr:
+                    try:
+                        from seedvr2_worker_host import shutdown_seedvr2_worker_host
+
+                        shutdown_seedvr2_worker_host()
                     except Exception:
                         pass
                 self.after(
@@ -4858,15 +5190,23 @@ class VtpGridMixin:
             command=lambda: self.auto_tag_selected_items(file_path)
         )
         upscale_menu = tk.Menu(menu, tearoff=0)
+        if hasattr(self, "open_fast_upscale_dialog"):
+            upscale_menu.add_command(
+                label="Upscale…",
+                command=lambda: self.open_fast_upscale_dialog(file_path),
+            )
+        if hasattr(self, "add_upscale_favorites_to_menu"):
+            try:
+                self.add_upscale_favorites_to_menu(
+                    upscale_menu, file_path, backends=("spandrel", "topaz")
+                )
+            except Exception:
+                pass
+        upscale_menu.add_separator()
         if hasattr(self, "open_upscale_dialog"):
             upscale_menu.add_command(
                 label="SeedVR 2…",
                 command=lambda: self.open_upscale_dialog(file_path),
-            )
-        if hasattr(self, "open_fast_upscale_dialog"):
-            upscale_menu.add_command(
-                label="Fast Upscale…",
-                command=lambda: self.open_fast_upscale_dialog(file_path),
             )
         topaz_ready = False
         try:
@@ -4881,13 +5221,6 @@ class VtpGridMixin:
                 command=lambda: self.open_topaz_upscale_dialog(file_path),
                 state=("normal" if topaz_ready else "disabled"),
             )
-        if hasattr(self, "add_upscale_favorites_to_menu"):
-            try:
-                self.add_upscale_favorites_to_menu(
-                    upscale_menu, file_path, backends=("spandrel", "topaz")
-                )
-            except Exception:
-                pass
         if upscale_menu.index("end") is not None:
             menu.add_cascade(label="Upscale", menu=upscale_menu)
         if hasattr(self, "open_rife_dialog"):

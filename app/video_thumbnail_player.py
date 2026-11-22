@@ -4708,7 +4708,7 @@ class VideoThumbnailPlayer(
         if getattr(self, "_upscale_batch_running", False):
             jobs.append("Upscale")
         if getattr(self, "_fast_upscale_batch_running", False):
-            jobs.append("Fast Upscale")
+            jobs.append("Upscale")
         if getattr(self, "_rife_batch_running", False):
             jobs.append("RIFE")
         return jobs

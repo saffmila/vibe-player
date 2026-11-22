@@ -1,5 +1,5 @@
 """
-spandrel_preview_window.py — External crop preview for Fast Upscale.
+spandrel_preview_window.py — External crop preview for Upscale.
 
 Single-canvas split slider. Compare vs Original (NEAREST source) or vs a
 second model (A|B). Status + progress live in the footer so the image stays
@@ -48,7 +48,7 @@ class SpandrelPreviewWindow(ctk.CTkToplevel):
         on_preview_timing: Callable[[str, float], None] | None = None,
     ):
         super().__init__(parent)
-        self.title("Fast Upscale Preview")
+        self.title("Upscale Preview")
         self.get_job = get_job
         self.on_close = on_close
         self.on_preview_timing = on_preview_timing
@@ -502,7 +502,7 @@ class SpandrelPreviewWindow(ctk.CTkToplevel):
             return
         job = self.get_job() if callable(self.get_job) else None
         if not job:
-            self._set_status("Select a model in Fast Upscale…", kind="idle")
+            self._set_status("Select a model in Upscale…", kind="idle")
             return
         path = str(job.get("source_path") or "")
         model = str(job.get("model") or "")

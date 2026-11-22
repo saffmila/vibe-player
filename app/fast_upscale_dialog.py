@@ -23,19 +23,23 @@ from spandrel_config import (
     weights_status as spandrel_weights_status,
 )
 from spandrel_favorites import (
+    ensure_builtin_presets,
     find_preset,
+    is_builtin_name,
+    is_builtin_preset,
     model_stem_suffix,
-    normalize_presets,
     preset_menu_label,
     remove_preset,
     upsert_preset,
 )
 
+_PRESET_SEP = "────────"
+
 _STATUS_BG = ("gray86", "#1e1e1e")
 _UI_BTN_H = 28
 _DIALOG_W = PROMO_STRIP_DIALOG_W
-# Fallback before first tight `_fit_and_center` pass.
-_DIALOG_H = 500
+# Fallback before first tight `_fit_and_center` pass (status + preset/scale/format).
+_DIALOG_H = 520
 _TILE_CAP_LABELS = ("Auto", "256", "512", "768", "1024")
 _TILE_CAP_VALUES = {256, 512, 768, 1024}
 _FACTOR_LABELS = ("Model", "2×", "4×", "Custom")
@@ -51,6 +55,8 @@ _EXT_TO_FORMAT = {ext: label for label, ext in _FORMAT_TO_EXT.items()}
 _PRESET_CURRENT = "(current)"
 _SORT_LABELS = ("Name", "Rating", "Speed")
 _SORT_DEFAULT = "Name"
+_DEFAULT_JPEG_QUALITY = 92
+_DEFAULT_PNG_COMPRESS = 3
 
 
 def _normalize_model_meta(raw) -> dict:
@@ -156,7 +162,7 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         except Exception:
             pass
         self.withdraw()
-        self.title("Fast Upscale")
+        self.title("Upscale")
         self.paths = list(paths or [])
         self.on_confirm = on_confirm
         self.controller = controller
@@ -172,18 +178,21 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         self._model_meta = _normalize_model_meta(
             getattr(controller, "spandrel_model_meta", None) if controller else None
         )
-        self._favorites = normalize_presets(
+        self._favorites = ensure_builtin_presets(
             getattr(controller, "spandrel_favorite_presets", None) if controller else None
         )
+        self._persist_favorites()
         self._preset_label_to_name: dict[str, str] = {}
         self._suspend_preset_sync = False
         self._advanced_open = False
         self._status_checked = False
         self._rate_menu = None
+        self._save_menu = None
+        self._summary_flash_token = 0
         self._manage_win = None
 
         self.geometry(f"{_DIALOG_W}x{_DIALOG_H}")
-        self.minsize(_DIALOG_W, 420)
+        self.minsize(_DIALOG_W, 500)
         self.resizable(False, False)
         self.transient(parent)
 
@@ -264,28 +273,69 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         if controller is not None:
             show_prev = bool(getattr(controller, "spandrel_show_preview", False))
         self.show_preview_var = ctk.BooleanVar(value=show_prev)
-        fmt = "PNG"
+        fmt = "JPEG"
         if controller is not None:
             saved_fmt = str(
-                getattr(controller, "spandrel_output_format", "png") or "png"
+                getattr(controller, "spandrel_output_format", "jpg") or "jpg"
             ).strip().lower()
             for label, ext in _FORMAT_TO_EXT.items():
                 if saved_fmt in (ext, label.lower(), "jpeg" if ext == "jpg" else ext):
                     fmt = label
                     break
         self.format_var = ctk.StringVar(value=fmt)
+        jpeg_q = _DEFAULT_JPEG_QUALITY
+        png_c = _DEFAULT_PNG_COMPRESS
+        if controller is not None:
+            try:
+                jpeg_q = max(
+                    1,
+                    min(
+                        100,
+                        int(
+                            getattr(
+                                controller,
+                                "spandrel_output_quality",
+                                _DEFAULT_JPEG_QUALITY,
+                            )
+                            or _DEFAULT_JPEG_QUALITY
+                        ),
+                    ),
+                )
+            except (TypeError, ValueError):
+                jpeg_q = _DEFAULT_JPEG_QUALITY
+            try:
+                png_c = max(
+                    0,
+                    min(
+                        9,
+                        int(
+                            getattr(
+                                controller,
+                                "spandrel_png_compress",
+                                _DEFAULT_PNG_COMPRESS,
+                            )
+                            or _DEFAULT_PNG_COMPRESS
+                        ),
+                    ),
+                )
+            except (TypeError, ValueError):
+                png_c = _DEFAULT_PNG_COMPRESS
+        self._jpeg_quality = jpeg_q
+        self._webp_quality = jpeg_q
+        self._png_compress = png_c
+        self.compress_var = ctk.IntVar(value=jpeg_q)
         self.status_var = ctk.StringVar(value="Checking…")
 
         attach_promo_strip(
             self,
-            "strip_seedvr.png",
+            "strip_openModels.png",
             dialog_width=_DIALOG_W,
             controller=self.controller,
         )
 
         ctk.CTkLabel(
             self,
-            text="Fast Upscale (Spandrel)",
+            text="Upscale",
             text_color="#00bfff",
             font=ctk.CTkFont(size=14, weight="bold"),
             anchor="w",
@@ -338,93 +388,50 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         )
         self._refresh_btn.pack(side="left", padx=(8, 0))
 
-        row_filter = ctk.CTkFrame(body, fg_color="transparent")
-        row_filter.pack(fill="x", pady=(4, 2))
-        self._filter_row = row_filter
-        ctk.CTkLabel(row_filter, text="Filter:", width=110, anchor="w").pack(side="left")
-        self._filter_entry = ctk.CTkEntry(
-            row_filter,
-            textvariable=self.filter_var,
-            height=28,
-            placeholder_text="name contains… (e.g. PurePhoto, SPAN, Nomos, 4x)",
-        )
-        self._filter_entry.pack(side="left", fill="x", expand=True)
         self.filter_var.trace_add("write", lambda *_: self._apply_filter())
         self.custom_scale_var.trace_add(
-            "write", lambda *_: (self._on_factor_change(apply_filter=False), self._notify_preview())
+            "write",
+            lambda *_: (
+                self._on_factor_change(apply_filter=False),
+                self._notify_preview(),
+            ),
         )
-        self._sort_menu = ctk.CTkOptionMenu(
-            row_filter,
-            variable=self.sort_mode_var,
-            values=list(_SORT_LABELS),
-            height=28,
-            width=110,
-            corner_radius=14,
-            fg_color=("gray75", "#2a2a2a"),
-            button_color=("gray65", "#333333"),
-            button_hover_color=("gray55", "#3a3a3a"),
-            dropdown_fg_color=("gray80", "#2a2a2a"),
-            command=lambda _v: self._on_sort_change(),
-        )
-        self._sort_menu.pack(side="left", padx=(8, 0))
-        ctk.CTkLabel(
-            row_filter,
-            textvariable=self._count_var,
-            width=56,
-            anchor="e",
-            text_color="#888",
-            font=ctk.CTkFont(size=11),
-        ).pack(side="left", padx=(8, 0))
 
-        # Fixed-height list — do not expand or it pushes Output/Start off-screen.
-        list_wrap = ctk.CTkFrame(
-            body,
-            fg_color=("gray90", "#1a1a1a"),
+        # Engine status on the simple page (above presets).
+        self._engine_block = ctk.CTkFrame(body, fg_color="transparent")
+        self._engine_block.pack(fill="x", pady=(0, 8))
+        self._status_box = ctk.CTkFrame(
+            self._engine_block,
+            fg_color=_STATUS_BG,
             corner_radius=6,
             border_width=1,
-            border_color=("gray70", "#333"),
-            height=168,
+            border_color=("gray70", "#1a1a1a"),
         )
-        list_wrap.pack(fill="x", pady=(2, 4))
-        list_wrap.pack_propagate(False)
-        self._listbox = tk.Listbox(
-            list_wrap,
-            activestyle="dotbox",
-            exportselection=False,
-            highlightthickness=0,
-            borderwidth=0,
-            font=("Segoe UI", 10),
-            bg="#1a1a1a",
-            fg="#e0e0e0",
-            selectbackground="#1f6aa5",
-            selectforeground="#ffffff",
-            selectmode="multiple",
-            height=8,
-        )
-        scroll = tk.Scrollbar(list_wrap, orient="vertical", command=self._listbox.yview)
-        self._listbox.configure(yscrollcommand=scroll.set)
-        self._listbox.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
-        scroll.pack(side="right", fill="y", padx=(0, 4), pady=6)
-        # Custom A/B slots (not free multi-select).
-        self._listbox.bind("<Button-1>", self._on_list_lmb)
-        self._listbox.bind("<Control-Button-1>", self._on_list_ctrl)
-        self._listbox.bind("<Double-Button-1>", self._on_list_double)
-        self._listbox.bind("<Button-3>", self._on_list_rmb)
-        # Block default selection so Ctrl/LMB handlers own A/B.
-        self._listbox.bind("<<ListboxSelect>>", lambda _e: "break")
-
-        hint_row = ctk.CTkFrame(body, fg_color="transparent")
-        hint_row.pack(fill="x", pady=(0, 2))
+        self._status_box.pack(fill="x")
         ctk.CTkLabel(
-            hint_row,
-            text="LMB = one model · Ctrl+LMB = add / remove · RMB = rate",
-            text_color="#666",
-            font=ctk.CTkFont(size=11),
+            self._status_box,
+            textvariable=self.status_var,
+            wraplength=_DIALOG_W - 60,
+            justify="left",
+            text_color="#b0b0b0",
             anchor="w",
-        ).pack(side="left")
+            font=ctk.CTkFont(size=11),
+        ).pack(fill="x", padx=10, pady=8)
+        self._folder_label = ctk.CTkLabel(
+            self._engine_block,
+            textvariable=self.models_dir_var,
+            wraplength=_DIALOG_W - 40,
+            justify="left",
+            text_color="#8ab4c8",
+            anchor="w",
+            font=ctk.CTkFont(size=11),
+        )
+        self._folder_label.pack(fill="x", pady=(4, 0))
 
+        # Simple view: preset + scale + format. Model filenames under Advanced.
         preset_row = ctk.CTkFrame(body, fg_color="transparent")
         preset_row.pack(fill="x", pady=(4, 2))
+        self._preset_row = preset_row
         ctk.CTkLabel(preset_row, text="Preset:", width=110, anchor="w").pack(side="left")
         self.preset_var = ctk.StringVar(value=_PRESET_CURRENT)
         self._preset_menu = ctk.CTkOptionMenu(
@@ -442,7 +449,7 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             height=28,
             fg_color="gray30",
             hover_color="gray25",
-            command=self._save_favorite_preset,
+            command=self._popup_save_menu,
         )
         self._preset_save_btn.pack(side="left", padx=(8, 0))
         self._preset_manage_btn = ctk.CTkButton(
@@ -456,52 +463,14 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         )
         self._preset_manage_btn.pack(side="left", padx=(6, 0))
 
-        self._job_summary_var = ctk.StringVar(value="")
-        ctk.CTkLabel(
-            body,
-            textvariable=self._job_summary_var,
-            text_color="#888",
-            font=ctk.CTkFont(size=11),
-            anchor="w",
-        ).pack(fill="x", pady=(0, 2))
+        # One blank row under Preset so the simple form breathes.
+        _preset_gap = ctk.CTkFrame(body, fg_color="transparent", height=28)
+        _preset_gap.pack(fill="x")
+        _preset_gap.pack_propagate(False)
 
-        fmt_row = ctk.CTkFrame(body, fg_color="transparent")
-        fmt_row.pack(fill="x", pady=4)
-        ctk.CTkLabel(fmt_row, text="Format:", width=110, anchor="w").pack(side="left")
-        self._format_menu = ctk.CTkOptionMenu(
-            fmt_row,
-            variable=self.format_var,
-            values=list(_FORMAT_LABELS),
-            height=28,
-            width=110,
-            command=lambda _v: self._sync_preset_choice(),
-        )
-        self._format_menu.pack(side="left")
-        ctk.CTkLabel(
-            fmt_row,
-            text="JPEG/WebP quality 95",
-            text_color="#888",
-            font=ctk.CTkFont(size=11),
-        ).pack(side="left", padx=(10, 0))
-        self._preview_cb = ctk.CTkCheckBox(
-            fmt_row,
-            text="Show preview",
-            variable=self.show_preview_var,
-            command=self._on_preview_toggle,
-            font=ctk.CTkFont(size=11),
-            text_color="#8a8a8a",
-            checkbox_width=15,
-            checkbox_height=15,
-        )
-        self._preview_cb.pack(side="right")
-
-        ctk.CTkFrame(body, fg_color="transparent", height=14).pack(fill="x")
-
-        # Scale, tile cap, GPU and paths — hidden until Advanced. Not packed here.
-        self._advanced_block = ctk.CTkFrame(body, fg_color="transparent")
-
-        row_f = ctk.CTkFrame(self._advanced_block, fg_color="transparent")
-        row_f.pack(fill="x", pady=(2, 2))
+        # Simple mode basics: scale + format (model filenames stay in Advanced).
+        row_f = ctk.CTkFrame(body, fg_color="transparent")
+        row_f.pack(fill="x", pady=(0, 0))
         ctk.CTkLabel(row_f, text="Output scale:", width=110, anchor="w").pack(
             side="left"
         )
@@ -524,6 +493,74 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             font=ctk.CTkFont(size=11),
         )
         self._custom_hint.pack(side="left", padx=(10, 0))
+
+        fmt_row = ctk.CTkFrame(body, fg_color="transparent")
+        fmt_row.pack(fill="x", pady=(10, 0))
+        ctk.CTkLabel(fmt_row, text="Format:", width=110, anchor="w").pack(side="left")
+        self._format_menu = ctk.CTkOptionMenu(
+            fmt_row,
+            variable=self.format_var,
+            values=list(_FORMAT_LABELS),
+            height=28,
+            width=110,
+            command=self._on_format_change,
+        )
+        self._format_menu.pack(side="left")
+        self._compress_label = ctk.CTkLabel(
+            fmt_row,
+            text="Quality",
+            text_color="#888",
+            font=ctk.CTkFont(size=11),
+            width=72,
+            anchor="e",
+        )
+        self._compress_label.pack(side="left", padx=(10, 6))
+        self._compress_slider = ctk.CTkSlider(
+            fmt_row,
+            from_=1,
+            to=100,
+            number_of_steps=99,
+            variable=self.compress_var,
+            width=140,
+            command=self._on_compress_slide,
+        )
+        self._compress_slider.pack(side="left", fill="x", expand=True)
+        self._compress_value = ctk.CTkLabel(
+            fmt_row,
+            text=str(jpeg_q),
+            text_color="#888",
+            font=ctk.CTkFont(size=11),
+            width=28,
+            anchor="w",
+        )
+        self._compress_value.pack(side="left", padx=(6, 0))
+
+        self._job_summary_var = ctk.StringVar(value="")
+        summary_row = ctk.CTkFrame(body, fg_color="transparent")
+        summary_row.pack(fill="x", pady=(2, 2))
+        ctk.CTkLabel(
+            summary_row,
+            textvariable=self._job_summary_var,
+            text_color="#888",
+            font=ctk.CTkFont(size=11),
+            anchor="w",
+        ).pack(side="left", fill="x", expand=True)
+        self._preview_cb = ctk.CTkCheckBox(
+            summary_row,
+            text="Show preview",
+            variable=self.show_preview_var,
+            command=self._on_preview_toggle,
+            font=ctk.CTkFont(size=11),
+            text_color="#8a8a8a",
+            checkbox_width=15,
+            checkbox_height=15,
+        )
+        self._preview_cb.pack(side="right", padx=(8, 0))
+
+        ctk.CTkFrame(body, fg_color="transparent", height=10).pack(fill="x")
+
+        # Tile / GPU / paths + model list — hidden until Advanced.
+        self._advanced_block = ctk.CTkFrame(body, fg_color="transparent")
 
         row_t = ctk.CTkFrame(self._advanced_block, fg_color="transparent")
         row_t.pack(fill="x", pady=(2, 4))
@@ -578,39 +615,101 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             font=ctk.CTkFont(size=11),
         ).pack(side="left", padx=(8, 0))
 
-        self._engine_block = ctk.CTkFrame(self._advanced_block, fg_color="transparent")
-        self._engine_block.pack(fill="x", pady=(8, 0))
-        self._status_box = ctk.CTkFrame(
-            self._engine_block,
-            fg_color=_STATUS_BG,
+        ctk.CTkLabel(
+            self._advanced_block,
+            text="Model",
+            text_color="#00bfff",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(10, 2))
+
+        row_filter = ctk.CTkFrame(self._advanced_block, fg_color="transparent")
+        row_filter.pack(fill="x", pady=(2, 2))
+        self._filter_row = row_filter
+        ctk.CTkLabel(row_filter, text="Filter:", width=110, anchor="w").pack(side="left")
+        self._filter_entry = ctk.CTkEntry(
+            row_filter,
+            textvariable=self.filter_var,
+            height=28,
+            placeholder_text="name contains… (e.g. PurePhoto, SPAN, Nomos, 4x)",
+        )
+        self._filter_entry.pack(side="left", fill="x", expand=True)
+        self._sort_menu = ctk.CTkOptionMenu(
+            row_filter,
+            variable=self.sort_mode_var,
+            values=list(_SORT_LABELS),
+            height=28,
+            width=110,
+            corner_radius=14,
+            fg_color=("gray75", "#2a2a2a"),
+            button_color=("gray65", "#333333"),
+            button_hover_color=("gray55", "#3a3a3a"),
+            dropdown_fg_color=("gray80", "#2a2a2a"),
+            command=lambda _v: self._on_sort_change(),
+        )
+        self._sort_menu.pack(side="left", padx=(8, 0))
+        ctk.CTkLabel(
+            row_filter,
+            textvariable=self._count_var,
+            width=56,
+            anchor="e",
+            text_color="#888",
+            font=ctk.CTkFont(size=11),
+        ).pack(side="left", padx=(8, 0))
+
+        # Fixed-height list — do not expand or it pushes Output/Start off-screen.
+        list_wrap = ctk.CTkFrame(
+            self._advanced_block,
+            fg_color=("gray90", "#1a1a1a"),
             corner_radius=6,
             border_width=1,
-            border_color=("gray70", "#1a1a1a"),
+            border_color=("gray70", "#333"),
+            height=168,
         )
-        self._status_box.pack(fill="x")
+        list_wrap.pack(fill="x", pady=(2, 4))
+        list_wrap.pack_propagate(False)
+        self._list_wrap = list_wrap
+        self._listbox = tk.Listbox(
+            list_wrap,
+            activestyle="dotbox",
+            exportselection=False,
+            highlightthickness=0,
+            borderwidth=0,
+            font=("Segoe UI", 10),
+            bg="#1a1a1a",
+            fg="#e0e0e0",
+            selectbackground="#1f6aa5",
+            selectforeground="#ffffff",
+            selectmode="multiple",
+            height=8,
+        )
+        scroll = tk.Scrollbar(list_wrap, orient="vertical", command=self._listbox.yview)
+        self._listbox.configure(yscrollcommand=scroll.set)
+        self._listbox.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
+        scroll.pack(side="right", fill="y", padx=(0, 4), pady=6)
+        # Custom A/B slots (not free multi-select).
+        self._listbox.bind("<Button-1>", self._on_list_lmb)
+        self._listbox.bind("<Control-Button-1>", self._on_list_ctrl)
+        self._listbox.bind("<Double-Button-1>", self._on_list_double)
+        self._listbox.bind("<Button-3>", self._on_list_rmb)
+        # Block default selection so Ctrl/LMB handlers own A/B.
+        self._listbox.bind("<<ListboxSelect>>", lambda _e: "break")
+
+        hint_row = ctk.CTkFrame(self._advanced_block, fg_color="transparent")
+        hint_row.pack(fill="x", pady=(0, 2))
         ctk.CTkLabel(
-            self._status_box,
-            textvariable=self.status_var,
-            wraplength=_DIALOG_W - 60,
-            justify="left",
-            text_color="#b0b0b0",
-            anchor="w",
+            hint_row,
+            text="LMB = one model · Ctrl+LMB = add / remove · RMB = rate",
+            text_color="#666",
             font=ctk.CTkFont(size=11),
-        ).pack(fill="x", padx=10, pady=8)
-        self._folder_label = ctk.CTkLabel(
-            self._engine_block,
-            textvariable=self.models_dir_var,
-            wraplength=_DIALOG_W - 40,
-            justify="left",
-            text_color="#8ab4c8",
             anchor="w",
-            font=ctk.CTkFont(size=11),
-        )
-        self._folder_label.pack(fill="x", pady=(4, 0))
+        ).pack(side="left")
+
+        # Install / Pick folder / Refresh — Advanced when healthy, alert when not.
         self._engine_tools_host = ctk.CTkFrame(
-            self._engine_block, fg_color="transparent"
+            self._advanced_block, fg_color="transparent"
         )
-        self._engine_tools_host.pack(fill="x", pady=(6, 0))
+        self._engine_tools_host.pack(fill="x", pady=(8, 0))
         self._tools.pack(in_=self._engine_tools_host, fill="x")
 
         # Document flow (not side=bottom) — no empty gap above actions.
@@ -635,6 +734,7 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         self.out_dir_var.trace_add("write", lambda *_: self._refresh_job_summary())
         self._rebuild_preset_menu()
         self._on_factor_change(apply_filter=False)
+        self._on_format_change(self.format_var.get())
         self._on_tiling_toggle()
         want_advanced = bool(
             getattr(self.controller, "spandrel_advanced_open", False)
@@ -747,7 +847,7 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         self._set_advanced_open(not self._advanced_open)
 
     def _set_advanced_open(self, open_: bool, *, refit: bool = True) -> None:
-        """Show max tile, GPU, output folder and suffix. Remember the choice."""
+        """Show tile/GPU/paths + model list. Remember the choice."""
         self._advanced_open = bool(open_)
         if self._advanced_open:
             if not self._advanced_block.winfo_ismapped():
@@ -777,24 +877,51 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             scale_txt = mode
         else:
             scale_txt = "Model"
-        fmt = self.format_var.get() or "PNG"
+        fmt = self.format_var.get() or "JPEG"
+        if fmt in ("JPEG", "WebP"):
+            try:
+                q = int(self.compress_var.get())
+            except Exception:
+                q = (
+                    self._jpeg_quality
+                    if fmt == "JPEG"
+                    else self._webp_quality
+                )
+            fmt_txt = f"{fmt} q{q}"
+        elif fmt == "PNG":
+            try:
+                c = int(self.compress_var.get())
+            except Exception:
+                c = self._png_compress
+            fmt_txt = f"PNG c{c}"
+        else:
+            fmt_txt = fmt
         cap = (self.tile_var.get() or "Auto").strip()
         tile_txt = "auto tile" if cap == "Auto" else f"max tile {cap}"
         folder = _short_folder(self.out_dir_var.get())
-        var.set(f"{scale_txt}  ·  {fmt}  ·  {tile_txt}  ·  {folder}")
+        var.set(f"{scale_txt}  ·  {fmt_txt}  ·  {tile_txt}  ·  {folder}")
 
     def _rebuild_preset_menu(self, *, prefer_name: str | None = None) -> None:
         labels = [_PRESET_CURRENT]
         mapping: dict[str, str] = {}
-        used = {_PRESET_CURRENT}
-        for preset in self._favorites:
-            label = preset_menu_label(preset)
-            name = str(preset.get("name") or "")
-            if label in used:
-                label = f"{label}  ({name})"
-            used.add(label)
-            mapping[label] = name
-            labels.append(label)
+        used = {_PRESET_CURRENT, _PRESET_SEP}
+        built = [p for p in self._favorites if is_builtin_preset(p)]
+        users = [p for p in self._favorites if not is_builtin_preset(p)]
+
+        def _append(presets: list) -> None:
+            for preset in presets:
+                label = preset_menu_label(preset)
+                name = str(preset.get("name") or "")
+                if label in used:
+                    label = f"{label}  ({name})"
+                used.add(label)
+                mapping[label] = name
+                labels.append(label)
+
+        _append(built)
+        if built and users:
+            labels.append(_PRESET_SEP)
+        _append(users)
         self._preset_label_to_name = mapping
         try:
             self._preset_menu.configure(values=labels)
@@ -807,7 +934,7 @@ class FastUpscaleDialog(ctk.CTkToplevel):
                     break
             else:
                 self.preset_var.set(_PRESET_CURRENT)
-        elif self.preset_var.get() not in labels:
+        elif self.preset_var.get() not in labels or self.preset_var.get() == _PRESET_SEP:
             self.preset_var.set(_PRESET_CURRENT)
         try:
             self._preset_manage_btn.configure(
@@ -905,14 +1032,18 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         except (TypeError, ValueError):
             custom = 3.0
         self.custom_scale_var.set(f"{custom:g}")
-        fmt = str(preset.get("output_format") or "png").strip().lower()
+        fmt = str(preset.get("output_format") or "jpg").strip().lower()
         if fmt == "jpeg":
             fmt = "jpg"
-        self.format_var.set(_EXT_TO_FORMAT.get(fmt, "PNG"))
+        self.format_var.set(_EXT_TO_FORMAT.get(fmt, "JPEG"))
         self._on_factor_change(apply_filter=False)
+        self._on_format_change(self.format_var.get())
 
     def _on_preset_picked(self, label: str) -> None:
         if label == _PRESET_CURRENT:
+            self._sync_preset_choice()
+            return
+        if label == _PRESET_SEP:
             self._sync_preset_choice()
             return
         name = self._preset_label_to_name.get(label or "")
@@ -995,7 +1126,7 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         if not self._favorites:
             messagebox.showinfo(
                 "Favorite preset",
-                "No presets yet.\n\nSave… stores the current model, scale, and format.",
+                "No presets yet.\n\nSave… → Save preset stores the current model, scale, and format.",
                 parent=self,
             )
             return
@@ -1024,7 +1155,7 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         ).pack(fill="x", padx=16, pady=(14, 2))
         ctk.CTkLabel(
             win,
-            text="Select one and remove it. The model file stays on disk.",
+            text="User presets can be removed. Built-ins stay. Model files stay on disk.",
             text_color="#888",
             font=ctk.CTkFont(size=11),
             anchor="w",
@@ -1121,15 +1252,29 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             return
         lb.delete(0, tk.END)
         names: list[str] = []
-        for preset in self._favorites:
+        built = [p for p in self._favorites if is_builtin_preset(p)]
+        users = [p for p in self._favorites if not is_builtin_preset(p)]
+        for preset in built:
+            pname = str(preset.get("name") or "").strip()
+            if not pname:
+                continue
+            lb.insert(tk.END, f"{preset_menu_label(preset)}  [built-in]")
+            names.append(pname)
+        if built and users:
+            lb.insert(tk.END, _PRESET_SEP)
+            names.append("")
+        for preset in users:
             pname = str(preset.get("name") or "").strip()
             if not pname:
                 continue
             lb.insert(tk.END, preset_menu_label(preset))
             names.append(pname)
         self._manage_names = names
-        if names:
-            lb.selection_set(0)
+        if any(names):
+            for i, n in enumerate(names):
+                if n:
+                    lb.selection_set(i)
+                    break
         else:
             self._close_manage_window()
 
@@ -1147,7 +1292,10 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         idx = int(sel[0])
         if idx < 0 or idx >= len(self._manage_names):
             return
-        if self._remove_favorite_preset(self._manage_names[idx], parent=win):
+        name = self._manage_names[idx]
+        if not name:
+            return
+        if self._remove_favorite_preset(name, parent=win):
             self._fill_manage_list()
 
     def _close_manage_window(self) -> None:
@@ -1176,6 +1324,13 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         if not name:
             return False
         preset = find_preset(self._favorites, name)
+        if is_builtin_preset(preset):
+            messagebox.showinfo(
+                "Favorite preset",
+                "Built-in presets cannot be removed.",
+                parent=parent or self,
+            )
+            return False
         label = preset_menu_label(preset) if preset else name
         if not messagebox.askyesno(
             "Favorite preset",
@@ -1184,11 +1339,7 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         ):
             return False
         self._favorites = remove_preset(self._favorites, name)
-        if self.controller is not None:
-            try:
-                setattr(self.controller, "spandrel_favorite_presets", list(self._favorites))
-            except Exception:
-                pass
+        self._persist_favorites()
         self._rebuild_preset_menu()
         self._sync_preset_choice()
         return True
@@ -1392,6 +1543,7 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             self._browse_btn,
             self._suffix_entry,
             self._format_menu,
+            self._compress_slider,
             self._preset_menu,
             self._preset_save_btn,
             self._preset_manage_btn,
@@ -1630,6 +1782,189 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             except Exception:
                 pass
 
+    def _on_compress_slide(self, _value=None) -> None:
+        fmt = self.format_var.get() or "JPEG"
+        try:
+            val = int(round(float(self.compress_var.get())))
+        except Exception:
+            return
+        if fmt == "JPEG":
+            self._jpeg_quality = max(1, min(100, val))
+            self._compress_value.configure(text=str(self._jpeg_quality))
+        elif fmt == "WebP":
+            self._webp_quality = max(1, min(100, val))
+            self._compress_value.configure(text=str(self._webp_quality))
+        elif fmt == "PNG":
+            self._png_compress = max(0, min(9, val))
+            self._compress_value.configure(text=str(self._png_compress))
+        self._refresh_job_summary()
+
+    def _set_compress_controls_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for w in (self._compress_label, self._compress_slider, self._compress_value):
+            try:
+                w.configure(state=state)
+            except Exception:
+                pass
+        try:
+            self._compress_label.configure(text_color="#888" if enabled else "#555")
+            self._compress_value.configure(text_color="#888" if enabled else "#555")
+        except Exception:
+            pass
+
+    def _on_format_change(self, value: str | None = None) -> None:
+        fmt = (value or self.format_var.get() or "JPEG").strip()
+        if fmt == "JPEG":
+            self._compress_label.configure(text="Quality")
+            self._compress_slider.configure(from_=1, to=100, number_of_steps=99)
+            self.compress_var.set(self._jpeg_quality)
+            self._compress_value.configure(text=str(self._jpeg_quality))
+            self._set_compress_controls_enabled(True)
+        elif fmt == "WebP":
+            self._compress_label.configure(text="Quality")
+            self._compress_slider.configure(from_=1, to=100, number_of_steps=99)
+            self.compress_var.set(self._webp_quality)
+            self._compress_value.configure(text=str(self._webp_quality))
+            self._set_compress_controls_enabled(True)
+        elif fmt == "PNG":
+            self._compress_label.configure(text="Compress")
+            self._compress_slider.configure(from_=0, to=9, number_of_steps=9)
+            self.compress_var.set(self._png_compress)
+            self._compress_value.configure(text=str(self._png_compress))
+            self._set_compress_controls_enabled(True)
+        else:
+            self._compress_label.configure(text="Compress")
+            self._compress_value.configure(text="—")
+            self._set_compress_controls_enabled(False)
+        self._sync_preset_choice()
+        self._refresh_job_summary()
+
+    def _popup_save_menu(self) -> None:
+        """Save… → Save preset… / Save as default (keeps one affordance)."""
+        try:
+            if self._save_menu is not None:
+                self._save_menu.destroy()
+        except Exception:
+            pass
+        menu = tk.Menu(self, tearoff=0)
+        self._save_menu = menu
+        menu.add_command(label="Save preset…", command=self._save_favorite_preset)
+        menu.add_command(label="Save as default", command=self._save_as_default)
+        try:
+            self.update_idletasks()
+            x = self._preset_save_btn.winfo_rootx()
+            y = self._preset_save_btn.winfo_rooty() + self._preset_save_btn.winfo_height()
+            menu.tk_popup(x, y)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
+
+    def _flash_job_summary(self, text: str, ms: int = 1800) -> None:
+        var = getattr(self, "_job_summary_var", None)
+        if var is None:
+            return
+        var.set(text)
+        self._summary_flash_token = int(getattr(self, "_summary_flash_token", 0) or 0) + 1
+        token = self._summary_flash_token
+
+        def _restore() -> None:
+            if getattr(self, "_summary_flash_token", 0) == token:
+                self._refresh_job_summary()
+
+        try:
+            self.after(ms, _restore)
+        except Exception:
+            self._refresh_job_summary()
+
+    def _persist_form_defaults(self, *, model: str | None = None) -> None:
+        """Write current form into controller attrs (next open + prefs dump)."""
+        if self.controller is None:
+            return
+        mode = self.factor_var.get() or "Model"
+        target = self._target_scale()
+        tile_cap = _max_tile_cap(self.tile_var.get())
+        fmt_label = self.format_var.get()
+        out_fmt = _FORMAT_TO_EXT.get(fmt_label, "jpg")
+        gpu_label = self.gpu_var.get()
+        cuda = self._gpu_indices.get(gpu_label, "0")
+        models_dir = self._models_dir()
+        chosen = (model if model is not None else self._start_model() or "").strip()
+        if chosen.startswith("("):
+            chosen = ""
+        # Sync slider → cached values before write.
+        self._on_compress_slide()
+        try:
+            setattr(self.controller, "fast_upscale_backend", "spandrel")
+            setattr(self.controller, "spandrel_models_dir", models_dir)
+            if chosen:
+                setattr(self.controller, "spandrel_model", chosen)
+            setattr(self.controller, "spandrel_advanced_open", bool(self._advanced_open))
+            setattr(self.controller, "spandrel_max_tile", tile_cap)
+            setattr(self.controller, "spandrel_cuda_device", cuda)
+            setattr(self.controller, "spandrel_scale_mode", mode)
+            setattr(self.controller, "spandrel_model_filter", self.filter_var.get())
+            setattr(self.controller, "spandrel_output_format", out_fmt)
+            lossy_q = (
+                self._webp_quality if out_fmt == "webp" else self._jpeg_quality
+            )
+            setattr(
+                self.controller,
+                "spandrel_output_quality",
+                max(1, min(100, int(lossy_q))),
+            )
+            setattr(
+                self.controller,
+                "spandrel_png_compress",
+                max(0, min(9, int(self._png_compress))),
+            )
+            setattr(self.controller, "spandrel_model_meta", dict(self._model_meta))
+            setattr(self.controller, "spandrel_favorite_presets", list(self._favorites))
+            setattr(
+                self.controller,
+                "spandrel_model_sort",
+                self.sort_mode_var.get() or _SORT_DEFAULT,
+            )
+            setattr(
+                self.controller,
+                "spandrel_show_preview",
+                bool(self.show_preview_var.get()),
+            )
+            if mode == "Custom" and target is not None:
+                setattr(self.controller, "spandrel_custom_scale", target)
+            else:
+                try:
+                    custom = float(self.custom_scale_var.get() or 3)
+                except Exception:
+                    custom = 3.0
+                setattr(self.controller, "spandrel_custom_scale", custom)
+            # Remember only an explicit user suffix; empty = always model name.
+            setattr(
+                self.controller,
+                "fast_upscale_suffix",
+                (self.suffix_var.get() or "").strip(),
+            )
+        except Exception:
+            pass
+
+    def _save_as_default(self) -> None:
+        """Pin the current form as the dialog's opening defaults (no job)."""
+        if self.controller is None:
+            messagebox.showinfo(
+                "Upscale",
+                "Defaults cannot be saved without an app session.",
+                parent=self,
+            )
+            return
+        self._persist_form_defaults()
+        try:
+            if hasattr(self.controller, "save_preferences"):
+                self.controller.save_preferences()
+        except Exception:
+            pass
+        self._flash_job_summary("Saved as default")
+
     def _save_favorite_preset(self) -> None:
         from tkinter import simpledialog
 
@@ -1655,6 +1990,13 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             return
         name = name.strip()
         if not name:
+            return
+        if is_builtin_name(name):
+            messagebox.showwarning(
+                "Favorite preset",
+                f"“{name}” is a built-in preset.\n\nChoose a different name.",
+                parent=self,
+            )
             return
         existing = {p.get("name") for p in self._favorites}
         if name in existing:
@@ -1685,6 +2027,12 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         self._persist_favorites()
         self._rebuild_preset_menu(prefer_name=name)
         self._sync_preset_choice()
+        try:
+            if self.controller is not None and hasattr(self.controller, "save_preferences"):
+                self.controller.save_preferences()
+        except Exception:
+            pass
+        self._flash_job_summary(f"Preset “{name}” saved")
 
     def _set_rating(self, model_key: str, rating: int) -> None:
         entry = dict(self._model_meta.get(model_key) or {})
@@ -1939,7 +2287,11 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             self._tools.pack(in_=self._engine_tools_host, fill="x")
             return
         if not self._alert_wrap.winfo_ismapped():
-            self._alert_wrap.pack(fill="x", pady=(0, 6), before=self._filter_row)
+            anchor = getattr(self, "_preset_row", None)
+            if anchor is not None:
+                self._alert_wrap.pack(fill="x", pady=(0, 6), before=anchor)
+            else:
+                self._alert_wrap.pack(fill="x", pady=(0, 6))
         self._tools.pack(in_=self._alert_wrap, fill="x", pady=(6, 0))
 
     def _start(self) -> None:
@@ -1952,7 +2304,7 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         out_dir = (self.out_dir_var.get() or "").strip()
         if not out_dir or not os.path.isdir(out_dir):
             messagebox.showwarning(
-                "Fast Upscale",
+                "Upscale",
                 "Choose a valid output folder.",
                 parent=self,
             )
@@ -1962,7 +2314,7 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         if not rt.get("ready") and not rt.get("cpu_fallback"):
             if rt.get("error") == "spandrel_missing":
                 if messagebox.askyesno(
-                    "Fast Upscale",
+                    "Upscale",
                     (
                         "Python package 'spandrel' is not installed.\n\n"
                         "Install it now into the app environment?"
@@ -1972,7 +2324,7 @@ class FastUpscaleDialog(ctk.CTkToplevel):
                     self._install_spandrel()
                 return
             messagebox.showwarning(
-                "Fast Upscale",
+                "Upscale",
                 rt.get("message") or "Spandrel / PyTorch runtime is not ready.",
                 parent=self,
             )
@@ -1981,7 +2333,7 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         model = self._start_model()
         if not model or model.startswith("("):
             messagebox.showwarning(
-                "Fast Upscale",
+                "Upscale",
                 "Select a model from the list (use Filter if the folder is large).",
                 parent=self,
             )
@@ -1991,7 +2343,7 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         target = self._target_scale()
         if mode == "Custom" and target is None:
             messagebox.showwarning(
-                "Fast Upscale",
+                "Upscale",
                 "Enter a valid custom scale (e.g. 3 or 1.5).",
                 parent=self,
             )
@@ -2003,7 +2355,8 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         models_dir = self._models_dir()
         tile_cap = _max_tile_cap(self.tile_var.get())
         fmt_label = self.format_var.get()
-        out_fmt = _FORMAT_TO_EXT.get(fmt_label, "png")
+        out_fmt = _FORMAT_TO_EXT.get(fmt_label, "jpg")
+        self._on_compress_slide()
         options = {
             "backend_id": "spandrel",
             "output_dir": out_dir,
@@ -2017,37 +2370,23 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             "target_scale": target,
             "suffix": suffix,
             "output_format": out_fmt,
+            "jpeg_quality": max(
+                1,
+                min(
+                    100,
+                    int(
+                        self._webp_quality
+                        if out_fmt == "webp"
+                        else self._jpeg_quality
+                    ),
+                ),
+            ),
+            "png_compress": max(0, min(9, int(self._png_compress))),
             "unload_after": True,
         }
 
-        if self.controller is not None:
-            try:
-                setattr(self.controller, "fast_upscale_backend", "spandrel")
-                setattr(self.controller, "spandrel_models_dir", models_dir)
-                setattr(self.controller, "spandrel_model", options["model"])
-                setattr(self.controller, "spandrel_advanced_open", bool(self._advanced_open))
-                setattr(self.controller, "spandrel_max_tile", tile_cap)
-                setattr(self.controller, "spandrel_cuda_device", options["cuda_device"])
-                setattr(self.controller, "spandrel_scale_mode", mode)
-                setattr(self.controller, "spandrel_model_filter", self.filter_var.get())
-                setattr(self.controller, "spandrel_output_format", out_fmt)
-                setattr(self.controller, "spandrel_model_meta", dict(self._model_meta))
-                setattr(self.controller, "spandrel_favorite_presets", list(self._favorites))
-                setattr(
-                    self.controller,
-                    "spandrel_model_sort",
-                    self.sort_mode_var.get() or _SORT_DEFAULT,
-                )
-                if mode == "Custom" and target is not None:
-                    setattr(self.controller, "spandrel_custom_scale", target)
-                # Remember only an explicit user suffix; empty = always model name.
-                setattr(
-                    self.controller,
-                    "fast_upscale_suffix",
-                    (self.suffix_var.get() or "").strip(),
-                )
-            except Exception:
-                pass
+        # Last run becomes the next opening defaults (same path as Save as default).
+        self._persist_form_defaults(model=options["model"])
 
         self.result = {"paths": list(self.paths), "options": options}
         if callable(self.on_confirm):

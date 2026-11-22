@@ -2,8 +2,9 @@
 Batch Convert / Rename dialog for selected thumbnail images.
 
 Inspired by FastStone batch convert, simplified: operates on the current
-selection (no internal file browser). Advanced options use a Preferences-style
-left-nav window (Rotate / Flip, Crop, Resize, Canvas).
+selection (no internal file browser). Layout uses Convert Video-style section
+cards (Output / Destination / Rename / AI / Options). Advanced options use a
+Preferences-style left-nav window (Rotate / Flip, Crop, Resize, Canvas).
 """
 
 from __future__ import annotations
@@ -25,6 +26,10 @@ from image_resize_dialog import (
     compute_resize_size,
     prepare_image_for_save,
 )
+from video_encode_settings import make_section
+
+# ~30% wider than the old shrink-wrapped layout (~420px).
+_BATCH_DIALOG_W = 546
 
 # Keep in sync with image_resize_dialog unit labels.
 _UNIT_PIXELS = "Pixels (px)"
@@ -108,14 +113,63 @@ def build_output_path(
     output_dir: Optional[str],
     rename_enabled: bool,
     rename_pattern: str,
+    name_suffix: str = "",
 ) -> str:
-    """Resolve destination path for one source file."""
+    """Resolve destination path for one source file.
+
+    ``name_suffix`` is appended to the stem (e.g. ``_4xNomos…`` for upscale).
+    """
     stem = os.path.splitext(os.path.basename(src_path))[0]
     if rename_enabled:
         stem = apply_rename_pattern(rename_pattern, stem=stem, index=index)
         stem = re.sub(r'[<>:"/\\|?*]', "_", stem).strip(" .") or "image"
+    extra = (name_suffix or "").strip()
+    if extra:
+        if not extra.startswith(("_", "-", ".")):
+            extra = f"_{extra}"
+        # Keep Windows-safe; strip trailing dots/spaces after append.
+        extra = re.sub(r'[<>:"/\\|?*]', "_", extra)
+        stem = f"{stem}{extra}".strip(" .") or "image"
     directory = output_dir if output_dir else os.path.dirname(src_path)
     return os.path.join(directory, f"{stem}{out_ext}")
+
+
+def upscale_name_suffix_for_job(
+    *,
+    fast_upscale: bool = False,
+    spandrel_options: Optional[dict[str, Any]] = None,
+    seedvr_upscale: bool = False,
+    seedvr_options: Optional[dict[str, Any]] = None,
+    topaz_upscale: bool = False,
+    topaz_options: Optional[dict[str, Any]] = None,
+) -> str:
+    """Model-stem suffix for batch AI upscale (same idea as Fast Upscale)."""
+    if fast_upscale:
+        from spandrel_favorites import model_stem_suffix
+
+        opts = spandrel_options or {}
+        custom = str(opts.get("suffix") or "").strip()
+        if custom:
+            return custom if custom.startswith("_") else f"_{custom}"
+        return model_stem_suffix(opts.get("model"))
+    if topaz_upscale:
+        from topaz_favorites import model_stem_suffix as topaz_stem_suffix
+
+        opts = topaz_options or {}
+        custom = str(opts.get("suffix") or "").strip()
+        if custom:
+            return custom if custom.startswith("_") else f"_{custom}"
+        return topaz_stem_suffix(opts.get("model"))
+    if seedvr_upscale:
+        opts = seedvr_options or {}
+        custom = str(opts.get("suffix") or "").strip()
+        if custom:
+            return custom if custom.startswith("_") else f"_{custom}"
+        # SeedVR settings don't store a free-text suffix; use DiT model stem.
+        from spandrel_favorites import model_stem_suffix
+
+        return model_stem_suffix(opts.get("dit_model") or "seedvr2")
+    return ""
 
 
 def _rotate_frame(im: PILImage.Image, op: Optional[str]) -> PILImage.Image:
@@ -1520,6 +1574,35 @@ class BatchProcessDialog(ctk.CTkToplevel):
             )
         except Exception:
             self._birefnet_options = {}
+        try:
+            from spandrel_config import spandrel_options_from_controller
+
+            self._spandrel_options: dict[str, Any] = spandrel_options_from_controller(
+                parent
+            )
+        except Exception:
+            self._spandrel_options = {}
+        try:
+            from seedvr2_config import seedvr2_options_from_settings
+
+            self._seedvr_options: dict[str, Any] = seedvr2_options_from_settings()
+        except Exception:
+            self._seedvr_options = {}
+        self._topaz_available = False
+        try:
+            from topaz_config import (
+                runtime_status as topaz_runtime_status,
+                topaz_options_from_controller,
+            )
+
+            self._topaz_available = bool(topaz_runtime_status().get("ready"))
+            self._topaz_options: dict[str, Any] = (
+                topaz_options_from_controller(parent)
+                if self._topaz_available
+                else {}
+            )
+        except Exception:
+            self._topaz_options = {}
 
         try:
             self.transient(parent.winfo_toplevel())
@@ -1527,19 +1610,22 @@ class BatchProcessDialog(ctk.CTkToplevel):
             pass
 
         n = len(self._paths)
-        pad = {"padx": 16, "pady": 6}
+        section_pad = {"padx": 12, "pady": (4, 0)}
 
         ctk.CTkLabel(
             self,
             text=f"{n} image{'s' if n != 1 else ''} selected",
             font=ctk.CTkFont(size=14, weight="bold"),
             anchor="w",
-        ).pack(fill="x", padx=16, pady=(16, 4))
+        ).pack(fill="x", padx=16, pady=(12, 2))
 
-        # --- Output format ---
-        fmt_row = ctk.CTkFrame(self, fg_color="transparent")
-        fmt_row.pack(fill="x", **pad)
-        ctk.CTkLabel(fmt_row, text="Format:", width=100, anchor="w").pack(side="left")
+        # --- Output (format + quality) ---
+        out_card, out_body = make_section(self, "Output")
+        out_card.pack(fill="x", **section_pad)
+
+        fmt_row = ctk.CTkFrame(out_body, fg_color="transparent")
+        fmt_row.pack(fill="x", pady=(0, 4))
+        ctk.CTkLabel(fmt_row, text="Format:", width=90, anchor="w").pack(side="left")
         self._format_var = tk.StringVar(value="JPG")
         ctk.CTkOptionMenu(
             fmt_row,
@@ -1551,11 +1637,10 @@ class BatchProcessDialog(ctk.CTkToplevel):
             corner_radius=6,
         ).pack(side="left", padx=(8, 0))
 
-        # Quality (JPG/WebP) or PNG compress_level — label/range switch with format.
-        q_row = ctk.CTkFrame(self, fg_color="transparent")
-        q_row.pack(fill="x", **pad)
+        q_row = ctk.CTkFrame(out_body, fg_color="transparent")
+        q_row.pack(fill="x")
         self._compress_label = ctk.CTkLabel(
-            q_row, text="Quality:", width=100, anchor="w"
+            q_row, text="Quality:", width=90, anchor="w"
         )
         self._compress_label.pack(side="left")
         self._compress_var = tk.IntVar(value=90)
@@ -1565,105 +1650,104 @@ class BatchProcessDialog(ctk.CTkToplevel):
             to=100,
             number_of_steps=99,
             variable=self._compress_var,
-            width=180,
+            width=200,
             command=self._on_compress_slide,
         )
         self._compress_slider.pack(side="left", padx=(8, 8))
         self._compress_value = ctk.CTkLabel(q_row, text="90", width=36)
         self._compress_value.pack(side="left")
         self._compress_hint = ctk.CTkLabel(
-            self,
+            out_body,
             text="",
             font=ctk.CTkFont(size=11),
             text_color=("gray40", "gray65"),
             anchor="w",
         )
-        self._compress_hint.pack(fill="x", padx=16, pady=(0, 2))
+        self._compress_hint.pack(fill="x", pady=(4, 0))
 
-        # --- Output directory ---
-        out_frame = ctk.CTkFrame(self, fg_color="transparent")
-        out_frame.pack(fill="x", **pad)
-        ctk.CTkLabel(out_frame, text="Output:", width=100, anchor="w").pack(side="left")
+        # --- Destination ---
+        dest_card, dest_body = make_section(self, "Destination")
+        dest_card.pack(fill="x", **section_pad)
 
         self._out_mode = tk.StringVar(value="source")
-        mode_col = ctk.CTkFrame(out_frame, fg_color="transparent")
-        mode_col.pack(side="left", fill="x", expand=True, padx=(8, 0))
-
         ctk.CTkRadioButton(
-            mode_col,
+            dest_body,
             text="Same folder as source",
             variable=self._out_mode,
             value="source",
             command=self._on_out_mode_change,
         ).pack(anchor="w")
         ctk.CTkRadioButton(
-            mode_col,
+            dest_body,
             text="Choose folder:",
             variable=self._out_mode,
             value="custom",
             command=self._on_out_mode_change,
         ).pack(anchor="w", pady=(4, 0))
 
-        dir_row = ctk.CTkFrame(self, fg_color="transparent")
-        dir_row.pack(fill="x", padx=16, pady=(0, 6))
+        dir_row = ctk.CTkFrame(dest_body, fg_color="transparent")
+        dir_row.pack(fill="x", pady=(4, 0))
         first_dir = os.path.dirname(self._paths[0]) if self._paths else ""
         self._outdir_var = tk.StringVar(value=first_dir)
         self._outdir_entry = ctk.CTkEntry(
-            dir_row, textvariable=self._outdir_var, width=320, height=28, corner_radius=6
+            dir_row, textvariable=self._outdir_var, height=28, corner_radius=6
         )
-        self._outdir_entry.pack(side="left", fill="x", expand=True, padx=(108, 6))
+        self._outdir_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
         self._browse_btn = ctk.CTkButton(
             dir_row, text="…", width=36, height=28, command=self._browse_outdir
         )
         self._browse_btn.pack(side="left")
 
         # --- Rename ---
-        ren_row = ctk.CTkFrame(self, fg_color="transparent")
-        ren_row.pack(fill="x", **pad)
+        ren_card, ren_body = make_section(self, "Rename")
+        ren_card.pack(fill="x", **section_pad)
+
         self._rename_var = tk.BooleanVar(value=False)
         ctk.CTkCheckBox(
-            ren_row,
+            ren_body,
             text="Rename files",
             variable=self._rename_var,
             command=self._on_rename_toggle,
-        ).pack(side="left")
+        ).pack(anchor="w")
 
-        pat_row = ctk.CTkFrame(self, fg_color="transparent")
-        pat_row.pack(fill="x", padx=16, pady=(0, 2))
-        ctk.CTkLabel(pat_row, text="Pattern:", width=100, anchor="w").pack(side="left")
+        pat_row = ctk.CTkFrame(ren_body, fg_color="transparent")
+        pat_row.pack(fill="x", pady=(6, 0))
+        ctk.CTkLabel(pat_row, text="Pattern:", width=90, anchor="w").pack(side="left")
         self._pattern_var = tk.StringVar(value="image_###")
         self._pattern_entry = ctk.CTkEntry(
-            pat_row, textvariable=self._pattern_var, width=220, height=28, corner_radius=6
+            pat_row, textvariable=self._pattern_var, height=28, corner_radius=6
         )
-        self._pattern_entry.pack(side="left", padx=(8, 0))
+        self._pattern_entry.pack(side="left", fill="x", expand=True, padx=(8, 0))
         self._pattern_entry.bind("<KeyRelease>", lambda _e: self._update_rename_preview())
 
         self._preview_label = ctk.CTkLabel(
-            self,
+            ren_body,
             text="",
             font=ctk.CTkFont(size=11),
             text_color=("gray40", "gray65"),
             anchor="w",
-            wraplength=420,
+            wraplength=500,
             justify="left",
         )
-        self._preview_label.pack(fill="x", padx=16, pady=(0, 4))
-
+        self._preview_label.pack(fill="x", pady=(4, 0))
         ctk.CTkLabel(
-            self,
+            ren_body,
             text="Tokens: {name} = original stem, ### = padded counter (001, 002…)",
             font=ctk.CTkFont(size=11),
             text_color=("gray40", "gray65"),
             anchor="w",
-        ).pack(fill="x", padx=16, pady=(0, 4))
+        ).pack(fill="x", pady=(2, 0))
 
-        # --- Options (FastStone-style) ---
-        bg_row = ctk.CTkFrame(self, fg_color="transparent")
-        bg_row.pack(fill="x", padx=16, pady=(4, 2))
+        # --- AI processing ---
+        ai_card, ai_body = make_section(self, "AI")
+        ai_card.pack(fill="x", **section_pad)
+
+        bg_row = ctk.CTkFrame(ai_body, fg_color="transparent")
+        bg_row.pack(fill="x")
         self._remove_bg_var = tk.BooleanVar(value=False)
         ctk.CTkCheckBox(
             bg_row,
-            text="Remove background (BiRefNet → PNG with alpha)",
+            text="Remove background (BiRefNet → PNG)",
             variable=self._remove_bg_var,
             command=self._on_remove_bg_toggle,
         ).pack(side="left")
@@ -1677,25 +1761,79 @@ class BatchProcessDialog(ctk.CTkToplevel):
         self._remove_bg_settings_btn.pack(side="left", padx=(8, 0))
 
         self._remove_bg_summary = ctk.CTkLabel(
-            self,
+            ai_body,
             text="",
             font=ctk.CTkFont(size=11),
             text_color=("gray40", "gray65"),
             anchor="w",
-            wraplength=420,
+            wraplength=500,
             justify="left",
         )
-        self._remove_bg_summary.pack(fill="x", padx=16, pady=(0, 2))
+        self._remove_bg_summary.pack(fill="x", pady=(2, 0))
+
+        # Either / or — never both (would stack upscales).
+        self._upscale_mode_var = tk.StringVar(value="off")
+        ctk.CTkLabel(
+            ai_body,
+            text="Upscale (pick one):",
+            anchor="w",
+        ).pack(fill="x", pady=(8, 2))
+        up_row = ctk.CTkFrame(ai_body, fg_color="transparent")
+        up_row.pack(fill="x")
+        ctk.CTkRadioButton(
+            up_row,
+            text="Off",
+            variable=self._upscale_mode_var,
+            value="off",
+            command=self._on_upscale_mode_change,
+        ).pack(side="left")
+        ctk.CTkRadioButton(
+            up_row,
+            text="Fast (Spandrel)",
+            variable=self._upscale_mode_var,
+            value="spandrel",
+            command=self._on_upscale_mode_change,
+        ).pack(side="left", padx=(12, 0))
+        ctk.CTkRadioButton(
+            up_row,
+            text="SeedVR 2",
+            variable=self._upscale_mode_var,
+            value="seedvr",
+            command=self._on_upscale_mode_change,
+        ).pack(side="left", padx=(12, 0))
+        if self._topaz_available:
+            ctk.CTkRadioButton(
+                up_row,
+                text="Photo AI",
+                variable=self._upscale_mode_var,
+                value="topaz",
+                command=self._on_upscale_mode_change,
+            ).pack(side="left", padx=(12, 0))
+
+        self._upscale_summary = ctk.CTkLabel(
+            ai_body,
+            text="",
+            font=ctk.CTkFont(size=11),
+            text_color=("gray40", "gray65"),
+            anchor="w",
+            wraplength=500,
+            justify="left",
+        )
+        self._upscale_summary.pack(fill="x", pady=(2, 0))
+
+        # --- Options ---
+        opt_card, opt_body = make_section(self, "Options")
+        opt_card.pack(fill="x", **section_pad)
 
         self._ask_overwrite_var = tk.BooleanVar(value=True)
         ctk.CTkCheckBox(
-            self,
+            opt_body,
             text="Ask before overwrite",
             variable=self._ask_overwrite_var,
-        ).pack(anchor="w", padx=16, pady=(6, 2))
+        ).pack(anchor="w")
 
-        adv_row = ctk.CTkFrame(self, fg_color="transparent")
-        adv_row.pack(fill="x", padx=16, pady=(4, 2))
+        adv_row = ctk.CTkFrame(opt_body, fg_color="transparent")
+        adv_row.pack(fill="x", pady=(6, 0))
         ctk.CTkCheckBox(
             adv_row,
             text="Use Advanced Options…",
@@ -1713,19 +1851,19 @@ class BatchProcessDialog(ctk.CTkToplevel):
         self._adv_btn.pack(side="left", padx=(12, 0))
 
         self._adv_summary = ctk.CTkLabel(
-            self,
+            opt_body,
             text="",
             font=ctk.CTkFont(size=11),
             text_color=("gray40", "gray65"),
             anchor="w",
-            wraplength=420,
+            wraplength=500,
             justify="left",
         )
-        self._adv_summary.pack(fill="x", padx=16, pady=(0, 4))
+        self._adv_summary.pack(fill="x", pady=(4, 0))
 
         # --- Actions ---
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
-        btn_row.pack(fill="x", padx=16, pady=(12, 16))
+        btn_row.pack(fill="x", padx=16, pady=(8, 12))
         ctk.CTkButton(
             btn_row,
             text="Cancel",
@@ -1752,12 +1890,57 @@ class BatchProcessDialog(ctk.CTkToplevel):
         self._on_format_change(self._format_var.get())
         self._update_rename_preview()
         self._update_adv_summary()
+        self._update_upscale_summary()
 
-        self.update_idletasks()
-        _center_on_parent(self, parent)
+        self._fit_and_center(center=True)
         self.lift()
         self.focus_force()
         self.after(10, lambda: self.grab_set())
+        self.after_idle(lambda: self._fit_and_center(center=True))
+
+    def _fit_and_center(self, *, center: bool = True) -> None:
+        """Size tightly to content; optionally center on parent.
+
+        Same DPI fix as Fast Upscale: CTk ``geometry()`` wants *logical*
+        sizes, while ``winfo_reqheight`` is already scaled pixels.
+
+        Use ``center=False`` for in-dialog toggles so the window does not jump.
+        """
+        try:
+            self.update_idletasks()
+            req_h = int(self.winfo_reqheight() or 0)
+            screen_h = int(self.winfo_screenheight() or 900)
+            try:
+                scale = float(self._get_window_scaling() or 1.0)
+            except Exception:
+                scale = 1.0
+            if scale <= 0:
+                scale = 1.0
+            max_h_logical = max(240, int((screen_h - 80) / scale))
+            h_logical = min(
+                max_h_logical,
+                max(int((req_h + 8) / scale), 200),
+            )
+            if not center:
+                # Size only — keep current screen position.
+                self.geometry(f"{_BATCH_DIALOG_W}x{h_logical}")
+                return
+            self.geometry(f"{_BATCH_DIALOG_W}x{h_logical}")
+            self.update_idletasks()
+            parent = self._parent
+            px = int(parent.winfo_rootx())
+            py = int(parent.winfo_rooty())
+            pw = int(parent.winfo_width())
+            ph = int(parent.winfo_height())
+            w = int(self.winfo_width())
+            hh = int(self.winfo_height())
+            x = px + max(0, (pw - w) // 2)
+            y = py + max(0, (ph - hh) // 2)
+            if y + hh > screen_h - 40:
+                y = max(20, screen_h - hh - 40)
+            self.geometry(f"{_BATCH_DIALOG_W}x{h_logical}+{x}+{y}")
+        except Exception:
+            pass
 
     def _set_compression_controls_enabled(self, enabled: bool):
         """Visually enable/disable quality+compression controls for the format."""
@@ -1863,6 +2046,7 @@ class BatchProcessDialog(ctk.CTkToplevel):
             self._on_format_change("PNG")
         self._update_rename_preview()
         self._update_remove_bg_summary()
+        self.after_idle(lambda: self._fit_and_center(center=False))
 
     def _update_remove_bg_summary(self):
         if not self._remove_bg_var.get():
@@ -1875,6 +2059,67 @@ class BatchProcessDialog(ctk.CTkToplevel):
         except Exception:
             text = ""
         self._remove_bg_summary.configure(text=text)
+
+    def _on_upscale_mode_change(self):
+        mode = self._upscale_mode_var.get()
+        if mode == "spandrel":
+            try:
+                from spandrel_config import spandrel_options_from_controller
+
+                self._spandrel_options = spandrel_options_from_controller(self._parent)
+            except Exception:
+                pass
+        elif mode == "seedvr":
+            try:
+                from seedvr2_config import seedvr2_options_from_settings
+
+                self._seedvr_options = seedvr2_options_from_settings()
+            except Exception:
+                pass
+        elif mode == "topaz":
+            try:
+                from topaz_config import topaz_options_from_controller
+
+                self._topaz_options = topaz_options_from_controller(self._parent)
+            except Exception:
+                pass
+        self._update_upscale_summary()
+        self.after_idle(lambda: self._fit_and_center(center=False))
+
+    def _update_upscale_summary(self):
+        mode = self._upscale_mode_var.get()
+        if mode == "spandrel":
+            try:
+                from spandrel_config import format_spandrel_summary
+
+                text = format_spandrel_summary(
+                    self._spandrel_options, include_format=False
+                )
+            except Exception:
+                text = ""
+            if text and not text.startswith("No default"):
+                text = f"Uses Upscale default · {text}"
+        elif mode == "seedvr":
+            try:
+                from seedvr2_config import format_seedvr2_summary
+
+                text = format_seedvr2_summary(self._seedvr_options)
+            except Exception:
+                text = ""
+            if text:
+                text = f"Uses SeedVR default · {text}"
+        elif mode == "topaz":
+            try:
+                from topaz_config import format_topaz_summary
+
+                text = format_topaz_summary(self._topaz_options)
+            except Exception:
+                text = ""
+            if text:
+                text = f"Uses Photo AI default · {text}"
+        else:
+            text = ""
+        self._upscale_summary.configure(text=text)
 
     def _open_birefnet_settings(self):
         if self._birefnet_settings_window is not None:
@@ -1923,6 +2168,7 @@ class BatchProcessDialog(ctk.CTkToplevel):
         enabled = self._use_advanced.get()
         self._adv_btn.configure(state="normal" if enabled else "disabled")
         self._update_adv_summary()
+        self.after_idle(lambda: self._fit_and_center(center=False))
 
     def _update_adv_summary(self):
         if not self._use_advanced.get():
@@ -2176,6 +2422,65 @@ class BatchProcessDialog(ctk.CTkToplevel):
             fmt = "PNG"
             out_ext = ".png"
 
+        upscale_mode = str(self._upscale_mode_var.get() or "off")
+        if upscale_mode == "topaz" and not self._topaz_available:
+            upscale_mode = "off"
+        fast_upscale = upscale_mode == "spandrel"
+        seedvr_upscale = upscale_mode == "seedvr"
+        topaz_upscale = upscale_mode == "topaz"
+
+        spandrel_options = None
+        if fast_upscale:
+            try:
+                from spandrel_config import spandrel_options_from_controller
+
+                self._spandrel_options = spandrel_options_from_controller(self._parent)
+            except Exception:
+                pass
+            spandrel_options = dict(self._spandrel_options or {})
+            model = str(spandrel_options.get("model") or "").strip()
+            if not model:
+                messagebox.showinfo(
+                    "Batch Convert",
+                    "Fast upscale needs a default model.\n\n"
+                    "Open Upscale…, pick a model, then Save as default.",
+                    parent=self,
+                )
+                return
+            # Batch owns destination filename + format; Spandrel only upscales pixels.
+            fmt_key = out_ext.lstrip(".").lower()
+            if fmt_key == "jpeg":
+                fmt_key = "jpg"
+            spandrel_options["output_format"] = fmt_key or "jpg"
+
+        seedvr_options = None
+        if seedvr_upscale:
+            try:
+                from seedvr2_config import seedvr2_options_from_settings
+
+                self._seedvr_options = seedvr2_options_from_settings()
+            except Exception:
+                pass
+            seedvr_options = dict(self._seedvr_options or {})
+
+        topaz_options = None
+        if topaz_upscale:
+            try:
+                from topaz_config import topaz_options_from_controller
+
+                self._topaz_options = topaz_options_from_controller(self._parent)
+            except Exception:
+                pass
+            topaz_options = dict(self._topaz_options or {})
+            fmt_key = out_ext.lstrip(".").lower()
+            if fmt_key == "jpeg":
+                fmt_key = "jpg"
+            # Topaz CLI: png/jpg/tiff/webp. BMP is re-encoded after upscale.
+            if fmt_key in ("png", "jpg", "tiff", "webp"):
+                topaz_options["output_format"] = fmt_key
+            else:
+                topaz_options["output_format"] = "png"
+
         # Persist current slider into the format-specific slot.
         self._on_compress_slide()
 
@@ -2187,6 +2492,12 @@ class BatchProcessDialog(ctk.CTkToplevel):
             quality = self._webp_quality
         elif fmt == "PNG":
             png_compress = self._png_compress
+
+        if fast_upscale and spandrel_options is not None:
+            spandrel_options["jpeg_quality"] = int(quality)
+            spandrel_options["png_compress"] = int(png_compress)
+        if topaz_upscale and topaz_options is not None:
+            topaz_options["quality"] = int(quality)
 
         job = {
             "paths": list(self._paths),
@@ -2209,6 +2520,12 @@ class BatchProcessDialog(ctk.CTkToplevel):
                 if self._remove_bg_var.get()
                 else None
             ),
+            "fast_upscale": fast_upscale,
+            "spandrel_options": spandrel_options,
+            "seedvr_upscale": seedvr_upscale,
+            "seedvr_options": seedvr_options,
+            "topaz_upscale": topaz_upscale,
+            "topaz_options": topaz_options,
         }
 
         try:

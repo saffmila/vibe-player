@@ -41,6 +41,18 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
         tile_cap = int(job.get("tile_cap") or 0)
     except (TypeError, ValueError):
         tile_cap = 0
+    try:
+        jpeg_quality = int(
+            job.get("jpeg_quality") if job.get("jpeg_quality") is not None else 92
+        )
+    except (TypeError, ValueError):
+        jpeg_quality = 92
+    try:
+        png_compress = int(
+            job.get("png_compress") if job.get("png_compress") is not None else 3
+        )
+    except (TypeError, ValueError):
+        png_compress = 3
     return upscale_image_file(
         input_path,
         output_path,
@@ -52,6 +64,8 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
         cuda_device=job.get("cuda_device"),
         target_scale=job.get("target_scale"),
         unload_after=bool(job.get("unload_after", True)),
+        jpeg_quality=jpeg_quality,
+        png_compress=png_compress,
         progress_cb=_progress,
         should_stop=None,
     )

@@ -1623,7 +1623,7 @@ def build_edit_menu(app):
         if hasattr(app, "open_fast_upscale_dialog"):
             app.open_fast_upscale_dialog()
         else:
-            messagebox.showinfo("Fast Upscale", "Fast Upscale is not available.")
+            messagebox.showinfo("Upscale", "Upscale is not available.")
 
     def _topaz_upscale():
         if hasattr(app, "open_topaz_upscale_dialog"):
@@ -1785,9 +1785,18 @@ def build_edit_menu(app):
     edit_menu.add_separator()
 
     # --- AI ---
+    # Upscale… + presets first; SeedVR / Photo AI below a final separator.
     upscale_menu = tk.Menu(edit_menu, tearoff=0)
+    upscale_menu.add_command(label="Upscale…", command=_fast_upscale)
+    if hasattr(app, "add_upscale_favorites_to_menu"):
+        try:
+            app.add_upscale_favorites_to_menu(
+                upscale_menu, backends=("spandrel", "topaz")
+            )
+        except Exception:
+            pass
+    upscale_menu.add_separator()
     upscale_menu.add_command(label="SeedVR 2…", command=_upscale)
-    upscale_menu.add_command(label="Fast Upscale…", command=_fast_upscale)
     _topaz_ready = False
     try:
         from topaz_config import runtime_status as _topaz_rt
@@ -1800,14 +1809,6 @@ def build_edit_menu(app):
         command=_topaz_upscale,
         state=("normal" if _topaz_ready else "disabled"),
     )
-    # Favorites sit under one separator; Remove… is the last item.
-    if hasattr(app, "add_upscale_favorites_to_menu"):
-        try:
-            app.add_upscale_favorites_to_menu(
-                upscale_menu, backends=("spandrel", "topaz")
-            )
-        except Exception:
-            pass
     edit_menu.add_cascade(label="Upscale", menu=upscale_menu)
     edit_menu.add_command(label="RIFE Interpolate…", command=_rife)
     edit_menu.add_command(label="Remove Background…", command=_remove_bg)
@@ -3991,9 +3992,27 @@ def save_preferences(app,thumbnail_format,cache_path,auto_play,memory_cache,capt
             lambda f: (
                 "jpg"
                 if f in ("jpg", "jpeg")
-                else f if f in ("png", "tiff", "webp") else "png"
+                else f if f in ("png", "tiff", "webp") else "jpg"
             )
-        )(str(getattr(app, "spandrel_output_format", "png") or "png").strip().lower()),
+        )(str(getattr(app, "spandrel_output_format", "jpg") or "jpg").strip().lower()),
+        "spandrel_output_quality": (
+            (lambda n: max(1, min(100, n)))(
+                int(getattr(app, "spandrel_output_quality", 92) or 92)
+            )
+            if str(getattr(app, "spandrel_output_quality", 92) or "92")
+            .lstrip("-")
+            .isdigit()
+            else 92
+        ),
+        "spandrel_png_compress": (
+            (lambda n: max(0, min(9, n)))(
+                int(getattr(app, "spandrel_png_compress", 3) or 3)
+            )
+            if str(getattr(app, "spandrel_png_compress", 3) or "3")
+            .lstrip("-")
+            .isdigit()
+            else 3
+        ),
         "spandrel_model_meta": (
             getattr(app, "spandrel_model_meta", None)
             if isinstance(getattr(app, "spandrel_model_meta", None), dict)

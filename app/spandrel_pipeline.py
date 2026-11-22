@@ -454,6 +454,8 @@ def upscale_image_file(
     cuda_device: str | int | None = "0",
     target_scale: float | int | None = None,
     unload_after: bool = False,
+    jpeg_quality: int = 92,
+    png_compress: int = 3,
     progress_cb: Callable[[float, str], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> dict:
@@ -593,17 +595,29 @@ def upscale_image_file(
 
         os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
         ext = os.path.splitext(output_path)[1].lower()
+        try:
+            q = max(1, min(100, int(jpeg_quality)))
+        except (TypeError, ValueError):
+            q = 92
+        try:
+            png_level = max(0, min(9, int(png_compress)))
+        except (TypeError, ValueError):
+            png_level = 3
         save_kwargs: dict = {}
         if ext in (".jpg", ".jpeg"):
             if out.mode in ("RGBA", "P"):
                 out = out.convert("RGB")
-            save_kwargs.update({"quality": 95, "optimize": True})
+            # No optimize=True — extra Huffman pass is slow on 4× frames.
+            save_kwargs.update({"quality": q})
         elif ext == ".webp":
-            save_kwargs.update({"quality": 95, "method": 4})
+            # method 0 = fast; quality still controls size.
+            save_kwargs.update({"quality": q, "method": 0})
         elif ext in (".tif", ".tiff"):
             save_kwargs["compression"] = "tiff_lzw"
         elif ext == ".png":
-            save_kwargs["optimize"] = True
+            # Do NOT set optimize=True: Pillow then forces compress_level=9
+            # and a multi-pass filter search — often slower than the upscale.
+            save_kwargs["compress_level"] = png_level
 
         if progress_cb:
             progress_cb(0.9, "Saving…")

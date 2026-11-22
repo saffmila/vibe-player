@@ -186,7 +186,7 @@ class VtpUpscaleMixin:
         paths = self.selected_paths_for_fast_upscale(clicked_path)
         if not paths:
             messagebox.showinfo(
-                "Fast Upscale",
+                "Upscale",
                 "No images selected.\n\nSelect one or more image thumbnails first.",
             )
             return
@@ -198,9 +198,11 @@ class VtpUpscaleMixin:
         )
 
     def list_spandrel_favorite_presets(self) -> list[dict]:
-        from spandrel_favorites import normalize_presets
+        from spandrel_favorites import ensure_builtin_presets
 
-        return normalize_presets(getattr(self, "spandrel_favorite_presets", None))
+        presets = ensure_builtin_presets(getattr(self, "spandrel_favorite_presets", None))
+        self.spandrel_favorite_presets = presets
+        return presets
 
     def run_fast_upscale_favorite(
         self, preset_name: str, clicked_path: str | None = None
@@ -211,7 +213,7 @@ class VtpUpscaleMixin:
         paths = self.selected_paths_for_fast_upscale(clicked_path)
         if not paths:
             messagebox.showinfo(
-                "Fast Upscale",
+                "Upscale",
                 "No images selected.\n\nSelect one or more image thumbnails first.",
             )
             return
@@ -237,13 +239,31 @@ class VtpUpscaleMixin:
         )
         if not options.get("models_dir") and fallback_dir:
             options["models_dir"] = fallback_dir
+        try:
+            options["jpeg_quality"] = max(
+                1, min(100, int(getattr(self, "spandrel_output_quality", 92) or 92))
+            )
+        except (TypeError, ValueError):
+            options["jpeg_quality"] = 92
+        try:
+            options["png_compress"] = max(
+                0, min(9, int(getattr(self, "spandrel_png_compress", 3) or 3))
+            )
+        except (TypeError, ValueError):
+            options["png_compress"] = 3
         self.start_fast_upscale_batch(paths, options)
 
     def remove_spandrel_favorite_preset(self, preset_name: str) -> None:
-        from spandrel_favorites import remove_preset
+        from spandrel_favorites import is_builtin_name, remove_preset
 
         name = str(preset_name or "").strip()
         if not name:
+            return
+        if is_builtin_name(name):
+            messagebox.showinfo(
+                "Favorites",
+                "Built-in presets cannot be removed.",
+            )
             return
         if not messagebox.askyesno(
             "Favorites",
@@ -318,7 +338,8 @@ class VtpUpscaleMixin:
     ):
         """Append favorite presets under one separator, with Remove… last.
 
-        Dialog openers (Fast Upscale…, Photo AI…) stay above that separator.
+        Caller lays out: Upscale… → (this) → SeedVR 2… / Photo AI….
+        Built-ins, then user presets + Remove… below a second separator.
         """
         import tkinter as tk
 
@@ -354,10 +375,29 @@ class VtpUpscaleMixin:
             return
 
         upscale_menu.add_separator()
-        if sp_names and hasattr(self, "run_fast_upscale_favorite"):
-            from spandrel_favorites import preset_menu_label
+        from spandrel_favorites import is_builtin_preset, preset_menu_label
 
-            for preset in sp:
+        sp_built = [p for p in sp if is_builtin_preset(p)]
+        sp_user = [p for p in sp if not is_builtin_preset(p)]
+
+        if sp_built and hasattr(self, "run_fast_upscale_favorite"):
+            for preset in sp_built:
+                pname = str(preset.get("name") or "").strip()
+                if not pname:
+                    continue
+                upscale_menu.add_command(
+                    label=preset_menu_label(preset),
+                    command=lambda n=pname, p=clicked_path: self.run_fast_upscale_favorite(
+                        n, p
+                    ),
+                )
+
+        # Built-ins above; user Upscale + Photo AI presets + Remove below.
+        if sp_built and (sp_user or tp_names):
+            upscale_menu.add_separator()
+
+        if sp_user and hasattr(self, "run_fast_upscale_favorite"):
+            for preset in sp_user:
                 pname = str(preset.get("name") or "").strip()
                 if not pname:
                     continue
@@ -377,10 +417,9 @@ class VtpUpscaleMixin:
                 )
 
         rem = tk.Menu(upscale_menu, tearoff=0)
-        if sp_names and hasattr(self, "remove_spandrel_favorite_preset"):
-            from spandrel_favorites import preset_menu_label
-
-            for preset in sp:
+        rem_sp = 0
+        if sp_user and hasattr(self, "remove_spandrel_favorite_preset"):
+            for preset in sp_user:
                 pname = str(preset.get("name") or "").strip()
                 if not pname:
                     continue
@@ -388,8 +427,9 @@ class VtpUpscaleMixin:
                     label=preset_menu_label(preset),
                     command=lambda n=pname: self.remove_spandrel_favorite_preset(n),
                 )
+                rem_sp += 1
         if tp_names and hasattr(self, "remove_topaz_favorite_preset"):
-            if sp_names:
+            if rem_sp:
                 rem.add_separator()
             for pname in tp_names:
                 rem.add_command(
@@ -429,12 +469,12 @@ class VtpUpscaleMixin:
     def start_fast_upscale_batch(self, paths: list[str], options: dict):
         """Run Spandrel or Topaz upscale on a background thread."""
         if getattr(self, "_fast_upscale_batch_running", False):
-            messagebox.showinfo("Fast Upscale", "A fast upscale job is already running.")
+            messagebox.showinfo("Upscale", "An upscale job is already running.")
             return
 
         paths = [p for p in (paths or []) if p and os.path.isfile(p)]
         if not paths:
-            messagebox.showinfo("Fast Upscale", "No valid images to upscale.")
+            messagebox.showinfo("Upscale", "No valid images to upscale.")
             return
 
         opts = dict(options or {})
@@ -443,7 +483,7 @@ class VtpUpscaleMixin:
         plugin = pm.get_upscale_plugin(backend_id) if pm else None
         if not plugin:
             messagebox.showerror(
-                "Fast Upscale",
+                "Upscale",
                 f"Upscale backend '{backend_id}' not loaded. Check app.log.",
             )
             return
@@ -458,7 +498,7 @@ class VtpUpscaleMixin:
         total = len(paths)
         progress = open_file_op_progress_dialog(
             self,
-            title="Fast Upscale",
+            title="Upscale",
             total=total,
             action_label="Upscaling",
             topmost=False,
@@ -671,7 +711,7 @@ class VtpUpscaleMixin:
                     abort_spandrel_worker()
                 except Exception:
                     pass
-                parts = [f"Fast Upscale ({plugin_name}): {done}/{total}"]
+                parts = [f"Upscale ({plugin_name}): {done}/{total}"]
                 if skipped:
                     parts.append(f"{skipped} skipped")
                 if failed:
@@ -696,7 +736,7 @@ class VtpUpscaleMixin:
                     except Exception:
                         pass
                     try:
-                        messagebox.showinfo("Fast Upscale", s)
+                        messagebox.showinfo("Upscale", s)
                     except Exception:
                         pass
                     if d and out:
