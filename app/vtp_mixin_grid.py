@@ -5077,10 +5077,14 @@ class VtpGridMixin:
                     if n_edit <= 1
                     else f"Remove Background… ({n_edit})"
                 )
-                menu.add_command(
-                    label=_rb_label,
-                    command=lambda fp=file_path: self.open_birefnet_dialog(fp),
-                )
+                _rb_opts = {
+                    "label": _rb_label,
+                    "command": lambda fp=file_path: self.open_birefnet_dialog(fp),
+                }
+                _rb_acc = menu_accel(_hk, "remove_background")
+                if _rb_acc:
+                    _rb_opts["accelerator"] = _rb_acc
+                menu.add_command(**_rb_opts)
 
         else:
             menu.add_command(label="Open", command=lambda: os.startfile(file_path))  # fallback
@@ -5184,17 +5188,25 @@ class VtpGridMixin:
             self.plugin_manager.plugins or getattr(self.plugin_manager, "upscale_plugins", None)
         ):
             menu.add_separator()
-        menu.add_command(
-            label="Auto Tag",
+        _at_opts = {
+            "label": "Auto Tag",
             # command=lambda: self.auto_tag_with_plugin_from_file(file_path)
-            command=lambda: self.auto_tag_selected_items(file_path)
-        )
+            "command": lambda: self.auto_tag_selected_items(file_path),
+        }
+        _at_acc = menu_accel(_hk, "auto_tag")
+        if _at_acc:
+            _at_opts["accelerator"] = _at_acc
+        menu.add_command(**_at_opts)
         upscale_menu = tk.Menu(menu, tearoff=0)
         if hasattr(self, "open_fast_upscale_dialog"):
-            upscale_menu.add_command(
-                label="Upscale…",
-                command=lambda: self.open_fast_upscale_dialog(file_path),
-            )
+            _fu_opts = {
+                "label": "Upscale…",
+                "command": lambda: self.open_fast_upscale_dialog(file_path),
+            }
+            _fu_acc = menu_accel(_hk, "fast_upscale")
+            if _fu_acc:
+                _fu_opts["accelerator"] = _fu_acc
+            upscale_menu.add_command(**_fu_opts)
         if hasattr(self, "add_upscale_favorites_to_menu"):
             try:
                 self.add_upscale_favorites_to_menu(
@@ -5204,10 +5216,14 @@ class VtpGridMixin:
                 pass
         upscale_menu.add_separator()
         if hasattr(self, "open_upscale_dialog"):
-            upscale_menu.add_command(
-                label="SeedVR 2…",
-                command=lambda: self.open_upscale_dialog(file_path),
-            )
+            _sv_opts = {
+                "label": "SeedVR 2…",
+                "command": lambda: self.open_upscale_dialog(file_path),
+            }
+            _sv_acc = menu_accel(_hk, "seedvr_upscale")
+            if _sv_acc:
+                _sv_opts["accelerator"] = _sv_acc
+            upscale_menu.add_command(**_sv_opts)
         topaz_ready = False
         try:
             from topaz_config import runtime_status as _topaz_status
@@ -5224,10 +5240,14 @@ class VtpGridMixin:
         if upscale_menu.index("end") is not None:
             menu.add_cascade(label="Upscale", menu=upscale_menu)
         if hasattr(self, "open_rife_dialog"):
-            menu.add_command(
-                label="RIFE Interpolate…",
-                command=lambda: self.open_rife_dialog(file_path),
-            )
+            _ri_opts = {
+                "label": "RIFE Interpolate…",
+                "command": lambda: self.open_rife_dialog(file_path),
+            }
+            _ri_acc = menu_accel(_hk, "rife_interpolate")
+            if _ri_acc:
+                _ri_opts["accelerator"] = _ri_acc
+            menu.add_command(**_ri_opts)
 
         # Add to / Remove from Virtual Library
         virtual_libraries = list(load_virtual_folders()["virtual_folders"].keys())

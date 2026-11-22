@@ -333,16 +333,8 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             controller=self.controller,
         )
 
-        ctk.CTkLabel(
-            self,
-            text="Upscale",
-            text_color="#00bfff",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            anchor="w",
-        ).pack(fill="x", padx=16, pady=(10, 4))
-
         body = ctk.CTkFrame(self, fg_color="transparent")
-        body.pack(fill="x", expand=False, padx=16, pady=(0, 4))
+        body.pack(fill="x", expand=False, padx=16, pady=(8, 4))
         self._body = body
 
         # Shown only when Spandrel is missing or the folder has no models.
@@ -358,6 +350,8 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             font=ctk.CTkFont(size=11),
         ).pack(fill="x")
 
+        # Spandrel pip + Refresh — shown on alert / Advanced. Path + Install models
+        # stay on the main page (see models_row below) so they are never clipped.
         self._tools = ctk.CTkFrame(body, fg_color="transparent")
         self._install_btn = ctk.CTkButton(
             self._tools,
@@ -367,16 +361,6 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             command=self._install_spandrel,
         )
         self._install_btn.pack(side="left")
-        self._pick_btn = ctk.CTkButton(
-            self._tools,
-            text="Pick model folder…",
-            width=150,
-            height=_UI_BTN_H,
-            fg_color="gray30",
-            hover_color="gray25",
-            command=self._pick_models_folder,
-        )
-        self._pick_btn.pack(side="left", padx=(8, 0))
         self._refresh_btn = ctk.CTkButton(
             self._tools,
             text="Refresh",
@@ -397,9 +381,43 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             ),
         )
 
-        # Engine status on the simple page (above presets).
+        # Models folder first (actions left), then status box.
         self._engine_block = ctk.CTkFrame(body, fg_color="transparent")
-        self._engine_block.pack(fill="x", pady=(0, 8))
+        self._engine_block.pack(fill="x", pady=(0, 4))
+        models_row = ctk.CTkFrame(self._engine_block, fg_color="transparent")
+        models_row.pack(fill="x", pady=(8, 8))
+        self._pick_btn = ctk.CTkButton(
+            models_row,
+            text="…",
+            width=22,
+            height=17,
+            fg_color="gray30",
+            hover_color="gray25",
+            font=ctk.CTkFont(size=11),
+            command=self._pick_models_folder,
+        )
+        self._pick_btn.pack(side="left")
+        self._install_models_btn = ctk.CTkButton(
+            models_row,
+            text="Install models…",
+            width=78,
+            height=17,
+            fg_color="gray30",
+            hover_color="gray25",
+            font=ctk.CTkFont(size=11),
+            command=self._install_models,
+        )
+        self._install_models_btn.pack(side="left", padx=(8, 0))
+        self._models_path_label = ctk.CTkLabel(
+            models_row,
+            textvariable=self.models_dir_var,
+            wraplength=_DIALOG_W - 180,
+            justify="left",
+            text_color="#8ab4c8",
+            anchor="w",
+            font=ctk.CTkFont(size=11),
+        )
+        self._models_path_label.pack(side="left", fill="x", expand=True, padx=(12, 0))
         self._status_box = ctk.CTkFrame(
             self._engine_block,
             fg_color=_STATUS_BG,
@@ -407,7 +425,7 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             border_width=1,
             border_color=("gray70", "#1a1a1a"),
         )
-        self._status_box.pack(fill="x")
+        self._status_box.pack(fill="x", pady=(0, 8))
         ctk.CTkLabel(
             self._status_box,
             textvariable=self.status_var,
@@ -417,16 +435,6 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             anchor="w",
             font=ctk.CTkFont(size=11),
         ).pack(fill="x", padx=10, pady=8)
-        self._folder_label = ctk.CTkLabel(
-            self._engine_block,
-            textvariable=self.models_dir_var,
-            wraplength=_DIALOG_W - 40,
-            justify="left",
-            text_color="#8ab4c8",
-            anchor="w",
-            font=ctk.CTkFont(size=11),
-        )
-        self._folder_label.pack(fill="x", pady=(4, 0))
 
         # Simple view: preset + scale + format. Model filenames under Advanced.
         preset_row = ctk.CTkFrame(body, fg_color="transparent")
@@ -447,8 +455,6 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             text="Save…",
             width=72,
             height=28,
-            fg_color="gray30",
-            hover_color="gray25",
             command=self._popup_save_menu,
         )
         self._preset_save_btn.pack(side="left", padx=(8, 0))
@@ -457,14 +463,19 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             text="Manage…",
             width=88,
             height=28,
-            fg_color="gray30",
-            hover_color="gray25",
             command=self._popup_manage_menu,
         )
         self._preset_manage_btn.pack(side="left", padx=(6, 0))
+        ctk.CTkLabel(
+            body,
+            text="Preset picks a model for you · Browse models in Advanced",
+            text_color="#666",
+            font=ctk.CTkFont(size=11),
+            anchor="w",
+        ).pack(fill="x", pady=(0, 2))
 
-        # One blank row under Preset so the simple form breathes.
-        _preset_gap = ctk.CTkFrame(body, fg_color="transparent", height=28)
+        # Small gap under Preset hint so the simple form breathes.
+        _preset_gap = ctk.CTkFrame(body, fg_color="transparent", height=12)
         _preset_gap.pack(fill="x")
         _preset_gap.pack_propagate(False)
 
@@ -617,7 +628,7 @@ class FastUpscaleDialog(ctk.CTkToplevel):
 
         ctk.CTkLabel(
             self._advanced_block,
-            text="Model",
+            text="Browse models",
             text_color="#00bfff",
             font=ctk.CTkFont(size=12, weight="bold"),
             anchor="w",
@@ -699,7 +710,7 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         hint_row.pack(fill="x", pady=(0, 2))
         ctk.CTkLabel(
             hint_row,
-            text="LMB = one model · Ctrl+LMB = add / remove · RMB = rate",
+            text="Override preset — pick any .pth · Ctrl+LMB = A|B · RMB = rate",
             text_color="#666",
             font=ctk.CTkFont(size=11),
             anchor="w",
@@ -712,9 +723,9 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         self._engine_tools_host.pack(fill="x", pady=(8, 0))
         self._tools.pack(in_=self._engine_tools_host, fill="x")
 
-        # Document flow (not side=bottom) — no empty gap above actions.
+        # Document flow (not side=bottom) — breathing room above actions.
         btn = ctk.CTkFrame(self, fg_color="transparent")
-        btn.pack(fill="x", padx=16, pady=(8, 14))
+        btn.pack(fill="x", padx=16, pady=(16, 14))
         self.advanced_btn = ctk.CTkButton(
             btn,
             text="Advanced ▼",
@@ -899,7 +910,22 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         cap = (self.tile_var.get() or "Auto").strip()
         tile_txt = "auto tile" if cap == "Auto" else f"max tile {cap}"
         folder = _short_folder(self.out_dir_var.get())
-        var.set(f"{scale_txt}  ·  {fmt_txt}  ·  {tile_txt}  ·  {folder}")
+        model_bit = ""
+        preset_name = self._preset_label_to_name.get(self.preset_var.get() or "")
+        if preset_name:
+            model_bit = preset_name
+        else:
+            stem = os.path.splitext(
+                os.path.basename((self._start_model() or "").replace("\\", "/"))
+            )[0]
+            if stem and not stem.startswith("("):
+                model_bit = stem
+        if model_bit:
+            var.set(
+                f"{model_bit}  ·  {scale_txt}  ·  {fmt_txt}  ·  {tile_txt}  ·  {folder}"
+            )
+        else:
+            var.set(f"{scale_txt}  ·  {fmt_txt}  ·  {tile_txt}  ·  {folder}")
 
     def _rebuild_preset_menu(self, *, prefer_name: str | None = None) -> None:
         labels = [_PRESET_CURRENT]
@@ -950,17 +976,19 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         current = (self._model_a or "").strip()
         if not current or self._find_model_key(str(preset.get("model") or "")) != current:
             return False
-        mode = self.factor_var.get() or "Model"
-        if mode != str(preset.get("scale_mode") or "Model"):
-            return False
-        if mode == "Custom":
-            try:
-                cur = float(self.custom_scale_var.get() or 0)
-                want = float(preset.get("custom_scale") or 0)
-            except (TypeError, ValueError):
+        # Built-ins ignore scale — changing Output scale must not drop the preset.
+        if not is_builtin_preset(preset):
+            mode = self.factor_var.get() or "Model"
+            if mode != str(preset.get("scale_mode") or "Model"):
                 return False
-            if abs(cur - want) > 1e-6:
-                return False
+            if mode == "Custom":
+                try:
+                    cur = float(self.custom_scale_var.get() or 0)
+                    want = float(preset.get("custom_scale") or 0)
+                except (TypeError, ValueError):
+                    return False
+                if abs(cur - want) > 1e-6:
+                    return False
         fmt = _FORMAT_TO_EXT.get(self.format_var.get(), "png")
         if fmt != str(preset.get("output_format") or "png"):
             return False
@@ -1023,20 +1051,22 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         return None
 
     def _assign_preset_fields(self, preset: dict) -> None:
-        mode = str(preset.get("scale_mode") or "Model").strip()
-        if mode not in _FACTOR_LABELS:
-            mode = "Model"
-        self.factor_var.set(mode)
-        try:
-            custom = float(preset.get("custom_scale") or 3)
-        except (TypeError, ValueError):
-            custom = 3.0
-        self.custom_scale_var.set(f"{custom:g}")
+        # Built-ins are model recipes only — keep the session Output scale.
+        if not is_builtin_preset(preset):
+            mode = str(preset.get("scale_mode") or "Model").strip()
+            if mode not in _FACTOR_LABELS:
+                mode = "Model"
+            self.factor_var.set(mode)
+            try:
+                custom = float(preset.get("custom_scale") or 3)
+            except (TypeError, ValueError):
+                custom = 3.0
+            self.custom_scale_var.set(f"{custom:g}")
+            self._on_factor_change(apply_filter=False)
         fmt = str(preset.get("output_format") or "jpg").strip().lower()
         if fmt == "jpeg":
             fmt = "jpg"
         self.format_var.set(_EXT_TO_FORMAT.get(fmt, "JPEG"))
-        self._on_factor_change(apply_filter=False)
         self._on_format_change(self.format_var.get())
 
     def _on_preset_picked(self, label: str) -> None:
@@ -1093,6 +1123,13 @@ class FastUpscaleDialog(ctk.CTkToplevel):
                             self._refresh_status()
                 if not error:
                     found = self._find_model_key(model)
+                    if not found:
+                        # Leave sync suspended while the download UI runs.
+                        self._suspend_preset_sync = False
+                        if self._ensure_preset_model(preset):
+                            self._suspend_preset_sync = True
+                            self._refresh_status()
+                            found = self._find_model_key(model)
                     if not found:
                         error = (
                             f"Preset “{name}” needs model “{model}”, "
@@ -1520,17 +1557,38 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         if not path:
             return
         self.models_dir_var.set(str(Path(path).resolve()))
+        self._commit_models_dir(force_refresh=True)
+
+    def _commit_models_dir(self, *, force_refresh: bool = False) -> None:
+        """Persist models folder and reload the model list."""
+        raw = (self.models_dir_var.get() or "").strip().strip('"')
+        if raw and os.path.isdir(raw):
+            resolved = str(Path(raw).resolve())
+        else:
+            resolved = str(resolve_models_dir(raw or None))
+        prev = ""
         if self.controller is not None:
             try:
-                setattr(self.controller, "spandrel_models_dir", self.models_dir_var.get())
+                prev = str(getattr(self.controller, "spandrel_models_dir", "") or "")
+            except Exception:
+                prev = ""
+        self.models_dir_var.set(resolved)
+        changed = os.path.normcase(os.path.normpath(resolved)) != os.path.normcase(
+            os.path.normpath(prev or "")
+        )
+        if self.controller is not None:
+            try:
+                setattr(self.controller, "spandrel_models_dir", resolved)
             except Exception:
                 pass
-        self._refresh_status()
+        if force_refresh or changed or not self._all_models:
+            self._refresh_status()
 
     def _set_form_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
         for w in (
             self._install_btn,
+            self._install_models_btn,
             self._pick_btn,
             self._refresh_btn,
             self._factor_menu,
@@ -1656,6 +1714,264 @@ class FastUpscaleDialog(ctk.CTkToplevel):
         threading.Thread(
             target=_worker, daemon=True, name="spandrel-install"
         ).start()
+
+    def _install_models(self, *, only_filenames: list[str] | None = None) -> bool:
+        """Download curated preset models into the current models folder.
+
+        Returns True when the download finished successfully (or everything was
+        already present). Runs asynchronously for the full set; for a single
+        on-demand file the caller should use ``_download_models_blocking``.
+        """
+        if self._install_running:
+            return False
+        from spandrel_weights_setup import (
+            SPANDREL_WEIGHTS_DISK_ESTIMATE,
+            download_recommended_weights,
+            missing_recommended,
+            recommended_by_filename,
+        )
+
+        dest = self._models_dir()
+        if only_filenames:
+            names = [
+                os.path.basename(str(n or "").replace("\\", "/")).strip()
+                for n in only_filenames
+                if str(n or "").strip()
+            ]
+            names = [n for n in names if recommended_by_filename(n)]
+            if not names:
+                messagebox.showwarning(
+                    "Install models",
+                    "No downloadable models selected.",
+                    parent=self,
+                )
+                return False
+            missing = names
+            bullet = "\n".join(f"• {n}" for n in names)
+            size_note = "Network required."
+        else:
+            missing_meta = missing_recommended(dest)
+            if not missing_meta:
+                messagebox.showinfo(
+                    "Install models",
+                    "Built-in upscale models are already present in:\n"
+                    f"{dest}",
+                    parent=self,
+                )
+                return True
+            missing = [str(m.get("filename") or "") for m in missing_meta]
+            bullet = "\n".join(f"• {n}" for n in missing)
+            size_note = (
+                f"About {SPANDREL_WEIGHTS_DISK_ESTIMATE} total if all are missing.\n"
+                "Existing files are skipped."
+            )
+
+        ok = messagebox.askyesno(
+            "Install models",
+            (
+                "Download built-in Upscale models?\n\n"
+                f"{bullet}\n\n"
+                f"Destination:\n{dest}\n\n"
+                f"{size_note}"
+            ),
+            parent=self,
+        )
+        if not ok:
+            return False
+
+        from gui_elements import open_file_op_progress_dialog
+
+        self._install_running = True
+        self._set_form_enabled(False)
+        progress = open_file_op_progress_dialog(
+            self,
+            title="Install models",
+            total=max(1, len(missing)) * 100,
+            action_label="Download",
+            topmost=True,
+            show_preview=False,
+        )
+        result_holder: dict = {}
+
+        def _on_progress(step: int, total: int, detail: str):
+            try:
+                self.after(
+                    0,
+                    lambda s=step, t=total, d=detail: progress.set_progress(
+                        s, t, detail=d, phase="load"
+                    ),
+                )
+            except Exception:
+                pass
+
+        def _worker():
+            result_holder.update(
+                download_recommended_weights(
+                    dest,
+                    progress_cb=_on_progress,
+                    should_stop=lambda: bool(getattr(progress, "cancelled", False)),
+                    only_filenames=missing,
+                )
+            )
+
+            def _done():
+                self._install_running = False
+                try:
+                    progress.close()
+                except Exception:
+                    pass
+                self._set_form_enabled(True)
+                self._refresh_status()
+                result = result_holder
+                if result.get("ok"):
+                    messagebox.showinfo(
+                        "Install models",
+                        result.get("message") or f"Models ready:\n{dest}",
+                        parent=self,
+                    )
+                elif result.get("error") == "aborted":
+                    messagebox.showinfo(
+                        "Install models",
+                        "Download cancelled.",
+                        parent=self,
+                    )
+                else:
+                    messagebox.showerror(
+                        "Install models",
+                        result.get("message") or "Download failed.",
+                        parent=self,
+                    )
+
+            try:
+                self.after(0, _done)
+            except Exception:
+                pass
+
+        threading.Thread(
+            target=_worker, daemon=True, name="spandrel-models-install"
+        ).start()
+        return True
+
+    def _ensure_preset_model(self, preset: dict) -> bool:
+        """If a curated model is missing, offer download. True when model is local."""
+        from spandrel_weights_setup import (
+            find_local_model,
+            recommended_by_filename,
+        )
+
+        model = str(preset.get("model") or "").strip()
+        if not model:
+            return False
+        models_dir = str(preset.get("models_dir") or "").strip() or self._models_dir()
+        if find_local_model(models_dir, model) is not None:
+            return True
+        meta = recommended_by_filename(model)
+        if meta is None:
+            return False
+        name = str(preset.get("name") or model).strip() or model
+        size = int(meta.get("size") or 0)
+        size_txt = f"{size / (1024 * 1024):.0f} MB" if size else "download"
+        ok = messagebox.askyesno(
+            "Install models",
+            (
+                f"Preset “{name}” needs:\n{meta.get('filename')}\n\n"
+                f"Download now ({size_txt})?\n\n"
+                f"Source: {meta.get('source')}\n"
+                f"Into:\n{models_dir}"
+            ),
+            parent=self,
+        )
+        if not ok:
+            return False
+        return self._download_models_blocking(
+            [str(meta.get("filename") or model)], models_dir
+        )
+
+    def _download_models_blocking(
+        self, filenames: list[str], models_dir: str | None = None
+    ) -> bool:
+        """Modal download used when applying a preset / starting a job."""
+        if self._install_running:
+            return False
+        from gui_elements import open_file_op_progress_dialog
+        from spandrel_weights_setup import download_recommended_weights
+
+        dest = (models_dir or "").strip() or self._models_dir()
+        names = [
+            os.path.basename(str(n or "").replace("\\", "/")).strip()
+            for n in filenames
+            if str(n or "").strip()
+        ]
+        if not names:
+            return False
+
+        self._install_running = True
+        self._set_form_enabled(False)
+        progress = open_file_op_progress_dialog(
+            self,
+            title="Install models",
+            total=max(1, len(names)) * 100,
+            action_label="Download",
+            topmost=True,
+            show_preview=False,
+        )
+        done = threading.Event()
+        result_holder: dict = {}
+
+        def _on_progress(step: int, total: int, detail: str):
+            try:
+                self.after(
+                    0,
+                    lambda s=step, t=total, d=detail: progress.set_progress(
+                        s, t, detail=d, phase="load"
+                    ),
+                )
+            except Exception:
+                pass
+
+        def _worker():
+            result_holder.update(
+                download_recommended_weights(
+                    dest,
+                    progress_cb=_on_progress,
+                    should_stop=lambda: bool(getattr(progress, "cancelled", False)),
+                    only_filenames=names,
+                )
+            )
+            done.set()
+
+        threading.Thread(
+            target=_worker, daemon=True, name="spandrel-model-ondemand"
+        ).start()
+        # Keep UI alive while waiting (dialog already has its own loop via update).
+        while not done.wait(0.05):
+            try:
+                self.update()
+            except Exception:
+                break
+        self._install_running = False
+        try:
+            progress.close()
+        except Exception:
+            pass
+        self._set_form_enabled(True)
+        self._refresh_status()
+        result = result_holder
+        if result.get("ok"):
+            return True
+        if result.get("error") == "aborted":
+            messagebox.showinfo(
+                "Install models",
+                "Download cancelled.",
+                parent=self,
+            )
+        else:
+            messagebox.showerror(
+                "Install models",
+                result.get("message") or "Download failed.",
+                parent=self,
+            )
+        return False
 
     def _model_key(self, item: dict) -> str:
         """Stable id for selection: prefer relative path inside the models folder."""
@@ -2165,6 +2481,13 @@ class FastUpscaleDialog(ctk.CTkToplevel):
                 )
         except Exception:
             pass
+        try:
+            self._install_models_btn.configure(
+                text="Install models…",
+                state="normal" if not self._install_running else "disabled",
+            )
+        except Exception:
+            pass
 
     def _apply_filter(self) -> None:
         needle = (self.filter_var.get() or "").strip().lower()
@@ -2258,6 +2581,7 @@ class FastUpscaleDialog(ctk.CTkToplevel):
             self._alert_var.set(rt.get("message") or "Spandrel is not installed.")
         elif not self._all_models:
             parts.append(wt.get("message") or "No models found.")
+            parts.append("Use Install models… for built-in presets (~260 MB).")
             self._alert_var.set(wt.get("message") or "No models in this folder.")
         else:
             parts.append(f"{len(self._all_models)} model(s) in folder (incl. subfolders)")

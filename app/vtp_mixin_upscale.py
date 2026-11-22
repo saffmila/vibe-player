@@ -209,6 +209,12 @@ class VtpUpscaleMixin:
     ) -> None:
         """1-click Spandrel upscale using a saved favorite preset."""
         from spandrel_favorites import find_preset, preset_to_options
+        from spandrel_config import default_upscale_dir
+        from spandrel_weights_setup import (
+            download_model_file,
+            find_local_model,
+            recommended_by_filename,
+        )
 
         paths = self.selected_paths_for_fast_upscale(clicked_path)
         if not paths:
@@ -227,18 +233,114 @@ class VtpUpscaleMixin:
         out_dir = os.path.dirname(paths[0]) if paths else os.getcwd()
         cuda = str(getattr(self, "spandrel_cuda_device", "0") or "0")
         fallback_dir = str(getattr(self, "spandrel_models_dir", "") or "").strip()
+        models_dir = (
+            str(preset.get("models_dir") or "").strip()
+            or fallback_dir
+            or str(default_upscale_dir())
+        )
+        model_name = str(preset.get("model") or "").strip()
+        if model_name and find_local_model(models_dir, model_name) is None:
+            meta = recommended_by_filename(model_name)
+            if meta is None:
+                messagebox.showwarning(
+                    "Upscale",
+                    f"Preset “{preset_name}” needs model “{model_name}”, "
+                    "which is not in the models folder.",
+                )
+                return
+            size = int(meta.get("size") or 0)
+            size_txt = f"{size / (1024 * 1024):.0f} MB" if size else "download"
+            if not messagebox.askyesno(
+                "Install models",
+                (
+                    f"Preset “{preset_name}” needs:\n{meta.get('filename')}\n\n"
+                    f"Download now ({size_txt})?\n\n"
+                    f"Source: {meta.get('source')}\n"
+                    f"Into:\n{models_dir}"
+                ),
+            ):
+                return
+            from gui_elements import open_file_op_progress_dialog
+
+            progress = open_file_op_progress_dialog(
+                self,
+                title="Install models",
+                total=100,
+                action_label="Download",
+                topmost=True,
+                show_preview=False,
+            )
+            result_holder: dict = {}
+
+            def _on_progress(step: int, total: int, detail: str):
+                try:
+                    self.after(
+                        0,
+                        lambda s=step, t=total, d=detail: progress.set_progress(
+                            s, t, detail=d, phase="load"
+                        ),
+                    )
+                except Exception:
+                    pass
+
+            import threading
+
+            done = threading.Event()
+
+            def _worker():
+                result_holder.update(
+                    download_model_file(
+                        str(meta.get("filename") or model_name),
+                        models_dir,
+                        progress_cb=_on_progress,
+                        should_stop=lambda: bool(
+                            getattr(progress, "cancelled", False)
+                        ),
+                    )
+                )
+                done.set()
+
+            threading.Thread(
+                target=_worker, daemon=True, name="spandrel-fav-model"
+            ).start()
+            while not done.wait(0.05):
+                try:
+                    self.update()
+                except Exception:
+                    break
+            try:
+                progress.close()
+            except Exception:
+                pass
+            if not result_holder.get("ok"):
+                if result_holder.get("error") == "aborted":
+                    messagebox.showinfo("Install models", "Download cancelled.")
+                else:
+                    messagebox.showerror(
+                        "Install models",
+                        result_holder.get("message") or "Download failed.",
+                    )
+                return
         try:
             tile_cap = int(getattr(self, "spandrel_max_tile", 0) or 0)
         except (TypeError, ValueError):
             tile_cap = 0
+        try:
+            session_custom = float(getattr(self, "spandrel_custom_scale", 3) or 3)
+        except (TypeError, ValueError):
+            session_custom = 3.0
         options = preset_to_options(
             preset,
             output_dir=out_dir,
             cuda_device=cuda,
             tile_cap=tile_cap if tile_cap in (256, 512, 768, 1024) else 0,
+            session_scale_mode=str(
+                getattr(self, "spandrel_scale_mode", "Model") or "Model"
+            ),
+            session_custom_scale=session_custom,
         )
-        if not options.get("models_dir") and fallback_dir:
-            options["models_dir"] = fallback_dir
+        if not options.get("models_dir"):
+            options["models_dir"] = models_dir
         try:
             options["jpeg_quality"] = max(
                 1, min(100, int(getattr(self, "spandrel_output_quality", 92) or 92))

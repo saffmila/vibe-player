@@ -4,8 +4,8 @@ spandrel_favorites.py — Named Upscale presets (model + scale + format).
 GPU, output folder and suffix stay session settings — they are not part of a preset.
 
 Built-in recipes ship with the app and are merged into the user's preset list on
-load. Download of missing ``.pth`` files is handled later; presets just name the
-local files.
+load. Missing ``.pth`` files are downloaded via ``spandrel_weights_setup``
+(Install models… / on-demand when applying a preset).
 """
 
 from __future__ import annotations
@@ -297,8 +297,11 @@ def find_preset(presets: list[dict[str, Any]], name: str) -> dict[str, Any] | No
     return None
 
 
-def target_scale_from_preset(preset: dict[str, Any]) -> float | None:
-    mode = str(preset.get("scale_mode") or "Model")
+def target_scale_from_mode(
+    mode: str | None, custom_scale: float | None = None
+) -> float | None:
+    """Map Output scale UI / prefs → ``target_scale`` (None = model native)."""
+    mode = str(mode or "Model").strip()
     if mode == "Model":
         return None
     if mode == "2×":
@@ -306,10 +309,20 @@ def target_scale_from_preset(preset: dict[str, Any]) -> float | None:
     if mode == "4×":
         return 4.0
     try:
-        value = float(preset.get("custom_scale") or 0)
-    except Exception:
+        value = float(custom_scale or 0)
+    except (TypeError, ValueError):
         return None
     return value if value > 0 else None
+
+
+def target_scale_from_preset(preset: dict[str, Any]) -> float | None:
+    """Scale stored on a user favorite. Built-ins never carry scale."""
+    if is_builtin_preset(preset):
+        return None
+    return target_scale_from_mode(
+        str(preset.get("scale_mode") or "Model"),
+        preset.get("custom_scale"),
+    )
 
 
 def preset_to_options(
@@ -318,11 +331,13 @@ def preset_to_options(
     output_dir: str,
     cuda_device: str = "0",
     tile_cap: int = 0,
+    session_scale_mode: str | None = None,
+    session_custom_scale: float | None = None,
 ) -> dict[str, Any]:
     """Build ``start_fast_upscale_batch`` options from a favorite preset.
 
-    Tiling is always chosen from free VRAM. ``tile_cap`` is an optional ceiling
-    (session setting, not part of a preset).
+    Built-in presets use session Output scale (not the catalog's scale fields).
+    User favorites keep their saved scale. Tiling / GPU / folder stay session-only.
     """
     model = str(preset.get("model") or "").strip()
     models_dir = str(preset.get("models_dir") or "").strip() or None
@@ -330,6 +345,10 @@ def preset_to_options(
         cap = int(tile_cap or 0)
     except (TypeError, ValueError):
         cap = 0
+    if is_builtin_preset(preset):
+        target = target_scale_from_mode(session_scale_mode, session_custom_scale)
+    else:
+        target = target_scale_from_preset(preset)
     return {
         "backend_id": "spandrel",
         "output_dir": output_dir,
@@ -340,7 +359,7 @@ def preset_to_options(
         "tile_size": 0,
         "overlap": 32,
         "cuda_device": str(cuda_device or "0"),
-        "target_scale": target_scale_from_preset(preset),
+        "target_scale": target,
         "suffix": model_stem_suffix(model),
         "output_format": str(preset.get("output_format") or "png"),
         "unload_after": True,

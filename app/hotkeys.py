@@ -109,6 +109,14 @@ DEFAULT_HOTKEYS = {
     'video_speed_up': '<greater>',
     'video_speed_down': '<less>',
     
+    # --- AI tools (selection / context menu) ---
+    # Ctrl+Shift avoids clashing with video Shift+* capture/bookmark keys.
+    'auto_tag': '<Control-Shift-A>',
+    'remove_background': '<Control-Shift-B>',
+    'fast_upscale': '<Control-Shift-U>',
+    'seedvr_upscale': '<Control-Shift-E>',
+    'rife_interpolate': '<Control-Shift-R>',
+
     # --- Debug / Developer ---
     'run_plugin': '<F7>',
     'show_debug': '<F9>',
@@ -190,6 +198,10 @@ HOTKEY_HELP_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "image_actual_size", "image_fit_best", "image_fit_width",
         "image_zoom_in", "image_zoom_out", "image_zoom_in_ctrl", "image_zoom_out_ctrl",
         "image_fullscreen_f", "image_fullscreen_alt_enter", "image_debug_monitor",
+    )),
+    ("AI tools", (
+        "auto_tag", "remove_background", "fast_upscale", "seedvr_upscale",
+        "rife_interpolate",
     )),
     ("Developer", (
         "run_plugin", "show_debug", "hide_debug", "toggle_log", "view_catalog",
@@ -288,6 +300,11 @@ HOTKEY_LABELS: dict[str, str] = {
     "video_frame_backward": "Previous frame",
     "video_speed_up": "Speed up",
     "video_speed_down": "Speed down",
+    "auto_tag": "Auto Tag",
+    "remove_background": "Remove Background",
+    "fast_upscale": "Fast Upscale",
+    "seedvr_upscale": "SeedVR 2 Upscale",
+    "rife_interpolate": "RIFE Interpolate",
     "run_plugin": "Run timeline plugin",
     "show_debug": "Show debug overlay",
     "hide_debug": "Hide debug overlay",

@@ -2870,6 +2870,31 @@ class VideoThumbnailPlayer(
             open_fn()
         return "break"
 
+    def _hotkey_auto_tag(self, event=None):
+        if hasattr(self, "auto_tag_selected_items"):
+            self.auto_tag_selected_items()
+        return "break"
+
+    def _hotkey_remove_background(self, event=None):
+        if hasattr(self, "open_birefnet_dialog"):
+            self.open_birefnet_dialog()
+        return "break"
+
+    def _hotkey_fast_upscale(self, event=None):
+        if hasattr(self, "open_fast_upscale_dialog"):
+            self.open_fast_upscale_dialog()
+        return "break"
+
+    def _hotkey_seedvr_upscale(self, event=None):
+        if hasattr(self, "open_upscale_dialog"):
+            self.open_upscale_dialog()
+        return "break"
+
+    def _hotkey_rife_interpolate(self, event=None):
+        if hasattr(self, "open_rife_dialog"):
+            self.open_rife_dialog()
+        return "break"
+
     def _hotkey_global_delete(self, event=None):
         if self._skip_file_clipboard_hotkey():
             return
@@ -3979,6 +4004,36 @@ class VideoThumbnailPlayer(
         _cmp = self.hotkeys_map.get("image_compare", "<Control-Shift-C>")
         for seq in {_cmp, "<Control-Shift-c>", "<Control-Shift-C>"}:
             self.bind_all(seq, g(self._hotkey_image_compare))
+
+        # --- AI tools (Ctrl+Shift; bind both letter cases for Windows Tk) ---
+        def _bind_ctrl_shift(action: str, handler, *aliases: str):
+            seq = self.hotkeys_map.get(action)
+            seen = set()
+            for s in (seq, *aliases):
+                if s and s not in seen:
+                    seen.add(s)
+                    self.bind_all(s, g(handler))
+
+        _bind_ctrl_shift(
+            "auto_tag", self._hotkey_auto_tag,
+            "<Control-Shift-a>", "<Control-Shift-A>",
+        )
+        _bind_ctrl_shift(
+            "remove_background", self._hotkey_remove_background,
+            "<Control-Shift-b>", "<Control-Shift-B>",
+        )
+        _bind_ctrl_shift(
+            "fast_upscale", self._hotkey_fast_upscale,
+            "<Control-Shift-u>", "<Control-Shift-U>",
+        )
+        _bind_ctrl_shift(
+            "seedvr_upscale", self._hotkey_seedvr_upscale,
+            "<Control-Shift-e>", "<Control-Shift-E>",
+        )
+        _bind_ctrl_shift(
+            "rife_interpolate", self._hotkey_rife_interpolate,
+            "<Control-Shift-r>", "<Control-Shift-R>",
+        )
 
         # --- Essentials (Refresh, Rename, Up) ---
         # F5 = soft folder reload (listing). Hard thumbnail rebuild stays in context menus.

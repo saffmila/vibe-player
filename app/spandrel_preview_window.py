@@ -2,8 +2,9 @@
 spandrel_preview_window.py — External crop preview for Upscale.
 
 Single-canvas split slider. Compare vs Original (NEAREST source) or vs a
-second model (A|B). Status + progress live in the footer so the image stays
-readable.
+second model (A|B). Source crop size adapts to output scale so 2×/4× previews
+fill a similar area (true model pixels, no display upscale). Status + progress
+live in the footer.
 """
 
 from __future__ import annotations
@@ -20,7 +21,11 @@ from PIL import Image, ImageTk
 
 _BG = "#1a1a1a"
 _DIVIDER = "#00d4ff"
-_CROP_SRC = 256  # source crop edge (px); 4× → ~1024 preview
+# Adaptive crop: source edge ≈ target_out / scale so 2× and 4× fill similarly.
+_TARGET_OUT = 1024  # desired preview edge (px) after upscale
+_CROP_MIN = 64
+_CROP_MAX = 768  # keep preview GPU work modest
+_DEFAULT_SCALE = 4.0  # when scale unknown (legacy 256→1024)
 _DEBOUNCE_MS = 280
 _WIN_W = 900
 _WIN_H = 640
@@ -80,6 +85,9 @@ class SpandrelPreviewWindow(ctk.CTkToplevel):
         self._img_ox = 0
         self._img_oy = 0
         self._left_is_sr = False  # True when left pane is model A in A/B mode
+        self._active_crop_side = 256
+        self._last_model_scale = _DEFAULT_SCALE
+        self._adapting_crop = False
 
         self._status = ctk.StringVar(value="Ready")
         self._left_caption = ctk.StringVar(value="Original")
@@ -316,7 +324,7 @@ class SpandrelPreviewWindow(ctk.CTkToplevel):
         self._drag_last = (event.x_root, event.y_root)
         w, h = self._source.size
         cw, ch = self._area_size()
-        side = min(_CROP_SRC, w, h)
+        side = min(max(1, int(self._active_crop_side)), w, h)
         sens_x = side / max(cw, 1)
         sens_y = side / max(ch, 1)
         self._cx = max(0.0, min(1.0, self._cx - (dx * sens_x) / max(w, 1)))
@@ -443,10 +451,32 @@ class SpandrelPreviewWindow(ctk.CTkToplevel):
             self._set_status(f"Cannot open image: {exc}", kind="err")
             return False
 
+    def _preview_scale(self, target_scale: float | None) -> float:
+        """Scale used to size the source crop (user factor, else last/native)."""
+        if target_scale is not None and target_scale > 0:
+            return float(target_scale)
+        last = float(self._last_model_scale or 0)
+        return last if last > 0 else _DEFAULT_SCALE
+
+    def _target_out_edge(self) -> int:
+        """Aim for ~canvas short side, capped at ``_TARGET_OUT``."""
+        cw, ch = self._area_size()
+        if cw < 64 or ch < 64:
+            return _TARGET_OUT
+        return max(128, min(cw, ch, _TARGET_OUT))
+
+    def _compute_crop_side(self, scale: float) -> int:
+        assert self._source is not None
+        w, h = self._source.size
+        scale = max(0.5, float(scale))
+        side = int(round(self._target_out_edge() / scale))
+        side = max(_CROP_MIN, min(_CROP_MAX, side))
+        return max(1, min(side, w, h))
+
     def _crop_box(self) -> tuple[int, int, int, int]:
         assert self._source is not None
         w, h = self._source.size
-        side = min(_CROP_SRC, w, h)
+        side = min(max(1, int(self._active_crop_side)), w, h)
         cx = int(self._cx * w)
         cy = int(self._cy * h)
         x0 = max(0, min(w - side, cx - side // 2))
@@ -529,8 +559,11 @@ class SpandrelPreviewWindow(ctk.CTkToplevel):
         # Auto: 2nd model selected → A|B; otherwise Original|A (no toggle).
         use_other = bool(model_b) and model_b != model
 
+        used_scale = self._preview_scale(target_scale)
+        self._active_crop_side = self._compute_crop_side(used_scale)
         box = self._crop_box()
         crop = self._source.crop(box)
+        crop_side = box[2] - box[0]
 
         name_a = self._short_name(model)
         name_b = self._short_name(model_b) if model_b else ""
@@ -599,8 +632,28 @@ class SpandrelPreviewWindow(ctk.CTkToplevel):
                 self._busy = False
                 self._stop_timer()
                 if err or out_a is None:
+                    self._adapting_crop = False
                     self._set_status(err or "Preview failed.", kind="err")
                     return
+
+                # Remember native model scale for next adaptive crop (Model mode).
+                if scale_a and scale_a > 0:
+                    self._last_model_scale = float(scale_a)
+                elif crop_side > 0 and out_a.size[0] > 0:
+                    self._last_model_scale = float(out_a.size[0]) / float(crop_side)
+
+                # One-shot re-crop when Model mode guessed the wrong scale.
+                if (
+                    target_scale is None
+                    and self._last_model_scale > 0
+                    and not self._adapting_crop
+                ):
+                    ideal = self._compute_crop_side(self._last_model_scale)
+                    if abs(ideal - crop_side) >= 32:
+                        self._adapting_crop = True
+                        self.schedule_refresh(immediate=True)
+                        return
+                self._adapting_crop = False
 
                 self._emit_timing(model, t_a)
                 if compare_other and out_b is not None:
@@ -611,7 +664,7 @@ class SpandrelPreviewWindow(ctk.CTkToplevel):
                     self._paint_pair(out_a, out_b)
                     msg = (
                         f"A {t_a:.1f}s · B {t_b:.1f}s · "
-                        f"{box[2] - box[0]}×{box[3] - box[1]} → "
+                        f"{crop_side}×{crop_side} → "
                         f"{out_a.size[0]}×{out_a.size[1]}"
                     )
                 else:
@@ -626,7 +679,7 @@ class SpandrelPreviewWindow(ctk.CTkToplevel):
                         scale_note = f" ({scale_a}×)"
                     msg = (
                         f"Done in {t_a:.1f}s · "
-                        f"{box[2] - box[0]}×{box[3] - box[1]} → "
+                        f"{crop_side}×{crop_side} → "
                         f"{out_a.size[0]}×{out_a.size[1]}"
                         + scale_note
                     )

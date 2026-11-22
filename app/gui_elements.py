@@ -1787,7 +1787,11 @@ def build_edit_menu(app):
     # --- AI ---
     # Upscale… + presets first; SeedVR / Photo AI below a final separator.
     upscale_menu = tk.Menu(edit_menu, tearoff=0)
-    upscale_menu.add_command(label="Upscale…", command=_fast_upscale)
+    upscale_menu.add_command(
+        **_edit_add_accel(
+            {"label": "Upscale…", "command": _fast_upscale}, _hk, "fast_upscale"
+        )
+    )
     if hasattr(app, "add_upscale_favorites_to_menu"):
         try:
             app.add_upscale_favorites_to_menu(
@@ -1796,7 +1800,11 @@ def build_edit_menu(app):
         except Exception:
             pass
     upscale_menu.add_separator()
-    upscale_menu.add_command(label="SeedVR 2…", command=_upscale)
+    upscale_menu.add_command(
+        **_edit_add_accel(
+            {"label": "SeedVR 2…", "command": _upscale}, _hk, "seedvr_upscale"
+        )
+    )
     _topaz_ready = False
     try:
         from topaz_config import runtime_status as _topaz_rt
@@ -1810,8 +1818,18 @@ def build_edit_menu(app):
         state=("normal" if _topaz_ready else "disabled"),
     )
     edit_menu.add_cascade(label="Upscale", menu=upscale_menu)
-    edit_menu.add_command(label="RIFE Interpolate…", command=_rife)
-    edit_menu.add_command(label="Remove Background…", command=_remove_bg)
+    edit_menu.add_command(
+        **_edit_add_accel(
+            {"label": "RIFE Interpolate…", "command": _rife}, _hk, "rife_interpolate"
+        )
+    )
+    edit_menu.add_command(
+        **_edit_add_accel(
+            {"label": "Remove Background…", "command": _remove_bg},
+            _hk,
+            "remove_background",
+        )
+    )
     edit_menu.add_separator()
 
     # --- Tags / playlist / refresh ---
@@ -1835,7 +1853,11 @@ def build_edit_menu(app):
             "new_playlist",
         )
     )
-    edit_menu.add_command(label="Auto Tag", command=_auto_tag)
+    edit_menu.add_command(
+        **_edit_add_accel(
+            {"label": "Auto Tag", "command": _auto_tag}, _hk, "auto_tag"
+        )
+    )
     edit_menu.add_command(label="Refresh Thumbnail", command=_refresh_thumbs)
     edit_menu.add_separator()
 

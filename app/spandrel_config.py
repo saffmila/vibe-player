@@ -34,9 +34,9 @@ SPANDREL_MISSING_MESSAGE = (
 )
 WEIGHTS_MISSING_MESSAGE = (
     "No Spandrel upscale models found.\n\n"
-    f"Drop .pth / .safetensors files into:\n  {{path}}\n\n"
-    f"Browse models at {OPENMODELDB_URL}\n"
-    "(RealPLKSR, SPAN, DRCT, DAT, ESRGAN, …)."
+    "Use Install models… to download the built-in presets (~260 MB),\n"
+    f"or drop .pth / .safetensors files into:\n  {{path}}\n\n"
+    f"Browse more at {OPENMODELDB_URL}."
 )
 
 _IMAGE_EXTS = frozenset(ext.lower() for ext in IMAGE_FORMATS)
